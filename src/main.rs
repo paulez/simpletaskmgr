@@ -1,3 +1,62 @@
+use floem::{
+    reactive::{create_signal, SignalGet},
+    unit::UnitExt,
+    views::{
+        container, label, scroll, virtual_list, Decorators, VirtualDirection, VirtualItemSize,
+    },
+    IntoView,
+};
+use procfs::process;
+
+fn process_names() -> im::Vector<String> {
+    println!("Refreshing process list");
+    process::all_processes()
+        .expect("Can't read /proc")
+        .filter_map(|p| match p {
+            Ok(p) => Some(p),
+            Err(e) => match e {
+                procfs::ProcError::NotFound(_) => None,
+                procfs::ProcError::Io(_e, _path) => None,
+                x => {
+                    println!("Can't read process due to error {x:?}");
+                    None
+                }
+            },
+        })
+        .filter_map(|proc| match proc.status() {
+            Ok(status) => Some(status.name),
+            Err(e) => {
+                println!("Can't get process cmdline due to error {e:?}");
+                None
+            }
+        })
+        .collect()
+}
+
+fn app_view() -> impl IntoView {
+    let process_name_list = process_names();
+    let (process_name_list, _set_process_name_list) = create_signal(process_name_list);
+    container(
+        scroll(
+            virtual_list(
+                VirtualDirection::Vertical,
+                VirtualItemSize::Fixed(Box::new(|| 20.0)),
+                move || process_name_list.get(),
+                move |item| item.clone(),
+                move |item| label(move || item.to_string()).style(|s| s.height(20.0)),
+            )
+            .style(|s| s.flex_col().width_full()),
+        )
+        .style(|s| s.width(100.pct()).height(100.pct()).border(1.0)),
+    )
+    .style(|s| {
+        s.size(100.pct(), 100.pct())
+            .padding_vert(20.0)
+            .flex_col()
+            .items_center()
+    })
+}
+
 fn main() {
-    println!("Hello, world!");
+    floem::launch(app_view);
 }

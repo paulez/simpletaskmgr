@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+floem = "0.2.0"
+im = "15.1.0"
+procfs = "0.17.0"
