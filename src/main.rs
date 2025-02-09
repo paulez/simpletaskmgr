@@ -4,6 +4,7 @@ use floem::{
     action::exec_after,
     prelude::create_rw_signal,
     reactive::{create_effect, SignalGet, SignalTrack, SignalUpdate},
+    taffy::style_helpers::{auto, fr},
     unit::UnitExt,
     views::{
         container, h_stack, label, scroll, virtual_list, Decorators, Stack, VirtualDirection,
@@ -17,6 +18,7 @@ use procfs::process;
 struct Process {
     name: String,
     pid: i32,
+    ruid: u32,
 }
 
 impl IntoView for Process {
@@ -25,9 +27,15 @@ impl IntoView for Process {
     fn into_view(self) -> Self::V {
         h_stack((
             label(move || self.pid.to_string()),
+            label(move || self.ruid.to_string()),
             label(move || self.name.to_string()),
         ))
-        .style(|s| s.flex_row().gap(6))
+        .style(move |s| {
+            s.items_center()
+                .gap(6)
+                .grid()
+                .grid_template_columns(vec![auto(), fr(1.), auto()])
+        })
     }
 }
 
@@ -49,6 +57,7 @@ fn process_names() -> im::Vector<Process> {
             Ok(status) => Some(Process {
                 name: status.name,
                 pid: status.pid,
+                ruid: status.ruid,
             }),
             Err(e) => {
                 println!("Can't get process cmdline due to error {e:?}");
