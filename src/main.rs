@@ -1,5 +1,9 @@
+use std::time::Duration;
+
 use floem::{
-    reactive::{create_signal, SignalGet},
+    action::exec_after,
+    prelude::create_rw_signal,
+    reactive::{create_effect, SignalGet, SignalTrack, SignalUpdate},
     unit::UnitExt,
     views::{
         container, label, scroll, virtual_list, Decorators, VirtualDirection, VirtualItemSize,
@@ -9,7 +13,6 @@ use floem::{
 use procfs::process;
 
 fn process_names() -> im::Vector<String> {
-    println!("Refreshing process list");
     process::all_processes()
         .expect("Can't read /proc")
         .filter_map(|p| match p {
@@ -35,7 +38,16 @@ fn process_names() -> im::Vector<String> {
 
 fn app_view() -> impl IntoView {
     let process_name_list = process_names();
-    let (process_name_list, _set_process_name_list) = create_signal(process_name_list);
+    let process_name_list = create_rw_signal(process_name_list);
+    let tick = create_rw_signal(());
+    create_effect(move |_| {
+        tick.track();
+
+        exec_after(Duration::from_millis(1000), move |_| {
+            process_name_list.update(|l| *l = process_names());
+            tick.set(());
+        })
+    });
     container(
         scroll(
             virtual_list(
