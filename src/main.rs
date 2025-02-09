@@ -6,13 +6,31 @@ use floem::{
     reactive::{create_effect, SignalGet, SignalTrack, SignalUpdate},
     unit::UnitExt,
     views::{
-        container, label, scroll, virtual_list, Decorators, VirtualDirection, VirtualItemSize,
+        container, h_stack, label, scroll, virtual_list, Decorators, Stack, VirtualDirection,
+        VirtualItemSize,
     },
     IntoView,
 };
 use procfs::process;
 
-fn process_names() -> im::Vector<String> {
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct Process {
+    name: String,
+    pid: i32,
+}
+
+impl IntoView for Process {
+    type V = Stack;
+
+    fn into_view(self) -> Self::V {
+        h_stack((
+            label(move || self.pid.to_string()),
+            label(move || self.name.to_string()),
+        ))
+    }
+}
+
+fn process_names() -> im::Vector<Process> {
     process::all_processes()
         .expect("Can't read /proc")
         .filter_map(|p| match p {
@@ -27,7 +45,10 @@ fn process_names() -> im::Vector<String> {
             },
         })
         .filter_map(|proc| match proc.status() {
-            Ok(status) => Some(status.name),
+            Ok(status) => Some(Process {
+                name: status.name,
+                pid: status.pid,
+            }),
             Err(e) => {
                 println!("Can't get process cmdline due to error {e:?}");
                 None
@@ -55,7 +76,7 @@ fn app_view() -> impl IntoView {
                 VirtualItemSize::Fixed(Box::new(|| 20.0)),
                 move || process_name_list.get(),
                 move |item| item.clone(),
-                move |item| label(move || item.to_string()).style(|s| s.height(20.0)),
+                move |item| item.into_view().style(|s| s.height(20.0)),
             )
             .style(|s| s.flex_col().width_full()),
         )
