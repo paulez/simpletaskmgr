@@ -27,6 +27,7 @@ impl IntoView for Process {
             label(move || self.pid.to_string()),
             label(move || self.name.to_string()),
         ))
+        .style(|s| s.flex_row().gap(6))
     }
 }
 
