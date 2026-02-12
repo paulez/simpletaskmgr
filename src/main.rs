@@ -12,6 +12,7 @@ use floem::{
     },
     IntoView,
 };
+use users::{Users, UsersCache};
 use procfs::process;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -42,6 +43,7 @@ impl IntoView for Process {
 }
 
 fn process_names() -> im::Vector<Process> {
+    let cache = UsersCache::new();
     process::all_processes()
         .expect("Can't read /proc")
         .filter_map(|p| match p {
@@ -57,8 +59,11 @@ fn process_names() -> im::Vector<Process> {
         })
         .filter_map(|proc| match proc.status() {
             Ok(status) => {
-                let username = match users::get_user_by_uid(status.ruid) {
-                    Some(user) => user.name().to_string_lossy().to_string(),
+                let username = match cache.get_user_by_uid(status.ruid) {
+                    Some(user) => {
+                        let user_name: &std::ffi::OsStr = user.name();
+                        user_name.to_string_lossy().to_string()
+                    },
                     None => "unknown".to_string(),
                 };
                 Some(Process {
