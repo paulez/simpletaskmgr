@@ -19,6 +19,7 @@ struct Process {
     name: String,
     pid: i32,
     ruid: u32,
+    username: String,
 }
 
 impl IntoView for Process {
@@ -28,13 +29,14 @@ impl IntoView for Process {
         h_stack((
             label(move || self.pid.to_string()),
             label(move || self.ruid.to_string()),
+            label(move || self.username.clone()),
             label(move || self.name.to_string()),
         ))
         .style(move |s| {
             s.items_center()
                 .gap(6)
                 .grid()
-                .grid_template_columns(vec![auto(), fr(1.), auto()])
+                .grid_template_columns(vec![auto(), auto(), fr(1.), auto()])
         })
     }
 }
@@ -54,13 +56,20 @@ fn process_names() -> im::Vector<Process> {
             },
         })
         .filter_map(|proc| match proc.status() {
-            Ok(status) => Some(Process {
-                name: status.name,
-                pid: status.pid,
-                ruid: status.ruid,
-            }),
+            Ok(status) => {
+                let username = match users::get_user_by_uid(status.ruid) {
+                    Some(user) => user.name().to_string_lossy().to_string(),
+                    None => "unknown".to_string(),
+                };
+                Some(Process {
+                    name: status.name,
+                    pid: status.pid,
+                    ruid: status.ruid,
+                    username,
+                })
+            }
             Err(e) => {
-                println!("Can't get process cmdline due to error {e:?}");
+                println!("Can't get process status due to error {e:?}");
                 None
             }
         })
