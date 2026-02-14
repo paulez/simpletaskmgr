@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::time::Duration;
 
 use floem::{
@@ -12,17 +13,31 @@ use floem::{
     IntoView,
 };
 
+use simpletaskmgr::cpu_tracker::CpuTracker;
+
 fn app_view() -> impl IntoView {
-    let process_name_list = simpletaskmgr::process_names();
-    let process_name_list = create_rw_signal(process_name_list);
+    let process_name_list = create_rw_signal(simpletaskmgr::process_names());
     let tick = create_rw_signal(());
+    let cpu_tracker = RefCell::new(CpuTracker::new());
 
     create_effect(move |_| {
         tick.track();
 
+        // Update inside the effect to avoid moving issues
+        let cpu_tracker_clone = cpu_tracker.clone();
+        let process_name_list_clone = process_name_list.clone();
+
         exec_after(Duration::from_millis(1000), move |_| {
-            process_name_list.update(|l| *l = simpletaskmgr::process_names());
-            tick.set(());
+            // Update process list
+            let mut processes = simpletaskmgr::process_names();
+            cpu_tracker_clone
+                .borrow_mut()
+                .update(&mut processes);
+
+            // Sort by CPU usage (highest first)
+            processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
+
+            process_name_list_clone.update(|l| *l = processes);
         })
     });
 
