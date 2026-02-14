@@ -1,5 +1,5 @@
-pub use users::{Users, UsersCache};
 pub use procfs::process;
+pub use users::{Users, UsersCache};
 
 use floem::views::{Decorators, Stack};
 
@@ -26,13 +26,7 @@ impl std::hash::Hash for Process {
 }
 
 impl Process {
-    pub fn new(
-        name: String,
-        pid: i32,
-        ruid: u32,
-        username: String,
-        cpu_percent: f64,
-    ) -> Self {
+    pub fn new(name: String, pid: i32, ruid: u32, username: String, cpu_percent: f64) -> Self {
         Self {
             name,
             pid,
@@ -64,23 +58,23 @@ impl floem::IntoView for Process {
             floem::views::label(move || name.clone()),
         ))
         .style(move |s| {
-            s.items_center()
-                .gap(6)
-                .grid()
-                .grid_template_columns(vec![
-                    floem::taffy::style_helpers::auto(),
-                    floem::taffy::style_helpers::auto(),
-                    floem::taffy::style_helpers::fr(1.),
-                    floem::taffy::style_helpers::auto(),
-                    floem::taffy::style_helpers::auto(),
-                ])
+            s.items_center().gap(6).grid().grid_template_columns(vec![
+                floem::taffy::style_helpers::auto(),
+                floem::taffy::style_helpers::auto(),
+                floem::taffy::style_helpers::fr(1.),
+                floem::taffy::style_helpers::auto(),
+                floem::taffy::style_helpers::auto(),
+            ])
         })
     }
 }
 
 // ProcessView is only used for GUI display
 #[cfg(not(test))]
-use floem::{taffy::style_helpers::{auto, fr}, views::{h_stack, label}};
+use floem::{
+    taffy::style_helpers::{auto, fr},
+    views::{h_stack, label},
+};
 
 #[cfg(not(test))]
 impl Process {
@@ -96,16 +90,26 @@ impl Process {
             label(move || name.clone()),
         ))
         .style(|s| {
-            s.items_center()
-                .gap(6)
-                .grid()
-                .grid_template_columns(vec![auto(), auto(), fr(1.), auto()])
+            s.items_center().gap(6).grid().grid_template_columns(vec![
+                auto(),
+                auto(),
+                fr(1.),
+                auto(),
+            ])
         })
     }
 }
 
-pub fn process_names() -> im::Vector<Process> {
+pub enum UserFilter {
+    Current,
+    All,
+}
+
+pub fn process_names(filter: UserFilter) -> im::Vector<Process> {
     let cache = UsersCache::new();
+    let current_uid = cache.get_current_uid();
+    let cache = UsersCache::new();
+
     process::all_processes()
         .expect("Can't read /proc")
         .filter_map(|p| match p {
@@ -122,6 +126,11 @@ pub fn process_names() -> im::Vector<Process> {
         .filter_map(|proc| {
             let uid = proc.uid().expect("Can't get process UID");
             let pid = proc.pid();
+
+            if matches!(filter, UserFilter::Current) && uid != current_uid {
+                return None;
+            }
+
             match proc.stat() {
                 Ok(stat) => {
                     let cpu_percent = 0.0;

@@ -6,17 +6,14 @@ use floem::{
     prelude::create_rw_signal,
     reactive::{create_effect, SignalGet, SignalTrack, SignalUpdate},
     unit::UnitExt,
-    views::{
-        container, scroll, virtual_list, Decorators, VirtualDirection,
-        VirtualItemSize,
-    },
+    views::{container, scroll, virtual_list, Decorators, VirtualDirection, VirtualItemSize},
     IntoView,
 };
 
-use simpletaskmgr::cpu_tracker::CpuTracker;
+use simpletaskmgr::{cpu_tracker::CpuTracker, UserFilter};
 
 fn app_view() -> impl IntoView {
-    let process_name_list = create_rw_signal(simpletaskmgr::process_names());
+    let process_name_list = create_rw_signal(simpletaskmgr::process_names(UserFilter::Current));
     let tick = create_rw_signal(());
     let cpu_tracker = RefCell::new(CpuTracker::new());
 
@@ -29,10 +26,8 @@ fn app_view() -> impl IntoView {
 
         exec_after(Duration::from_millis(1000), move |_| {
             // Update process list
-            let mut processes = simpletaskmgr::process_names();
-            cpu_tracker_clone
-                .borrow_mut()
-                .update(&mut processes);
+            let mut processes = simpletaskmgr::process_names(UserFilter::Current);
+            cpu_tracker_clone.borrow_mut().update(&mut processes);
 
             // Sort by CPU usage (highest first)
             processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
