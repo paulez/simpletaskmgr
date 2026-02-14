@@ -106,7 +106,7 @@ impl Process {
 
 pub fn process_names() -> im::Vector<Process> {
     let cache = UsersCache::new();
-    let mut processes = process::all_processes()
+    process::all_processes()
         .expect("Can't read /proc")
         .filter_map(|p| match p {
             Ok(p) => Some(p),
@@ -147,14 +147,7 @@ pub fn process_names() -> im::Vector<Process> {
                 }
             }
         })
-        .collect();
-
-    // Let the CPU tracker initialize with current process data
-    // This allows it to start tracking CPU usage immediately
-    let mut cpu_tracker = cpu_tracker::CpuTracker::new();
-    cpu_tracker.initialize(&mut processes);
-
-    processes
+        .collect()
 }
 
 #[cfg(test)]

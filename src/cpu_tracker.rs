@@ -27,54 +27,6 @@ impl CpuTracker {
         }
     }
 
-    pub fn initialize(&mut self, processes: &mut Vector<Process>) {
-        // Collect initial CPU time samples for all processes
-        let mut current_samples: HashMap<i32, CpuTime> = HashMap::new();
-
-        for process in processes.iter() {
-            if let Ok(all_processes) = process::all_processes() {
-                for proc in all_processes {
-                    if let Ok(p) = proc {
-                        if p.pid() == process.pid {
-                            if let Ok(stat) = p.stat() {
-                                current_samples.insert(
-                                    process.pid,
-                                    CpuTime {
-                                        user: stat.utime as f64,
-                                        nice: stat.stime as f64,
-                                        system: stat.stime as f64,
-                                        idle: 0.0,
-                                    },
-                                );
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Store initial samples for each process
-        for process in processes.iter() {
-            if let Some(current_times) = current_samples.get(&process.pid) {
-                let samples = self.process_samples.entry(process.pid).or_insert_with(Vec::new);
-
-                // Add initial sample
-                samples.push(CpuTime {
-                    user: current_times.user,
-                    nice: current_times.nice,
-                    system: current_times.system,
-                    idle: current_times.idle,
-                });
-
-                // Keep only last 5 samples
-                if samples.len() > 5 {
-                    samples.remove(0);
-                }
-            }
-        }
-    }
-
     pub fn update(&mut self, processes: &mut Vector<Process>) {
         let now = Instant::now();
 
