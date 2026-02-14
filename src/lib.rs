@@ -55,13 +55,13 @@ impl floem::IntoView for Process {
         let ruid = self.ruid;
         let username = self.username.clone();
         let cpu_percent_str_val = self.cpu_percent_str().clone();
-        let cpu_percent_str_val2 = cpu_percent_str_val.clone();
+        let name = self.name.clone();
         floem::views::h_stack((
             floem::views::label(move || pid.to_string()),
             floem::views::label(move || ruid.to_string()),
             floem::views::label(move || username.clone()),
             floem::views::label(move || cpu_percent_str_val.clone()),
-            floem::views::label(move || cpu_percent_str_val2.clone()),
+            floem::views::label(move || name.clone()),
         ))
         .style(move |s| {
             s.items_center()
@@ -86,7 +86,6 @@ use floem::{taffy::style_helpers::{auto, fr}, views::{h_stack, label}};
 impl Process {
     pub fn into_view(self) -> floem::views::Stack {
         let cpu_percent_str_val = self.cpu_percent_str().clone();
-        let cpu_percent_str_val2 = cpu_percent_str_val.clone();
         let ruid = self.ruid;
         let username = self.username.clone();
         let name = self.name.clone();
@@ -95,20 +94,19 @@ impl Process {
             label(move || ruid.to_string()),
             label(move || username.clone()),
             label(move || name.clone()),
-            label(move || cpu_percent_str_val2.clone()),
         ))
         .style(|s| {
             s.items_center()
                 .gap(6)
                 .grid()
-                .grid_template_columns(vec![auto(), auto(), fr(1.), auto(), auto()])
+                .grid_template_columns(vec![auto(), auto(), fr(1.), auto()])
         })
     }
 }
 
 pub fn process_names() -> im::Vector<Process> {
     let cache = UsersCache::new();
-    process::all_processes()
+    let mut processes = process::all_processes()
         .expect("Can't read /proc")
         .filter_map(|p| match p {
             Ok(p) => Some(p),
@@ -126,7 +124,7 @@ pub fn process_names() -> im::Vector<Process> {
             let pid = proc.pid();
             match proc.stat() {
                 Ok(stat) => {
-                    let cpu_percent = 0.0; // Will implement actual CPU tracking later
+                    let cpu_percent = 0.0;
 
                     let username = match cache.get_user_by_uid(uid) {
                         Some(user) => {
@@ -149,7 +147,14 @@ pub fn process_names() -> im::Vector<Process> {
                 }
             }
         })
-        .collect()
+        .collect();
+
+    // Let the CPU tracker initialize with current process data
+    // This allows it to start tracking CPU usage immediately
+    let mut cpu_tracker = cpu_tracker::CpuTracker::new();
+    cpu_tracker.initialize(&mut processes);
+
+    processes
 }
 
 #[cfg(test)]
