@@ -1,9 +1,9 @@
+use std::cell::RefCell;
 use std::time::Duration;
 
 use floem::action::exec_after;
 use floem::prelude::container;
 use floem::prelude::create_rw_signal;
-use floem::prelude::label;
 use floem::prelude::scroll;
 use floem::prelude::virtual_list;
 use floem::prelude::SignalGet;
@@ -15,42 +15,28 @@ use floem::unit::UnitExt;
 use floem::views::Decorators;
 use floem::IntoView;
 
-use procfs::process;
+use simpletaskmgr::{cpu_tracker::CpuTracker, UserFilter};
 
 fn app_view() -> impl IntoView {
     let process_list_signal = create_rw_signal(im::vector![]);
+    let cpu_tracker = RefCell::new(CpuTracker::new());
 
     create_effect(move |_| {
+        let cpu_tracker = cpu_tracker.clone();
         exec_after(Duration::from_millis(1000), move |_| {
-            let mut processes = im::vector![];
+            // Get process list using process_names() from lib.rs
+            let mut processes = simpletaskmgr::process_names(UserFilter::Current);
 
-            if let Ok(proc_results) = process::all_processes() {
-                for proc_result in proc_results {
-                    if let Ok(proc) = proc_result {
-                        if let Ok(stat) = proc.stat() {
-                            let cmdline_vec = if let Ok(cmdline) = proc.cmdline() {
-                                cmdline
-                            } else {
-                                vec![]
-                            };
-                            let name = cmdline_vec
-                                .first()
-                                .map(|s| s.trim_matches(char::from(0)))
-                                .unwrap_or("-");
+            // Update CPU usage for each process
+            let mut process_map: std::collections::HashMap<i32, simpletaskmgr::Process> =
+                processes.iter().map(|p| (p.pid, p.clone())).collect();
+            cpu_tracker.borrow_mut().update_process_cpu_usage(&mut process_map);
 
-                            let process = simpletaskmgr::Process {
-                                name: stat.comm.to_string(),
-                                pid: stat.pid,
-                                ruid: 0,
-                                username: "unknown".to_string(),
-                                cpu_percent: 0.0,
-                            };
+            // Convert back to vector
+            processes = process_map.values().cloned().collect();
 
-                            processes.push_back(process);
-                        }
-                    }
-                }
-            }
+            // Sort by CPU usage (highest first)
+            processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
 
             process_list_signal.set(processes);
         });
