@@ -42,8 +42,8 @@ fn app_view() -> impl IntoView {
         });
     });
 
-    container(
-        scroll(
+    scroll(
+        container(
             virtual_list(
                 VirtualDirection::Vertical,
                 VirtualItemSize::Fixed(Box::new(|| 20.0)),
@@ -53,14 +53,8 @@ fn app_view() -> impl IntoView {
             )
             .style(|s| s.flex_col().width_full()),
         )
-        .style(|s| s.width(100_i32.pct()).height(100_i32.pct()).border(1.0)),
+        .style(|s| s.size(100_i32.pct(), 100_i32.pct()).border(1.0)),
     )
-    .style(|s| {
-        s.size(100.pct(), 100.pct())
-            .padding_vert(20.0)
-            .flex_col()
-            .items_center()
-    })
 }
 
 fn main() {
