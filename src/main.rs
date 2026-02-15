@@ -1,39 +1,59 @@
-use std::cell::RefCell;
 use std::time::Duration;
 
-use floem::{
-    action::exec_after,
-    prelude::create_rw_signal,
-    reactive::{create_effect, SignalGet, SignalTrack, SignalUpdate},
-    unit::UnitExt,
-    views::{container, scroll, virtual_list, Decorators, VirtualDirection, VirtualItemSize},
-    IntoView,
-};
+use floem::action::exec_after;
+use floem::prelude::container;
+use floem::prelude::create_rw_signal;
+use floem::prelude::label;
+use floem::prelude::scroll;
+use floem::prelude::virtual_list;
+use floem::prelude::SignalGet;
+use floem::prelude::SignalUpdate;
+use floem::prelude::VirtualDirection;
+use floem::prelude::VirtualItemSize;
+use floem::reactive::create_effect;
+use floem::unit::UnitExt;
+use floem::views::Decorators;
+use floem::IntoView;
 
-use simpletaskmgr::{cpu_tracker::CpuTracker, UserFilter};
+use procfs::process;
 
 fn app_view() -> impl IntoView {
-    let process_name_list = create_rw_signal(simpletaskmgr::process_names(UserFilter::Current));
-    let tick = create_rw_signal(());
-    let cpu_tracker = RefCell::new(CpuTracker::new());
+    let process_list_signal = create_rw_signal(im::vector![]);
 
     create_effect(move |_| {
-        tick.track();
-
-        // Update inside the effect to avoid moving issues
-        let cpu_tracker_clone = cpu_tracker.clone();
-        let process_name_list_clone = process_name_list.clone();
-
         exec_after(Duration::from_millis(1000), move |_| {
-            // Update process list
-            let mut processes = simpletaskmgr::process_names(UserFilter::Current);
-            cpu_tracker_clone.borrow_mut().update(&mut processes);
+            let mut processes = im::vector![];
 
-            // Sort by CPU usage (highest first)
-            processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
+            if let Ok(proc_results) = process::all_processes() {
+                for proc_result in proc_results {
+                    if let Ok(proc) = proc_result {
+                        if let Ok(stat) = proc.stat() {
+                            let cmdline_vec = if let Ok(cmdline) = proc.cmdline() {
+                                cmdline
+                            } else {
+                                vec![]
+                            };
+                            let name = cmdline_vec
+                                .first()
+                                .map(|s| s.trim_matches(char::from(0)))
+                                .unwrap_or("-");
 
-            process_name_list_clone.update(|l| *l = processes);
-        })
+                            let process = simpletaskmgr::Process {
+                                name: stat.comm.to_string(),
+                                pid: stat.pid,
+                                ruid: 0,
+                                username: "unknown".to_string(),
+                                cpu_percent: 0.0,
+                            };
+
+                            processes.push_back(process);
+                        }
+                    }
+                }
+            }
+
+            process_list_signal.set(processes);
+        });
     });
 
     container(
@@ -41,13 +61,13 @@ fn app_view() -> impl IntoView {
             virtual_list(
                 VirtualDirection::Vertical,
                 VirtualItemSize::Fixed(Box::new(|| 20.0)),
-                move || process_name_list.get(),
-                move |item| item.clone(),
-                move |item| item.into_view().style(|s| s.height(20.0)),
+                move || process_list_signal.get(),
+                move |item: &simpletaskmgr::Process| item.pid as i64,
+                move |item: simpletaskmgr::Process| item.into_view(),
             )
             .style(|s| s.flex_col().width_full()),
         )
-        .style(|s| s.width(100.pct()).height(100.pct()).border(1.0)),
+        .style(|s| s.width(100_i32.pct()).height(100_i32.pct()).border(1.0)),
     )
     .style(|s| {
         s.size(100.pct(), 100.pct())
