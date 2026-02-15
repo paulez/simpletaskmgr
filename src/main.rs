@@ -44,14 +44,17 @@ fn app_view() -> impl IntoView {
 
     container(
         scroll(
-            virtual_list(
-                VirtualDirection::Vertical,
-                VirtualItemSize::Fixed(Box::new(|| 20.0)),
-                move || process_list_signal.get(),
-                move |item: &simpletaskmgr::Process| item.pid as i64,
-                move |item: simpletaskmgr::Process| item.into_view(),
+            container(
+                virtual_list(
+                    VirtualDirection::Vertical,
+                    VirtualItemSize::Fixed(Box::new(|| 20.0)),
+                    move || process_list_signal.get(),
+                    move |item: &simpletaskmgr::Process| item.pid as i64,
+                    move |item: simpletaskmgr::Process| item.into_view(),
+                )
+                .style(|s| s.width_full()),
             )
-            .style(|s| s.width_full().height_full()),
+            .style(|s| s.width(800_i32.pct()).height(600_i32.pct())),
         )
         .style(|s| s.size(100_i32.pct(), 100_i32.pct())),
     )
