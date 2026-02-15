@@ -42,8 +42,8 @@ fn app_view() -> impl IntoView {
         });
     });
 
-    scroll(
-        container(
+    container(
+        scroll(
             virtual_list(
                 VirtualDirection::Vertical,
                 VirtualItemSize::Fixed(Box::new(|| 20.0)),
@@ -51,9 +51,9 @@ fn app_view() -> impl IntoView {
                 move |item: &simpletaskmgr::Process| item.pid as i64,
                 move |item: simpletaskmgr::Process| item.into_view(),
             )
-            .style(|s| s.flex_col().width_full()),
+            .style(|s| s.width_full().height_full()),
         )
-        .style(|s| s.size(100_i32.pct(), 100_i32.pct()).border(1.0)),
+        .style(|s| s.size(100_i32.pct(), 100_i32.pct())),
     )
 }
 
