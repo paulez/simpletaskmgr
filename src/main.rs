@@ -38,22 +38,6 @@ fn process_detail_view(_pid: i32) -> Box<dyn View> {
     }))
 }
 
-fn process_list_view(processes: Vec<simpletaskmgr::Process>) -> Box<dyn View> {
-    let processes = create_rw_signal(processes);
-
-    Box::new(container(
-        scroll(
-            dyn_stack(
-                move || processes.get(),
-                move |p| p.pid,
-                move |p| process_item_view(p.pid as i64, p.name.clone())
-            )
-        )
-        .style(|s| s.size_full())
-    )
-    .style(|s| s.size_full().height(600.0)))
-}
-
 fn app_view() -> Box<dyn View> {
     let process_list_signal = create_rw_signal(vec![]);
     let cpu_tracker = RefCell::new(CpuTracker::new());
@@ -87,9 +71,16 @@ fn app_view() -> Box<dyn View> {
         Box::new(process_detail_view(selected_pid.get()))
     } else {
         Box::new(container(
-            process_list_view(process_list_signal.get())
+            scroll(
+                dyn_stack(
+                    move || process_list_signal.get(),
+                    move |p: &simpletaskmgr::Process| p.pid,
+                    move |p| process_item_view(p.pid as i64, p.name.clone())
+                )
+            )
+            .style(|s| s.size_full())
         )
-        .style(|s| s.size_full().flex_col()))
+        .style(|s| s.size_full().height(600.0).flex_col()))
     }
 }
 
