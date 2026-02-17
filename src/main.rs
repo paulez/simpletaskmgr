@@ -46,10 +46,9 @@ fn app_view() -> Box<dyn View> {
 
     create_effect(move |_| {
         let cpu_tracker = cpu_tracker.clone();
-        let mut processes = process_list_signal.get();
         exec_after(Duration::from_millis(1000), move |_| {
             // Get process list using process_names() from lib.rs
-            let _processes = simpletaskmgr::process_names(UserFilter::Current);
+            let processes = simpletaskmgr::process_names(UserFilter::Current);
 
             // Update CPU usage for each process
             let mut process_map: std::collections::HashMap<i32, simpletaskmgr::Process> =
@@ -57,12 +56,12 @@ fn app_view() -> Box<dyn View> {
             cpu_tracker.borrow_mut().update_process_cpu_usage(&mut process_map);
 
             // Convert back to vector
-            processes = process_map.values().cloned().collect();
+            let mut processes: Vec<simpletaskmgr::Process> = process_map.values().cloned().collect();
 
             // Sort by CPU usage (highest first)
             processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
 
-            process_list_signal.set(processes.iter().cloned().collect());
+            process_list_signal.set(processes);
         });
     });
 
