@@ -5,28 +5,53 @@ use floem::action::exec_after;
 use floem::prelude::{create_rw_signal, SignalGet, SignalUpdate};
 use floem::reactive::create_effect;
 use floem::unit::UnitExt;
-use floem::views::{container, scroll, virtual_list, Decorators, VirtualDirection, VirtualItemSize};
+use floem::views::{container, scroll, virtual_list, Decorators, VirtualDirection, VirtualItemSize, h_stack, label, v_stack};
 use floem::{IntoView, View};
 use im::Vector;
+use simpletaskmgr::{cpu_tracker::CpuTracker, UserFilter, Process};
 
-use simpletaskmgr::{cpu_tracker::CpuTracker, UserFilter};
-
-fn process_item_view(process: simpletaskmgr::Process) -> Box<dyn View> {
-    let pid = process.pid;
+fn process_item_view(process: Process, on_click: impl Fn(Process) + 'static) -> Box<dyn View> {
     let process_clone = process.clone();
     Box::new(container(
-        process_clone.into_view()
+        process.into_view()
             .style(move |s| s.height(20.0).gap(10).items_center())
     )
     .on_click(move |_| {
-        // Show process detail dialog
-        simpletaskmgr::show_process_detail(pid);
+        on_click(process_clone.clone());
         floem::event::EventPropagation::Continue
     }))
 }
 
+fn process_detail_view(process: Process) -> Box<dyn View> {
+    let name = process.name.clone();
+    let pid = process.pid;
+    let ruid = process.ruid;
+    let username = process.username.clone();
+    let cpu_percent = process.cpu_percent;
+
+    Box::new(container(
+        scroll(
+            container(
+                v_stack((
+                    label(move || "=== Process Details ==="),
+                    label(move || format!("PID: {}", pid)),
+                    label(move || format!("Name: {}", name)),
+                    label(move || format!("UID: {}", ruid)),
+                    label(move || format!("Username: {}", username)),
+                    label(move || format!("CPU Usage: {:.1}%", cpu_percent)),
+                ))
+                .style(move |s: floem::style::Style| s.flex_col().gap(8))
+            )
+            .style(move |s| s.padding(20.0))
+        )
+        .style(move |s| s.width(100_i32.pct()))
+    )
+    .style(move |s| s.width(100_i32.pct())))
+}
+
 fn app_view() -> Box<dyn View> {
     let process_list_signal = create_rw_signal(Vector::new());
+    let selected_process = create_rw_signal(None);
     let cpu_tracker = RefCell::new(CpuTracker::new());
 
     create_effect(move |_| {
@@ -50,25 +75,50 @@ fn app_view() -> Box<dyn View> {
         });
     });
 
-    Box::new(container(
-        scroll(
-            virtual_list(
-                VirtualDirection::Vertical,
-                VirtualItemSize::Fixed(Box::new(|| 20.0)),
-                move || process_list_signal.get(),
-                move |item| item.clone(),
-                move |item| process_item_view(item)
+    let main_view = container(match selected_process.get() {
+        Some(process) => container(
+            h_stack((
+                scroll(
+                    virtual_list(
+                        VirtualDirection::Vertical,
+                        VirtualItemSize::Fixed(Box::new(|| 20.0)),
+                        move || process_list_signal.get(),
+                        move |item| item.clone(),
+                        move |item| process_item_view(item, move |p| selected_process.set(Some(p)))
+                    )
+                    .style(|s| s.width(50_i32.pct()).height(100_i32.pct()))
+                )
+                .style(|s| s.width(50_i32.pct()).height(100_i32.pct())),
+                scroll(
+                    process_detail_view(process)
+                )
+                .style(|s| s.width(50_i32.pct()).height(100_i32.pct()))
+            ))
+            .style(|s| s.size(100_i32.pct(), 100_i32.pct()))
+        ),
+
+        None => container(
+            scroll(
+                virtual_list(
+                    VirtualDirection::Vertical,
+                    VirtualItemSize::Fixed(Box::new(|| 20.0)),
+                    move || process_list_signal.get(),
+                    move |item| item.clone(),
+                    move |item| process_item_view(item, move |p| selected_process.set(Some(p)))
+                )
+                .style(|s| s.width(100_i32.pct()).height(100_i32.pct()))
             )
-            .style(|s| s.flex_col().width_full())
-        )
-        .style(|s| s.width(100_i32.pct()).height(100_i32.pct()).border(1.0))
-    )
-    .style(|s| {
-        s.size(100_i32.pct(), 100_i32.pct())
-            .padding_vert(20.0)
-            .flex_col()
-            .items_center()
-    }))
+            .style(|s| s.width(100_i32.pct()).height(100_i32.pct()))
+        ),
+    });
+
+    Box::new(main_view
+        .style(|s| {
+            s.size(100_i32.pct(), 100_i32.pct())
+                .padding_vert(20.0)
+                .flex_col()
+                .items_center()
+        }))
 }
 
 fn main() {
