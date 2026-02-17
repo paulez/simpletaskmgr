@@ -105,6 +105,67 @@ pub enum UserFilter {
     All,
 }
 
+pub fn get_process(pid: i32) -> Option<Process> {
+    process::all_processes()
+        .expect("Can't read /proc")
+        .filter_map(|p| match p {
+            Ok(p) if p.pid() == pid => Some(p),
+            _ => None,
+        })
+        .filter_map(|proc| {
+            let uid = proc.uid().expect("Can't get process UID");
+            let pid = proc.pid();
+
+            match proc.stat() {
+                Ok(stat) => {
+                    let cpu_percent = 0.0;
+
+                    let username = match users::UsersCache::new().get_user_by_uid(uid) {
+                        Some(user) => {
+                            let name: &std::ffi::OsStr = user.name();
+                            name.to_string_lossy().to_string()
+                        }
+                        None => "unknown".to_string(),
+                    };
+                    Some(Process {
+                        name: stat.comm.to_string(),
+                        pid,
+                        ruid: uid,
+                        username,
+                        cpu_percent,
+                    })
+                }
+                Err(e) => {
+                    println!("Can't get process stat due to error {e:?}");
+                    None
+                }
+            }
+        })
+        .next()
+}
+
+// Helper functions for GUI navigation
+pub fn show_process_detail(pid: i32) {
+    if let Some(process) = get_process(pid) {
+        // In a real implementation, this would open a modal dialog
+        // For now, we'll just print to the console
+        println!("\n=== Process Details ===");
+        println!("PID: {}", process.pid);
+        println!("Name: {}", process.name);
+        println!("UID: {}", process.ruid);
+        println!("Username: {}", process.username);
+        println!("CPU Usage: {:.1}%", process.cpu_percent);
+        println!("======================\n");
+    } else {
+        println!("Process with PID {} not found\n", pid);
+    }
+}
+
+pub fn close_process_detail() {
+    // In a real implementation, this would close any open modal
+    println!("Process detail dialog closed\n");
+}
+
 pub fn process_names(filter: UserFilter) -> im::Vector<Process> {
     let cache = UsersCache::new();
     let current_uid = cache.get_current_uid();
