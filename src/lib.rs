@@ -69,37 +69,6 @@ impl floem::IntoView for Process {
     }
 }
 
-// ProcessView is only used for GUI display
-#[cfg(not(test))]
-use floem::{
-    taffy::style_helpers::{auto, fr},
-    views::{h_stack, label},
-};
-
-#[cfg(not(test))]
-impl Process {
-    pub fn into_view(self) -> floem::views::Stack {
-        let cpu_percent_str_val = self.cpu_percent_str().clone();
-        let ruid = self.ruid;
-        let username = self.username.clone();
-        let name = self.name.clone();
-        h_stack((
-            label(move || cpu_percent_str_val.clone()),
-            label(move || ruid.to_string()),
-            label(move || username.clone()),
-            label(move || name.clone()),
-        ))
-        .style(|s| {
-            s.items_center().gap(6).grid().grid_template_columns(vec![
-                auto(),
-                auto(),
-                fr(1.),
-                auto(),
-            ])
-        })
-    }
-}
-
 pub enum UserFilter {
     Current,
     All,
