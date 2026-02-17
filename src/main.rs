@@ -2,47 +2,35 @@ use std::cell::RefCell;
 use std::time::Duration;
 
 use floem::action::exec_after;
-use floem::prelude::{create_rw_signal, SignalUpdate, dyn_stack};
-use floem::reactive::{create_effect, SignalGet};
-use floem::views::{container, scroll, text, Decorators};
+use floem::prelude::{create_rw_signal, SignalGet, SignalUpdate};
+use floem::reactive::create_effect;
+use floem::unit::UnitExt;
+use floem::views::{container, h_stack, label, scroll, virtual_list, Decorators, VirtualDirection, VirtualItemSize};
 use floem::View;
+use im::Vector;
 
 use simpletaskmgr::{cpu_tracker::CpuTracker, UserFilter};
 
-fn process_item_view(pid: i64, name: String) -> Box<dyn View> {
+fn process_item_view(pid: i32, ruid: u32, username: String, name: String) -> Box<dyn View> {
     Box::new(container(
-        text(format!("PID: {}  {}", pid, name))
+        h_stack((
+            label(move || pid.to_string()),
+            label(move || ruid.to_string()),
+            label(move || username.clone()),
+            label(move || name.clone()),
+        ))
+        .style(|s| s.height(20.0).gap(10).items_center())
     )
-    .style(|s| s.height(20.0).padding_left(10.0).padding_right(10.0))
     .on_click(move |_| {
         // Show process detail dialog
-        simpletaskmgr::show_process_detail(pid as i32);
-        floem::event::EventPropagation::Continue
-    }))
-}
-
-fn process_detail_view(_pid: i32) -> Box<dyn View> {
-    Box::new(container(
-        scroll(
-            container(
-                text("Process Details")
-            )
-        )
-        .style(|s| s.size_full())
-    )
-    .style(|s| s.size_full().flex_col().items_center().padding_vert(40.0))
-    .on_click(|_| {
-        // Close detail view
-        simpletaskmgr::close_process_detail();
+        simpletaskmgr::show_process_detail(pid);
         floem::event::EventPropagation::Continue
     }))
 }
 
 fn app_view() -> Box<dyn View> {
-    let process_list_signal = create_rw_signal(vec![]);
+    let process_list_signal = create_rw_signal(Vector::new());
     let cpu_tracker = RefCell::new(CpuTracker::new());
-    let show_details = create_rw_signal(false);
-    let selected_pid = create_rw_signal(0);
 
     create_effect(move |_| {
         let cpu_tracker = cpu_tracker.clone();
@@ -61,26 +49,31 @@ fn app_view() -> Box<dyn View> {
             // Sort by CPU usage (highest first)
             processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
 
-            process_list_signal.set(processes);
+            process_list_signal.set(processes.into_iter().collect());
         });
     });
 
-    // Conditionally render based on show_details
-    if show_details.get() {
-        Box::new(process_detail_view(selected_pid.get()))
-    } else {
-        Box::new(container(
-            scroll(
-                dyn_stack(
-                    move || process_list_signal.get(),
-                    move |p: &simpletaskmgr::Process| p.pid,
-                    move |p| process_item_view(p.pid as i64, p.name.clone())
-                )
+    Box::new(container(
+        scroll(
+            virtual_list(
+                VirtualDirection::Vertical,
+                VirtualItemSize::Fixed(Box::new(|| 20.0)),
+                move || process_list_signal.get(),
+                move |item| item.clone(),
+                move |item| {
+                    process_item_view(item.pid, item.ruid, item.username.clone(), item.name.clone())
+                }
             )
-            .style(|s| s.size_full())
+            .style(|s| s.flex_col().width_full())
         )
-        .style(|s| s.size_full().height(600.0).flex_col()))
-    }
+        .style(|s| s.width(100_i32.pct()).height(100_i32.pct()).border(1.0))
+    )
+    .style(|s| {
+        s.size(100_i32.pct(), 100_i32.pct())
+            .padding_vert(20.0)
+            .flex_col()
+            .items_center()
+    }))
 }
 
 fn main() {
