@@ -11,9 +11,10 @@ use im::Vector;
 
 use simpletaskmgr::{cpu_tracker::CpuTracker, UserFilter};
 
-fn process_item_view(pid: i32, ruid: u32, username: String, name: String) -> Box<dyn View> {
+fn process_item_view(pid: i32, ruid: u32, username: String, cpu_percent: f64, name: String) -> Box<dyn View> {
     Box::new(container(
         h_stack((
+            label(move || cpu_percent.to_string()),
             label(move || pid.to_string()),
             label(move || ruid.to_string()),
             label(move || username.clone()),
@@ -61,7 +62,7 @@ fn app_view() -> Box<dyn View> {
                 move || process_list_signal.get(),
                 move |item| item.clone(),
                 move |item| {
-                    process_item_view(item.pid, item.ruid, item.username.clone(), item.name.clone())
+                    process_item_view(item.pid, item.ruid, item.username.clone(), item.cpu_percent, item.name.clone())
                 }
             )
             .style(|s| s.flex_col().width_full())
