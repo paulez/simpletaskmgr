@@ -5,22 +5,18 @@ use floem::action::exec_after;
 use floem::prelude::{create_rw_signal, SignalGet, SignalUpdate};
 use floem::reactive::create_effect;
 use floem::unit::UnitExt;
-use floem::views::{container, h_stack, label, scroll, virtual_list, Decorators, VirtualDirection, VirtualItemSize};
-use floem::View;
+use floem::views::{container, scroll, virtual_list, Decorators, VirtualDirection, VirtualItemSize};
+use floem::{IntoView, View};
 use im::Vector;
 
 use simpletaskmgr::{cpu_tracker::CpuTracker, UserFilter};
 
-fn process_item_view(pid: i32, ruid: u32, username: String, cpu_percent: f64, name: String) -> Box<dyn View> {
+fn process_item_view(process: simpletaskmgr::Process) -> Box<dyn View> {
+    let pid = process.pid;
+    let process_clone = process.clone();
     Box::new(container(
-        h_stack((
-            label(move || cpu_percent.to_string()),
-            label(move || pid.to_string()),
-            label(move || ruid.to_string()),
-            label(move || username.clone()),
-            label(move || name.clone()),
-        ))
-        .style(|s| s.height(20.0).gap(10).items_center())
+        process_clone.into_view()
+            .style(move |s| s.height(20.0).gap(10).items_center())
     )
     .on_click(move |_| {
         // Show process detail dialog
@@ -61,9 +57,7 @@ fn app_view() -> Box<dyn View> {
                 VirtualItemSize::Fixed(Box::new(|| 20.0)),
                 move || process_list_signal.get(),
                 move |item| item.clone(),
-                move |item| {
-                    process_item_view(item.pid, item.ruid, item.username.clone(), item.cpu_percent, item.name.clone())
-                }
+                move |item| process_item_view(item)
             )
             .style(|s| s.flex_col().width_full())
         )
