@@ -1,7 +1,7 @@
 pub use procfs::process;
 pub use users::{Users, UsersCache};
 
-use floem::views::{Decorators, Stack};
+use floem::views::{scroll, Decorators, Scroll};
 
 pub mod cpu_tracker;
 
@@ -42,7 +42,7 @@ impl Process {
 }
 
 impl floem::IntoView for Process {
-    type V = Stack;
+    type V = Scroll;
 
     fn into_view(self) -> Self::V {
         let pid = self.pid;
@@ -50,14 +50,16 @@ impl floem::IntoView for Process {
         let username = self.username.clone();
         let cpu_percent_str_val = self.cpu_percent_str().clone();
         let name = self.name.clone();
-        floem::views::h_stack((
-            floem::views::label(move || pid.to_string()),
-            floem::views::label(move || ruid.to_string()),
-            floem::views::label(move || username.clone()),
-            floem::views::label(move || cpu_percent_str_val.clone()),
-            floem::views::label(move || name.clone()),
-        ))
-        .style(move |s| s.flex_row().items_start().gap(6).width_full())
+        scroll(
+            floem::views::h_stack((
+                floem::views::label(move || pid.to_string()),
+                floem::views::label(move || ruid.to_string()),
+                floem::views::label(move || username.clone()),
+                floem::views::label(move || cpu_percent_str_val.clone()),
+                floem::views::label(move || name.clone()),
+            ))
+            .style(move |s| s.flex_row().items_start().gap(6).width_full()),
+        )
     }
 }
 
