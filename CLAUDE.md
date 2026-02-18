@@ -1,7 +1,12 @@
 # General
 
-- Always run unit tests before commiting. `cargo test`
+- Run cargo build regularly to fix build errors. Use `rustc --explain <error number>` to get hints on how to solve the error.
+- Always run unit tests before committing. `cargo test`
+- Run cargo clippy before committing and address findings.
 - Focus on small changes, and commit when you get something to build and pass tests.
+- Read floem crate documentation for examples on how to implement UI changes.
+- Do not run the app, use tests to validate your changes.
+- Always update README.md when you add or modify features.
 
 <!-- rtk-instructions v2 -->
 # RTK (Rust Token Killer) - Token-Optimized Commands
