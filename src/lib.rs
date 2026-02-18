@@ -51,14 +51,21 @@ impl floem::IntoView for Process {
         let cpu_percent_str_val = self.cpu_percent_str().clone();
         let name = self.name.clone();
         scroll(
-            floem::views::h_stack((
-                floem::views::label(move || pid.to_string()),
-                floem::views::label(move || ruid.to_string()),
-                floem::views::label(move || username.clone()),
-                floem::views::label(move || cpu_percent_str_val.clone()),
-                floem::views::label(move || name.clone()),
+            floem::views::v_stack((
+                floem::views::h_stack((
+                    floem::views::label(move || pid.to_string()),
+                    floem::views::label(move || ruid.to_string()),
+                    floem::views::label(move || username.clone()),
+                    floem::views::label(move || cpu_percent_str_val.clone()),
+                ))
+                .style(move |s| s.flex_row().items_start().gap(6).width_full()),
+                floem::views::h_stack((
+                    floem::views::empty(),
+                    floem::views::label(move || name.clone()),
+                ))
+                .style(move |s| s.flex_row().items_end().gap(6).width_full()),
             ))
-            .style(move |s| s.flex_row().items_start().gap(6).width_full()),
+            .style(move |s| s.flex_col().gap(0).width_full()),
         )
     }
 }
