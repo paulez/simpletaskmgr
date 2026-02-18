@@ -110,9 +110,9 @@ fn app_view() -> Box<dyn View> {
                     move |item| item.clone(),
                     move |item| process_item_view(item, move |p| selected_process.set(Some(p))),
                 )
-                .style(|s| s.width(100_i32.pct()).height(100_i32.pct())),
+                .style(|s| s.width_full().height_full()),
             )
-            .style(|s| s.width(100_i32.pct()).height(100_i32.pct())),
+            .style(|s| s.width_full().height_full()),
         ),
     });
 
