@@ -182,6 +182,7 @@ pub fn new(name: String, pid: i32, ruid: u32, username: String, cpu_percent: f64
 - **Run cargo clippy** before committing and address all findings
 - **Focus on small changes** and commit when you get something to build and pass tests
 - **Read floem crate documentation** for examples on implementing UI changes
+- **Read Rust crate documentation** this documentation is located in generated_docs/<crate>. To refresh run `cargo docs-md docs`
 - **Use tests** to validate your changes; do not run the app
 - **Always update README.md** when you add or modify features
 
