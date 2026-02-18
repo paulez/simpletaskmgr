@@ -57,15 +57,7 @@ impl floem::IntoView for Process {
             floem::views::label(move || cpu_percent_str_val.clone()),
             floem::views::label(move || name.clone()),
         ))
-        .style(move |s| {
-            s.items_center().gap(6).grid().grid_template_columns(vec![
-                floem::taffy::style_helpers::auto(),
-                floem::taffy::style_helpers::auto(),
-                floem::taffy::style_helpers::fr(1.),
-                floem::taffy::style_helpers::auto(),
-                floem::taffy::style_helpers::auto(),
-            ])
-        })
+        .style(move |s| s.flex_row().items_start().gap(6).width_full())
     }
 }
 
