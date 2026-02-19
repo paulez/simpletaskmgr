@@ -3,7 +3,7 @@ pub use users::{Users, UsersCache};
 
 use floem::{
     taffy::style_helpers::{auto, fr},
-    views::{h_stack, label, scroll, Decorators, Scroll},
+    views::{h_stack, label, Decorators, Stack},
 };
 
 pub mod cpu_tracker;
@@ -45,25 +45,23 @@ impl Process {
 }
 
 impl floem::IntoView for Process {
-    type V = Scroll;
+    type V = Stack;
 
     fn into_view(self) -> Self::V {
         let cpu_percent_str = self.cpu_percent_str();
         let name = self.name.clone();
-        scroll(
-            h_stack((
-                label(move || self.pid.to_string()),
-                label(move || self.username.clone()),
-                label(move || cpu_percent_str.clone()),
-                label(move || name.to_string()),
-            ))
-            .style(move |s| {
-                s.items_center()
-                    .gap(6)
-                    .grid()
-                    .grid_template_columns(vec![auto(), fr(1.), auto()])
-            }),
-        )
+        h_stack((
+            label(move || self.pid.to_string()),
+            label(move || self.username.clone()),
+            label(move || cpu_percent_str.clone()),
+            label(move || name.to_string()),
+        ))
+        .style(move |s| {
+            s.items_center()
+                .gap(6)
+                .grid()
+                .grid_template_columns(vec![auto(), fr(1.), auto()])
+        })
     }
 }
 

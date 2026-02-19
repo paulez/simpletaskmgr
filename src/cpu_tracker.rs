@@ -8,14 +8,12 @@ pub struct CpuTracker {
     process_usage: HashMap<i32, UsageStats>,
 }
 
-#[derive(Clone)]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct UsageStats {
     pub utime_history: Vec<u64>,
     pub stime_history: Vec<u64>,
     pub last_ticks: (u64, u64),
 }
-
 
 impl Default for CpuTracker {
     fn default() -> Self {
