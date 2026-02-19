@@ -4,6 +4,7 @@ pub use users::{Users, UsersCache};
 use floem::{
     taffy::style_helpers::{auto, fr},
     views::{h_stack, label, Decorators, Stack},
+    IntoView,
 };
 
 pub mod cpu_tracker;
@@ -44,7 +45,7 @@ impl Process {
     }
 }
 
-impl floem::IntoView for Process {
+impl IntoView for Process {
     type V = Stack;
 
     fn into_view(self) -> Self::V {
@@ -57,10 +58,12 @@ impl floem::IntoView for Process {
             label(move || name.to_string()),
         ))
         .style(move |s| {
-            s.items_center()
-                .gap(6)
-                .grid()
-                .grid_template_columns(vec![auto(), fr(1.), auto()])
+            s.items_center().gap(6).grid().grid_template_columns(vec![
+                auto(),
+                auto(),
+                auto(),
+                fr(1.),
+            ])
         })
     }
 }
