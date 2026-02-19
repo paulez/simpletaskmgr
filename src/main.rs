@@ -1,22 +1,18 @@
-use log::debug;
 use simplelog::*;
-use simpletaskmgr::process_list::PROCESS_LIST;
-use std::cell::RefCell;
+use simpletaskmgr::process_list::ProcessList;
+use std::sync::Arc;
+
 use std::time::Duration;
 
 use floem::action::exec_after;
-use floem::prelude::{create_rw_signal, SignalGet, SignalTrack, SignalUpdate};
+use floem::prelude::{create_rw_signal, RwSignal, SignalGet, SignalTrack, SignalUpdate};
 use floem::reactive::create_effect;
 use floem::unit::UnitExt;
-use floem::views::{
-    container, dyn_stack, h_stack, label, scroll, v_stack, virtual_list, Decorators, ScrollExt,
-    VirtualDirection, VirtualItemSize,
-};
+use floem::views::{container, dyn_stack, h_stack, label, scroll, v_stack, Decorators, ScrollExt};
 use floem::{IntoView, View};
-use im::Vector;
-use simpletaskmgr::{
-    cpu_tracker::CpuTracker, process::process_names, process::Process, process::UserFilter,
-};
+use imbl::Vector;
+
+use simpletaskmgr::process::Process;
 
 fn process_item_view(process: Process, on_click: impl Fn(Process) + 'static) -> Box<dyn View> {
     let process_clone = process.clone();
@@ -55,10 +51,9 @@ fn process_detail_view(process: Process) -> Box<dyn View> {
     )
 }
 
-fn process_list() -> impl IntoView {
-    let process_list = PROCESS_LIST.with(|s| s.processes);
+fn process_list_view(processes: RwSignal<Vector<Process>>) -> impl IntoView {
     dyn_stack(
-        move || process_list.get(),
+        move || processes.get(),
         |process| process.clone(),
         |process| process,
     )
@@ -69,16 +64,20 @@ fn process_list() -> impl IntoView {
 fn app_view() -> impl IntoView {
     let selected_process = create_rw_signal(None);
     let tick = create_rw_signal(());
+    let process_list = Arc::new(ProcessList::new());
+    let process_list_for_view = Arc::clone(&process_list);
+    let tick_for_effect = tick;
 
     create_effect(move |_| {
-        tick.track();
+        tick_for_effect.track();
+        let process_list_for_effect = Arc::clone(&process_list);
         exec_after(Duration::from_millis(1000), move |_| {
-            PROCESS_LIST.with(|s| s.update_process_list());
-            tick.set(());
+            process_list_for_effect.update_process_list();
+            tick_for_effect.set(());
         });
     });
 
-    let process_scroll = process_list()
+    let process_scroll = process_list_view(process_list_for_view.processes)
         .style(|s| s.max_width_full().width_full())
         .scroll()
         .style(|s| s.padding(10).padding_right(14))

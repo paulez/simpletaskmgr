@@ -24,7 +24,7 @@ pub struct ProcessList {
 }
 
 impl ProcessList {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let processes = create_rw_signal(Self::process_names(UserFilter::Current));
         let cpu_tracker = RefCell::new(CpuTracker::new());
         Self {

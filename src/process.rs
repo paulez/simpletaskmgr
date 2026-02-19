@@ -7,11 +7,6 @@ use floem::{
     IntoView,
 };
 
-pub enum UserFilter {
-    Current,
-    All,
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct Process {
     pub name: String,
@@ -130,60 +125,6 @@ pub fn show_process_detail(pid: i32) {
 pub fn close_process_detail() {
     // In a real implementation, this would close any open modal
     println!("Process detail dialog closed\n");
-}
-
-pub fn process_names(filter: UserFilter) -> im::Vector<Process> {
-    let cache = UsersCache::new();
-    let current_uid = cache.get_current_uid();
-    let cache = UsersCache::new();
-
-    process::all_processes()
-        .expect("Can't read /proc")
-        .filter_map(|p| match p {
-            Ok(p) => Some(p),
-            Err(e) => match e {
-                procfs::ProcError::NotFound(_) => None,
-                procfs::ProcError::Io(_e, _path) => None,
-                x => {
-                    println!("Can't read process due to error {x:?}");
-                    None
-                }
-            },
-        })
-        .filter_map(|proc| {
-            let uid = proc.uid().expect("Can't get process UID");
-            let pid = proc.pid();
-
-            if matches!(filter, UserFilter::Current) && uid != current_uid {
-                return None;
-            }
-
-            match proc.stat() {
-                Ok(stat) => {
-                    let cpu_percent = 0.0;
-
-                    let username = match cache.get_user_by_uid(uid) {
-                        Some(user) => {
-                            let name: &std::ffi::OsStr = user.name();
-                            name.to_string_lossy().to_string()
-                        }
-                        None => "unknown".to_string(),
-                    };
-                    Some(Process {
-                        name: stat.comm.to_string(),
-                        pid,
-                        ruid: uid,
-                        username,
-                        cpu_percent,
-                    })
-                }
-                Err(e) => {
-                    println!("Can't get process stat due to error {e:?}");
-                    None
-                }
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]
