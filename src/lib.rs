@@ -1,7 +1,10 @@
 pub use procfs::process;
 pub use users::{Users, UsersCache};
 
-use floem::views::{scroll, Decorators, Scroll};
+use floem::{
+    taffy::style_helpers::{auto, fr},
+    views::{h_stack, label, scroll, Decorators, Scroll},
+};
 
 pub mod cpu_tracker;
 
@@ -45,27 +48,21 @@ impl floem::IntoView for Process {
     type V = Scroll;
 
     fn into_view(self) -> Self::V {
-        let pid = self.pid;
-        let ruid = self.ruid;
-        let username = self.username.clone();
-        let cpu_percent_str_val = self.cpu_percent_str().clone();
+        let cpu_percent_str = self.cpu_percent_str();
         let name = self.name.clone();
         scroll(
-            floem::views::v_stack((
-                floem::views::h_stack((
-                    floem::views::label(move || pid.to_string()),
-                    floem::views::label(move || ruid.to_string()),
-                    floem::views::label(move || username.clone()),
-                    floem::views::label(move || cpu_percent_str_val.clone()),
-                ))
-                .style(move |s| s.flex_row().items_start().gap(6).width_full()),
-                floem::views::h_stack((
-                    floem::views::empty(),
-                    floem::views::label(move || name.clone()),
-                ))
-                .style(move |s| s.flex_row().items_end().gap(6).width_full()),
+            h_stack((
+                label(move || self.pid.to_string()),
+                label(move || self.username.clone()),
+                label(move || cpu_percent_str.clone()),
+                label(move || name.to_string()),
             ))
-            .style(move |s| s.flex_col().gap(0).width_full()),
+            .style(move |s| {
+                s.items_center()
+                    .gap(6)
+                    .grid()
+                    .grid_template_columns(vec![auto(), fr(1.), auto()])
+            }),
         )
     }
 }

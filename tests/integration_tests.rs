@@ -22,7 +22,11 @@ fn test_process_names_has_unique_pids() {
     let processes = process_names(UserFilter::All);
     let mut pids = std::collections::HashSet::new();
     for process in processes.iter() {
-        assert!(pids.insert(process.pid), "Duplicate PID found: {}", process.pid);
+        assert!(
+            pids.insert(process.pid),
+            "Duplicate PID found: {}",
+            process.pid
+        );
     }
 }
 

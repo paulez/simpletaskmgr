@@ -50,7 +50,7 @@ fn process_detail_view(process: Process) -> Box<dyn View> {
     )
 }
 
-fn app_view() -> Box<dyn View> {
+fn app_view() -> impl IntoView {
     let process_list_signal = create_rw_signal(Vector::new());
     let selected_process = create_rw_signal(None);
     let cpu_tracker = RefCell::new(CpuTracker::new());
@@ -81,7 +81,7 @@ fn app_view() -> Box<dyn View> {
         });
     });
 
-    let main_view = container(match selected_process.get() {
+    let main_view = match selected_process.get() {
         Some(process) => container(
             h_stack((
                 scroll(
@@ -92,36 +92,35 @@ fn app_view() -> Box<dyn View> {
                         move |item| item.clone(),
                         move |item| process_item_view(item, move |p| selected_process.set(Some(p))),
                     )
-                    .style(|s| s.width(50_i32.pct()).height(100_i32.pct())),
+                    .style(|s| s.width_full().height_full()),
                 )
-                .style(|s| s.width(50_i32.pct()).height(100_i32.pct())),
-                scroll(process_detail_view(process))
-                    .style(|s| s.width(50_i32.pct()).height(100_i32.pct())),
+                .style(|s| s.width(50_i32.pct()).height_full()),
+                scroll(process_detail_view(process)).style(|s| s.width(50_i32.pct()).height_full()),
             ))
-            .style(|s| s.size(100_i32.pct(), 100_i32.pct())),
+            .style(|s| s.width_full().height_full()),
         ),
 
         None => container(
             scroll(
                 virtual_list(
                     VirtualDirection::Vertical,
-                    VirtualItemSize::Fixed(Box::new(|| 30.0)),
+                    VirtualItemSize::Fixed(Box::new(|| 20.0)),
                     move || process_list_signal.get(),
                     move |item| item.clone(),
                     move |item| process_item_view(item, move |p| selected_process.set(Some(p))),
                 )
-                .style(|s| s.width_full().height_full()),
+                .style(|s| s.flex_col().width_full()),
             )
-            .style(|s| s.width_full().height_full()),
+            .style(|s| s.width_full().height_full().border(1.0)),
         ),
-    });
+    };
 
-    Box::new(main_view.style(|s| {
+    main_view.style(|s| {
         s.size(100_i32.pct(), 100_i32.pct())
             .padding_vert(20.0)
             .flex_col()
             .items_center()
-    }))
+    })
 }
 
 fn main() {
