@@ -24,6 +24,11 @@ cargo fmt            # Format code using rustfmt
 cargo fmt --check   # Check if code is formatted
 ```
 
+### Running
+```bash
+cargo run
+```
+
 ## Code Style Guidelines
 
 ### General Structure
@@ -46,7 +51,7 @@ use crate::Process;
 - Use `*` only for broad prelude imports
 
 ### Code Formatting
-- Use rustfmt (auto-formats on commit)
+- Use cargo fmt (auto-formats on commit)
 - Default indentation: 4 spaces
 - Consistent spacing: 1 space around operators, 2 spaces between fields
 
@@ -136,18 +141,12 @@ mod tests {
 - Prefix test functions with `test_`
 - Run tests with `cargo test <function_name>`
 
-### Reactive Programming
-```rust
-// Use signals for reactive state
-let process_list_signal = create_rw_signal(Vector::new());
+### UI toolkit
 
+This app uses floem as UI toolkit. Please read its documentation at `generated_docs/floem/index.md`.
+Look at floem code examples at `git/floem/examples/`.
 
-// Update signals directly when state changes
-selected_process.set(Some(p));
-```
-- Use `create_rw_signal` for mutable shared state
-- Clone signals when needed for closure captures
-- Set signals sparingly to avoid excessive re-renders
+Focus on the reactive programming concept documented in Floem documentation and examples.
 
 ### Documentation
 ```rust
@@ -172,8 +171,8 @@ pub fn new(name: String, pid: i32, ruid: u32, username: String, cpu_percent: f64
 2. **Check formatting**: `cargo fmt --check`
 3. **Fix clippy issues**: `cargo clippy` and address warnings
 4. **Run tests**: `cargo test` (ensure all tests pass)
-5. **Build**: `cargo build --release` to create the final binary
-6. **Run**: `cargo run --release` to launch the application
+5. **Build**: `cargo build` to ensure the build succeeds
+6. **Run**: `cargo run` to launch the application
 7. **Commit**: Only after tests pass and code is formatted
 
 ### Important Development Notes
