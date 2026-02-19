@@ -1,7 +1,7 @@
 use procfs::process;
 use std::collections::HashMap;
 
-use crate::Process;
+use crate::process::Process;
 
 #[derive(Clone)]
 pub struct CpuTracker {

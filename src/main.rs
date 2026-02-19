@@ -13,7 +13,9 @@ use floem::views::{
 };
 use floem::{IntoView, View};
 use im::Vector;
-use simpletaskmgr::{cpu_tracker::CpuTracker, Process, UserFilter};
+use simpletaskmgr::{
+    cpu_tracker::CpuTracker, process::process_names, process::Process, process::UserFilter,
+};
 
 fn process_item_view(process: Process, on_click: impl Fn(Process) + 'static) -> Box<dyn View> {
     let process_clone = process.clone();
@@ -56,31 +58,32 @@ fn app_view() -> impl IntoView {
     let process_list_signal = create_rw_signal(Vector::new());
     let selected_process = create_rw_signal(None);
     let cpu_tracker = RefCell::new(CpuTracker::new());
+    let tick = create_rw_signal(());
 
     create_effect(move |_| {
         let cpu_tracker = cpu_tracker.clone();
         exec_after(Duration::from_millis(1000), move |_| {
             debug!("Refreshing process list");
             // Get process list using process_names() from lib.rs
-            let processes = simpletaskmgr::process_names(UserFilter::Current);
+            let processes = process_names(UserFilter::Current);
 
             // Update CPU usage for each process
-            let mut process_map: std::collections::HashMap<i32, simpletaskmgr::Process> = processes
+            let mut process_map: std::collections::HashMap<i32, Process> = processes
                 .iter()
-                .map(|p: &simpletaskmgr::Process| (p.pid, p.clone()))
+                .map(|p: &Process| (p.pid, p.clone()))
                 .collect();
             cpu_tracker
                 .borrow_mut()
                 .update_process_cpu_usage(&mut process_map);
 
             // Convert back to vector
-            let mut processes: Vec<simpletaskmgr::Process> =
-                process_map.values().cloned().collect();
+            let mut processes: Vec<Process> = process_map.values().cloned().collect();
 
             // Sort by CPU usage (highest first)
             processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
 
-            process_list_signal.set(processes.into_iter().collect());
+            process_list_signal.update(|l| *l = processes.into_iter().collect());
+            tick.set(());
         });
     });
 
