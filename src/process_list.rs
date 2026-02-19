@@ -1,5 +1,5 @@
 use crate::cpu_tracker::CpuTracker;
-use crate::{cpu_tracker, process::Process};
+use crate::process::Process;
 use floem::prelude::{create_rw_signal, RwSignal, SignalUpdate};
 use imbl::Vector;
 use log::debug;
@@ -23,6 +23,12 @@ pub struct ProcessList {
     cpu_tracker: RefCell<CpuTracker>,
 }
 
+impl Default for ProcessList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProcessList {
     pub fn new() -> Self {
         let processes = create_rw_signal(Self::process_names(UserFilter::Current));
@@ -37,7 +43,7 @@ impl ProcessList {
         self.processes.set(self.process_list());
     }
 
-    fn process_list(self: &Self) -> Vector<Process> {
+    fn process_list(&self) -> Vector<Process> {
         debug!("Refreshing process list");
         // Get process list using process_names() from lib.rs
         let processes = Self::process_names(UserFilter::Current);
