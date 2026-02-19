@@ -1,6 +1,6 @@
 use crate::cpu_tracker::CpuTracker;
 use crate::{cpu_tracker, process::Process};
-use floem::prelude::{create_rw_signal, RwSignal};
+use floem::prelude::{create_rw_signal, RwSignal, SignalUpdate};
 use imbl::Vector;
 use log::debug;
 use procfs::process;
@@ -33,7 +33,11 @@ impl ProcessList {
         }
     }
 
-    fn process_list(self: &Self) -> Vec<Process> {
+    pub fn update_process_list(&self) {
+        self.processes.set(self.process_list());
+    }
+
+    fn process_list(self: &Self) -> Vector<Process> {
         debug!("Refreshing process list");
         // Get process list using process_names() from lib.rs
         let processes = Self::process_names(UserFilter::Current);
@@ -48,7 +52,7 @@ impl ProcessList {
             .update_process_cpu_usage(&mut process_map);
 
         // Convert back to vector
-        let mut processes: Vec<Process> = process_map.values().cloned().collect();
+        let mut processes: Vector<Process> = process_map.values().cloned().collect();
 
         // Sort by CPU usage (highest first)
         processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
