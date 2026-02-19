@@ -1,5 +1,6 @@
 use log::debug;
 use simplelog::*;
+use simpletaskmgr::process_list::PROCESS_LIST;
 use std::cell::RefCell;
 use std::time::Duration;
 
@@ -8,8 +9,8 @@ use floem::prelude::{create_rw_signal, SignalGet, SignalUpdate};
 use floem::reactive::create_effect;
 use floem::unit::UnitExt;
 use floem::views::{
-    container, h_stack, label, scroll, v_stack, virtual_list, Decorators, VirtualDirection,
-    VirtualItemSize,
+    container, dyn_stack, h_stack, label, scroll, v_stack, virtual_list, Decorators, ScrollExt,
+    VirtualDirection, VirtualItemSize,
 };
 use floem::{IntoView, View};
 use im::Vector;
@@ -54,6 +55,17 @@ fn process_detail_view(process: Process) -> Box<dyn View> {
     )
 }
 
+fn process_list() -> impl IntoView {
+    let process_list = PROCESS_LIST.with(|s| s.processes);
+    dyn_stack(
+        move || process_list.get(),
+        |process| process.clone(),
+        |process| process,
+    )
+    .style(|s| s.flex_col().min_size(0, 0))
+    .debug_name("Process List Stack")
+}
+
 fn app_view() -> impl IntoView {
     let process_list_signal = create_rw_signal(Vector::new());
     let selected_process = create_rw_signal(None);
@@ -87,38 +99,21 @@ fn app_view() -> impl IntoView {
         });
     });
 
+    let process_scroll = process_list()
+        .style(|s| s.max_width_full().width_full())
+        .scroll()
+        .style(|s| s.padding(10).padding_right(14))
+        .scroll_style(|s| s.shrink_to_fit().handle_thickness(8));
+
     let main_view = match selected_process.get() {
         Some(process) => container(
             h_stack((
-                scroll(
-                    virtual_list(
-                        VirtualDirection::Vertical,
-                        VirtualItemSize::Fixed(Box::new(|| 30.0)),
-                        move || process_list_signal.get(),
-                        move |item| item.clone(),
-                        move |item| process_item_view(item, move |p| selected_process.set(Some(p))),
-                    )
-                    .style(|s| s.width_full().height_full()),
-                )
-                .style(|s| s.width(50_i32.pct()).height_full()),
+                process_scroll,
                 scroll(process_detail_view(process)).style(|s| s.width(50_i32.pct()).height_full()),
             ))
             .style(|s| s.width_full().height_full()),
         ),
-
-        None => container(
-            scroll(
-                virtual_list(
-                    VirtualDirection::Vertical,
-                    VirtualItemSize::Fixed(Box::new(|| 20.0)),
-                    move || process_list_signal.get(),
-                    move |item| item.clone(),
-                    move |item| process_item_view(item, move |p| selected_process.set(Some(p))),
-                )
-                .style(|s| s.flex_col().width_full()),
-            )
-            .style(|s| s.width_full().height_full().border(1.0)),
-        ),
+        None => container(process_scroll).style(|s| s.width_full().height_full().border(1.0)),
     };
 
     main_view.style(|s| {
