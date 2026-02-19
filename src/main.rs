@@ -1,3 +1,5 @@
+use log::debug;
+use simplelog::*;
 use std::cell::RefCell;
 use std::time::Duration;
 
@@ -58,6 +60,7 @@ fn app_view() -> impl IntoView {
     create_effect(move |_| {
         let cpu_tracker = cpu_tracker.clone();
         exec_after(Duration::from_millis(1000), move |_| {
+            debug!("Refreshing process list");
             // Get process list using process_names() from lib.rs
             let processes = simpletaskmgr::process_names(UserFilter::Current);
 
@@ -124,5 +127,6 @@ fn app_view() -> impl IntoView {
 }
 
 fn main() {
+    let _ = SimpleLogger::init(LevelFilter::Debug, Config::default());
     floem::launch(app_view);
 }
