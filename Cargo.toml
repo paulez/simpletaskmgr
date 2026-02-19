@@ -19,3 +19,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "simpletaskmgr"
 path = "src/main.rs"
+
+[dev-dependencies]
+rstest = "0.26.1"

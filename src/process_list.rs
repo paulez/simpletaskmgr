@@ -21,6 +21,7 @@ pub enum UserFilter {
 pub struct ProcessList {
     pub processes: RwSignal<Vector<Process>>,
     cpu_tracker: RefCell<CpuTracker>,
+    users_cache: UsersCache,
 }
 
 impl Default for ProcessList {
@@ -31,11 +32,13 @@ impl Default for ProcessList {
 
 impl ProcessList {
     pub fn new() -> Self {
-        let processes = create_rw_signal(Self::process_names(UserFilter::Current));
+        let users_cache = UsersCache::new();
+        let processes = create_rw_signal(Self::process_names(&users_cache, UserFilter::Current));
         let cpu_tracker = RefCell::new(CpuTracker::new());
         Self {
             processes,
             cpu_tracker,
+            users_cache,
         }
     }
 
@@ -46,7 +49,7 @@ impl ProcessList {
     fn process_list(&self) -> Vector<Process> {
         debug!("Refreshing process list");
         // Get process list using process_names() from lib.rs
-        let processes = Self::process_names(UserFilter::Current);
+        let processes = Self::process_names(&self.users_cache, UserFilter::Current);
 
         // Update CPU usage for each process
         let mut process_map: std::collections::HashMap<i32, Process> = processes
@@ -66,9 +69,8 @@ impl ProcessList {
         processes
     }
 
-    pub fn process_names(filter: UserFilter) -> Vector<Process> {
-        let cache = UsersCache::new();
-        let current_uid = cache.get_current_uid();
+    pub fn process_names(users_cache: &UsersCache, filter: UserFilter) -> Vector<Process> {
+        let current_uid = users_cache.get_current_uid();
 
         process::all_processes()
             .expect("Can't read /proc")
@@ -95,7 +97,7 @@ impl ProcessList {
                     Ok(stat) => {
                         let cpu_percent = 0.0;
 
-                        let username = match cache.get_user_by_uid(uid) {
+                        let username = match users_cache.get_user_by_uid(uid) {
                             Some(user) => {
                                 let name: &std::ffi::OsStr = user.name();
                                 name.to_string_lossy().to_string()
