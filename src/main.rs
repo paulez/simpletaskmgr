@@ -1,6 +1,6 @@
 use simplelog::*;
 use simpletaskmgr::process_list::ProcessList;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use std::time::Duration;
 
@@ -64,13 +64,13 @@ fn process_list_view(processes: RwSignal<Vector<Process>>) -> impl IntoView {
 fn app_view() -> impl IntoView {
     let selected_process = create_rw_signal(None);
     let tick = create_rw_signal(());
-    let process_list = Arc::new(ProcessList::new());
-    let process_list_for_view = Arc::clone(&process_list);
+    let process_list = Rc::new(ProcessList::new());
+    let process_list_for_view = Rc::clone(&process_list);
     let tick_for_effect = tick;
 
     create_effect(move |_| {
         tick_for_effect.track();
-        let process_list_for_effect = Arc::clone(&process_list);
+        let process_list_for_effect = Rc::clone(&process_list);
         exec_after(Duration::from_millis(1000), move |_| {
             process_list_for_effect.update_process_list();
             tick_for_effect.set(());
