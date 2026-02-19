@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::time::Duration;
 
 use floem::action::exec_after;
-use floem::prelude::{create_rw_signal, SignalGet, SignalUpdate};
+use floem::prelude::{create_rw_signal, SignalGet, SignalTrack, SignalUpdate};
 use floem::reactive::create_effect;
 use floem::unit::UnitExt;
 use floem::views::{
@@ -71,6 +71,7 @@ fn app_view() -> impl IntoView {
     let tick = create_rw_signal(());
 
     create_effect(move |_| {
+        tick.track();
         exec_after(Duration::from_millis(1000), move |_| {
             PROCESS_LIST.with(|s| s.update_process_list());
             tick.set(());
