@@ -9,19 +9,17 @@ pub struct CpuTracker {
 }
 
 #[derive(Clone)]
+#[derive(Default)]
 pub struct UsageStats {
     pub utime_history: Vec<u64>,
     pub stime_history: Vec<u64>,
     pub last_ticks: (u64, u64),
 }
 
-impl Default for UsageStats {
+
+impl Default for CpuTracker {
     fn default() -> Self {
-        Self {
-            utime_history: Vec::new(),
-            stime_history: Vec::new(),
-            last_ticks: (0, 0),
-        }
+        Self::new()
     }
 }
 
@@ -36,11 +34,9 @@ impl CpuTracker {
         if let Ok(all_processes) = process::all_processes() {
             let mut stat_map: HashMap<i32, (u64, u64)> = HashMap::new();
 
-            for proc_result in all_processes {
-                if let Ok(proc) = proc_result {
-                    if let Ok(stat) = proc.stat() {
-                        stat_map.insert(proc.pid(), (stat.utime, stat.stime));
-                    }
+            for proc in all_processes.flatten() {
+                if let Ok(stat) = proc.stat() {
+                    stat_map.insert(proc.pid(), (stat.utime, stat.stime));
                 }
             }
 
