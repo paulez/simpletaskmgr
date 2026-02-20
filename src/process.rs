@@ -1,11 +1,11 @@
-pub use procfs::process;
-pub use users::{Users, UsersCache};
-
+use anyhow::{Context, Result};
 use floem::{
     taffy::style_helpers::{auto, fr},
     views::{h_stack, label, Decorators, Stack},
     IntoView,
 };
+pub use procfs::process;
+pub use users::{Users, UsersCache};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Process {
@@ -91,37 +91,46 @@ pub(crate) fn read_process_details(
             })
         }
         Err(e) => {
-            println!("Can't get process stat due to error {e:?}");
+            log::error!("Can't get process stat due to error {e:?}");
             None
         }
     }
 }
 
-pub fn get_process(pid: i32) -> Option<Process> {
-    process::all_processes()
-        .expect("Can't read /proc")
+pub fn get_process(pid: i32) -> Result<Process> {
+    let users_cache = users::UsersCache::new();
+
+    let all_processes = process::all_processes().context("Can't read /proc filesystem")?;
+
+    let process_option: Option<Process> = all_processes
         .filter_map(|p| match p {
             Ok(p) if p.pid() == pid => Some(p),
             _ => None,
         })
-        .filter_map(|proc| read_process_details(&proc, &users::UsersCache::new()))
-        .next()
+        .filter_map(|proc| read_process_details(&proc, &users_cache))
+        .next();
+
+    process_option.ok_or_else(|| anyhow::anyhow!("Process with PID {} not found", pid))
 }
 
 // Helper functions for GUI navigation
 pub fn show_process_detail(pid: i32) {
-    if let Some(process) = get_process(pid) {
-        // In a real implementation, this would open a modal dialog
-        // For now, we'll just print to the console
-        println!("\n=== Process Details ===");
-        println!("PID: {}", process.pid);
-        println!("Name: {}", process.name);
-        println!("UID: {}", process.ruid);
-        println!("Username: {}", process.username);
-        println!("CPU Usage: {:.1}%", process.cpu_percent);
-        println!("======================\n");
-    } else {
-        println!("Process with PID {} not found\n", pid);
+    match get_process(pid) {
+        Ok(process) => {
+            // In a real implementation, this would open a modal dialog
+            // For now, we'll just print to the console
+            println!("\n=== Process Details ===");
+            println!("PID: {}", process.pid);
+            println!("Name: {}", process.name);
+            println!("UID: {}", process.ruid);
+            println!("Username: {}", process.username);
+            println!("CPU Usage: {:.1}%", process.cpu_percent);
+            println!("======================\n");
+        }
+        Err(e) => {
+            log::error!("Failed to show process details: {}", e);
+            println!("Failed to show process details: {}\n", e);
+        }
     }
 }
 

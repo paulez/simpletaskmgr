@@ -15,7 +15,7 @@ use floem::views::{container, h_stack, scroll, Decorators, ScrollExt};
 fn app_view() -> impl IntoView {
     let selected_process = create_rw_signal(None);
     let tick = create_rw_signal(());
-    let process_list = Rc::new(ProcessList::new());
+    let process_list = Rc::new(ProcessList::init());
     let process_list_for_view = Rc::clone(&process_list);
     let tick_for_effect = tick;
 
@@ -55,5 +55,14 @@ fn app_view() -> impl IntoView {
 
 fn main() {
     let _ = SimpleLogger::init(LevelFilter::Debug, LogConfig::default());
+    if let Err(e) = run_app() {
+        log::error!("Application error: {}", e);
+        eprintln!("Application error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run_app() -> Result<(), Box<dyn std::error::Error>> {
     floem::launch(app_view);
+    Ok(())
 }

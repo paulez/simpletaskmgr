@@ -2604,6 +2604,7 @@ dependencies = [
 name = "simpletaskmgr"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "floem",
  "im",
  "imbl",
@@ -2611,6 +2612,7 @@ dependencies = [
  "procfs",
  "rstest",
  "simplelog",
+ "thiserror",
  "users",
 ]
 

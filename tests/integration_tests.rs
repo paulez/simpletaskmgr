@@ -54,5 +54,5 @@ fn test_process_names_handles_missing_users(all_processes: Vector<Process>) {
 #[fixture]
 fn all_processes() -> Vector<Process> {
     let users_cache = UsersCache::new();
-    ProcessList::process_names(&users_cache, true)
+    ProcessList::process_names(&users_cache, true).expect("Failed to get process list")
 }

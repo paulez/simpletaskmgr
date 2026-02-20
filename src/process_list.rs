@@ -1,5 +1,6 @@
 use crate::cpu_tracker::CpuTracker;
 use crate::process::{read_process_details, Process};
+use anyhow::{Context, Result};
 use floem::prelude::{create_rw_signal, RwSignal, SignalUpdate};
 use imbl::Vector;
 use log::debug;
@@ -29,7 +30,7 @@ impl Default for ProcessList {
 impl ProcessList {
     pub fn new() -> Self {
         let users_cache = UsersCache::new();
-        let processes = create_rw_signal(Self::process_names(&users_cache, false));
+        let processes = create_rw_signal(Vector::new());
         let cpu_tracker = RefCell::new(CpuTracker::new());
         Self {
             processes,
@@ -39,14 +40,27 @@ impl ProcessList {
         }
     }
 
-    pub fn update_process_list(&self) {
-        self.processes.set(self.process_list());
+    pub fn init() -> Self {
+        let new_list = Self::new();
+        new_list.update_process_list();
+        new_list
     }
 
-    fn process_list(&self) -> Vector<Process> {
+    pub fn update_process_list(&self) {
+        match self.process_list() {
+            Ok(processes) => self.processes.set(processes),
+            Err(e) => {
+                log::error!("Failed to update process list: {}", e);
+                self.processes.set(Vector::new());
+            }
+        }
+    }
+
+    fn process_list(&self) -> Result<Vector<Process>> {
         debug!("Refreshing process list");
         // Get process list using process_names() from lib.rs
-        let processes = Self::process_names(&self.users_cache, self.show_all_processes);
+        let processes = Self::process_names(&self.users_cache, self.show_all_processes)
+            .context("Failed to get process names")?;
 
         // Update CPU usage for each process
         let mut process_map: std::collections::HashMap<i32, Process> = processes
@@ -55,7 +69,8 @@ impl ProcessList {
             .collect();
         self.cpu_tracker
             .borrow_mut()
-            .update_process_cpu_usage(&mut process_map);
+            .update_process_cpu_usage(&mut process_map)
+            .context("Failed to update CPU usage")?;
 
         // Convert back to vector
         let mut processes: Vector<Process> = process_map.values().cloned().collect();
@@ -63,7 +78,7 @@ impl ProcessList {
         // Sort by CPU usage (highest first)
         processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
 
-        processes
+        Ok(processes)
     }
 
     fn should_include_process(proc: &process::Process, current_uid: u32, show_all: bool) -> bool {
@@ -74,18 +89,19 @@ impl ProcessList {
         true
     }
 
-    pub fn process_names(users_cache: &UsersCache, show_all: bool) -> Vector<Process> {
+    pub fn process_names(users_cache: &UsersCache, show_all: bool) -> Result<Vector<Process>> {
         let current_uid = users_cache.get_current_uid();
 
-        process::all_processes()
-            .expect("Can't read /proc")
+        let all_processes = process::all_processes().context("Can't read /proc filesystem")?;
+
+        let processes: Vector<Process> = all_processes
             .filter_map(|p| match p {
                 Ok(p) => Some(p),
                 Err(e) => match e {
                     procfs::ProcError::NotFound(_) => None,
                     procfs::ProcError::Io(_e, _path) => None,
                     x => {
-                        println!("Can't read process due to error {x:?}");
+                        log::warn!("Can't read process due to error: {}", x);
                         None
                     }
                 },
@@ -96,6 +112,8 @@ impl ProcessList {
                 }
                 read_process_details(&proc, users_cache)
             })
-            .collect()
+            .collect();
+
+        Ok(processes)
     }
 }
