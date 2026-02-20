@@ -99,19 +99,8 @@ pub enum UserFilter { Current, All }
 ```
 
 ### Error Handling
-```rust
-// Use expect() for critical initialization failures
-let cache = UsersCache::new()
-    .expect("Failed to initialize user cache");
+Use anyhow to handle and propagate errors.
 
-// Log errors gracefully for non-critical issues
-Err(e) => {
-    error!("Can't read process due to error {e:?}");
-    None
-}
-```
-- Use `expect()` for initialization that must succeed in normal operation
-- Use `println!` for non-critical errors
 - Use `?` operator for propagating expected errors
 - Log errors with `e:?` formatting for debugging
 
