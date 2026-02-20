@@ -1,11 +1,10 @@
 use floem::IntoView;
-
+use simplelog::Config as LogConfig;
 use simplelog::*;
+use simpletaskmgr::config::Config;
 use simpletaskmgr::process_list::ProcessList;
 use simpletaskmgr::ui::{process_detail_view, process_list_view};
 use std::rc::Rc;
-
-use std::time::Duration;
 
 use floem::action::exec_after;
 use floem::prelude::{create_rw_signal, SignalGet, SignalTrack, SignalUpdate};
@@ -23,7 +22,7 @@ fn app_view() -> impl IntoView {
     create_effect(move |_| {
         tick_for_effect.track();
         let process_list_for_effect = Rc::clone(&process_list);
-        exec_after(Duration::from_millis(1000), move |_| {
+        exec_after(Config::refresh_interval(), move |_| {
             process_list_for_effect.update_process_list();
             tick_for_effect.set(());
         });
@@ -55,6 +54,6 @@ fn app_view() -> impl IntoView {
 }
 
 fn main() {
-    let _ = SimpleLogger::init(LevelFilter::Debug, Config::default());
+    let _ = SimpleLogger::init(LevelFilter::Debug, LogConfig::default());
     floem::launch(app_view);
 }

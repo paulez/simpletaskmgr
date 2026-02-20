@@ -1,9 +1,8 @@
 use procfs::process;
 use std::collections::HashMap;
 
+use crate::config::Config;
 use crate::process::Process;
-
-const CPU_HISTORY_SIZE: usize = 5;
 
 #[derive(Clone)]
 pub struct CpuTracker {
@@ -45,7 +44,7 @@ impl CpuTracker {
         usage.utime_history.push(utime);
         usage.stime_history.push(stime);
 
-        if usage.utime_history.len() > CPU_HISTORY_SIZE {
+        if usage.utime_history.len() > Config::CPU_HISTORY_SIZE {
             usage.utime_history.remove(0);
             usage.stime_history.remove(0);
         }
@@ -92,8 +91,8 @@ impl CpuTracker {
                         }
                         std::collections::hash_map::Entry::Vacant(vac) => {
                             vac.insert(UsageStats {
-                                utime_history: vec![*utime; CPU_HISTORY_SIZE],
-                                stime_history: vec![*stime; CPU_HISTORY_SIZE],
+                                utime_history: vec![*utime; Config::CPU_HISTORY_SIZE],
+                                stime_history: vec![*stime; Config::CPU_HISTORY_SIZE],
                                 last_ticks: (*utime, *stime),
                             });
                         }
@@ -101,9 +100,5 @@ impl CpuTracker {
                 }
             }
         }
-    }
-
-    pub fn needs_update(&self) -> bool {
-        false
     }
 }
