@@ -13,15 +13,11 @@ thread_local! {
     })
 }
 
-pub enum UserFilter {
-    Current,
-    All,
-}
-
 pub struct ProcessList {
     pub processes: RwSignal<Vector<Process>>,
     cpu_tracker: RefCell<CpuTracker>,
     users_cache: UsersCache,
+    show_all_processes: bool,
 }
 
 impl Default for ProcessList {
@@ -33,12 +29,13 @@ impl Default for ProcessList {
 impl ProcessList {
     pub fn new() -> Self {
         let users_cache = UsersCache::new();
-        let processes = create_rw_signal(Self::process_names(&users_cache, UserFilter::Current));
+        let processes = create_rw_signal(Self::process_names(&users_cache, false));
         let cpu_tracker = RefCell::new(CpuTracker::new());
         Self {
             processes,
             cpu_tracker,
             users_cache,
+            show_all_processes: false,
         }
     }
 
@@ -49,7 +46,7 @@ impl ProcessList {
     fn process_list(&self) -> Vector<Process> {
         debug!("Refreshing process list");
         // Get process list using process_names() from lib.rs
-        let processes = Self::process_names(&self.users_cache, UserFilter::Current);
+        let processes = Self::process_names(&self.users_cache, self.show_all_processes);
 
         // Update CPU usage for each process
         let mut process_map: std::collections::HashMap<i32, Process> = processes
@@ -69,7 +66,15 @@ impl ProcessList {
         processes
     }
 
-    pub fn process_names(users_cache: &UsersCache, filter: UserFilter) -> Vector<Process> {
+    fn should_include_process(proc: &process::Process, current_uid: u32, show_all: bool) -> bool {
+        if !show_all {
+            let uid = proc.uid().expect("Can't get process UID");
+            return uid == current_uid;
+        }
+        true
+    }
+
+    pub fn process_names(users_cache: &UsersCache, show_all: bool) -> Vector<Process> {
         let current_uid = users_cache.get_current_uid();
 
         process::all_processes()
@@ -86,13 +91,9 @@ impl ProcessList {
                 },
             })
             .filter_map(|proc| {
-                if matches!(filter, UserFilter::Current) {
-                    let uid = proc.uid().expect("Can't get process UID");
-                    if uid != current_uid {
-                        return None;
-                    }
+                if !Self::should_include_process(&proc, current_uid, show_all) {
+                    return None;
                 }
-
                 read_process_details(&proc, users_cache)
             })
             .collect()
