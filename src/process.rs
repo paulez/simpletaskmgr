@@ -117,26 +117,22 @@ pub fn get_process(pid: i32) -> Result<Process> {
 pub fn show_process_detail(pid: i32) {
     match get_process(pid) {
         Ok(process) => {
-            // In a real implementation, this would open a modal dialog
-            // For now, we'll just print to the console
-            println!("\n=== Process Details ===");
-            println!("PID: {}", process.pid);
-            println!("Name: {}", process.name);
-            println!("UID: {}", process.ruid);
-            println!("Username: {}", process.username);
-            println!("CPU Usage: {:.1}%", process.cpu_percent);
-            println!("======================\n");
+            log::info!("\n=== Process Details ===");
+            log::info!("PID: {}", process.pid);
+            log::info!("Name: {}", process.name);
+            log::info!("UID: {}", process.ruid);
+            log::info!("Username: {}", process.username);
+            log::info!("CPU Usage: {:.1}%", process.cpu_percent);
+            log::info!("======================\n");
         }
         Err(e) => {
             log::error!("Failed to show process details: {}", e);
-            println!("Failed to show process details: {}\n", e);
         }
     }
 }
 
 pub fn close_process_detail() {
-    // In a real implementation, this would close any open modal
-    println!("Process detail dialog closed\n");
+    log::info!("Process detail dialog closed");
 }
 
 #[cfg(test)]

@@ -104,9 +104,9 @@ pub enum UserFilter { Current, All }
 let cache = UsersCache::new()
     .expect("Failed to initialize user cache");
 
-// Print errors gracefully for non-critical issues
+// Log errors gracefully for non-critical issues
 Err(e) => {
-    println!("Can't read process due to error {e:?}");
+    error!("Can't read process due to error {e:?}");
     None
 }
 ```

@@ -57,7 +57,6 @@ fn main() {
     let _ = SimpleLogger::init(LevelFilter::Debug, LogConfig::default());
     if let Err(e) = run_app() {
         log::error!("Application error: {}", e);
-        eprintln!("Application error: {}", e);
         std::process::exit(1);
     }
 }
