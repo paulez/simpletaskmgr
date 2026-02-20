@@ -104,6 +104,36 @@ Use anyhow to handle and propagate errors.
 - Use `?` operator for propagating expected errors
 - Log errors with `e:?` formatting for debugging
 
+### Logging and Error Handling
+
+Use the `log` crate for all diagnostic output. Avoid using `println!`, `eprintln!`, and `dbg!` in production code.
+
+#### Logging Levels
+```rust
+// Use log::error! for actual errors
+log::error!("Failed to update process list: {}", e);
+
+// Use log::warn! for warnings (non-fatal issues)
+log::warn!("Can't read process due to error: {}", e);
+
+// Use log::info! for informational messages and diagnostics
+log::info!("Process detail dialog closed");
+
+// Use log::debug! for debug-level information
+log::debug!("CPU percent calculation: {:.2}%", cpu_percent);
+```
+
+#### Guidelines
+- **Consistent logging**: Always use the `log` crate instead of `println!` or `eprintln!`
+- **Single reporting**: Report each error or event only once (don't log to both console and log)
+- **Appropriate levels**: Use the correct log level for each message type
+  - `error`: For actual errors that affect functionality
+  - `warn`: For unexpected situations that don't break the application
+  - `info`: For informational messages and user-facing diagnostics
+  - `debug`: For debugging information that's useful during development
+- **Error details**: Include relevant error details using `{:?}` format for debugging
+- **Context**: Provide enough context to understand the error without being verbose
+
 ### Testing
 ```rust
 #[cfg(test)]
@@ -187,7 +217,7 @@ git add . && git commit -m "msg" && git push
 
 # ✅ Correct
 rtk git add . && rtk git commit -m "msg" && rtk git push
-``` 
+```
 
 ### RTK Commands by Workflow
 
@@ -200,7 +230,7 @@ rtk tsc                 # TypeScript errors grouped by file/code (83%)
 rtk lint                # ESLint/Biome violations grouped (84%)
 rtk prettier --check    # Files needing format only (70%)
 rtk next build          # Next.js build with route metrics (87%)
-``` 
+```
 
 #### Test (90-99% savings)
 ```bash
@@ -208,7 +238,7 @@ rtk cargo test          # Cargo test failures only (90%)
 rtk vitest run          # Vitest failures only (99.5%)
 rtk playwright test     # Playwright failures only (94%)
 rtk test <cmd>          # Generic test wrapper - failures only
-``` 
+```
 
 #### Git (59-80% savings)
 ```bash
@@ -224,7 +254,7 @@ rtk git branch          # Compact branch list
 rtk git fetch           # Compact fetch
 rtk git stash           # Compact stash
 rtk git worktree        # Compact worktree
-``` 
+```
 
 Note: Git passthrough works for ALL subcommands, even those not explicitly listed.
 
@@ -234,7 +264,7 @@ rtk ls <path>           # Tree format, compact (65%)
 rtk read <file>         # Code reading with filtering (60%)
 rtk grep <pattern>      # Search grouped by file (75%)
 NOT COMPATIBLE with GNU find: rtk find <pattern>      # Find grouped by directory (70%)
-``` 
+```
 
 #### Analysis & Debug (70-90% savings)
 ```bash
@@ -245,13 +275,13 @@ rtk deps                # Dependency overview
 rtk env                 # Environment variables compact
 rtk summary <cmd>       # Smart summary of command output
 rtk diff                # Ultra-compact diffs
-``` 
+```
 
 #### Network (65-70% savings)
 ```bash
 rtk curl <url>          # Compact HTTP responses (70%)
 rtk wget <url>          # Compact download output (65%)
-``` 
+```
 
 #### Meta Commands
 ```bash
