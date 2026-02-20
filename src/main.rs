@@ -2,6 +2,7 @@ use floem::IntoView;
 use simplelog::Config as LogConfig;
 use simplelog::*;
 use simpletaskmgr::config::Config;
+use simpletaskmgr::process::Process;
 use simpletaskmgr::process_list::ProcessList;
 use simpletaskmgr::ui::{process_detail_view, process_list_view};
 use std::rc::Rc;
@@ -28,7 +29,10 @@ fn app_view() -> impl IntoView {
         });
     });
 
-    let process_scroll = process_list_view(process_list_for_view.processes)
+    let process_scroll =
+        process_list_view(process_list_for_view.processes, move |process: Process| {
+            selected_process.set(Some(process.clone()));
+        })
         .style(|s| s.max_width_full().width_full())
         .scroll()
         .style(|s| s.padding(10).padding_right(14))

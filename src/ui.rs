@@ -4,9 +4,10 @@ use floem::unit::UnitExt;
 use floem::views::{container, dyn_stack, label, scroll, v_stack, Decorators};
 use floem::{IntoView, View};
 use imbl::Vector;
+use std::rc::Rc;
 
 /// Creates a clickable view for a single process item
-pub fn process_item_view(process: Process, on_click: impl Fn(Process) + 'static) -> Box<dyn View> {
+pub fn process_item_view(process: Process, on_click: Rc<dyn Fn(Process)>) -> Box<dyn View> {
     let process_clone = process.clone();
     Box::new(process.into_view().on_click(move |_| {
         on_click(process_clone.clone());
@@ -45,11 +46,15 @@ pub fn process_detail_view(process: Process) -> Box<dyn View> {
 }
 
 /// Creates a dynamic stack view that displays the list of processes
-pub fn process_list_view(processes: RwSignal<Vector<Process>>) -> impl IntoView {
+pub fn process_list_view(
+    processes: RwSignal<Vector<Process>>,
+    on_click: impl Fn(Process) + 'static,
+) -> impl IntoView {
+    let on_click = Rc::new(on_click);
     dyn_stack(
         move || processes.get(),
-        |process| process.clone(),
-        |process| process,
+        |process: &Process| process.clone(),
+        move |process| process_item_view(process, on_click.clone()),
     )
     .style(|s| s.flex_col().min_size(0, 0))
     .debug_name("Process List Stack")
