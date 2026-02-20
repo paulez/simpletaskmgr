@@ -66,6 +66,37 @@ impl IntoView for Process {
     }
 }
 
+pub(crate) fn read_process_details(
+    proc: &process::Process,
+    users_cache: &UsersCache,
+) -> Option<crate::process::Process> {
+    let uid = proc.uid().expect("Can't get process UID");
+    let pid = proc.pid();
+
+    match proc.stat() {
+        Ok(stat) => {
+            let username = match users_cache.get_user_by_uid(uid) {
+                Some(user) => {
+                    let name: &std::ffi::OsStr = user.name();
+                    name.to_string_lossy().to_string()
+                }
+                None => "unknown".to_string(),
+            };
+            Some(Process {
+                name: stat.comm.to_string(),
+                pid,
+                ruid: uid,
+                username,
+                cpu_percent: 0.0,
+            })
+        }
+        Err(e) => {
+            println!("Can't get process stat due to error {e:?}");
+            None
+        }
+    }
+}
+
 pub fn get_process(pid: i32) -> Option<Process> {
     process::all_processes()
         .expect("Can't read /proc")
@@ -73,35 +104,7 @@ pub fn get_process(pid: i32) -> Option<Process> {
             Ok(p) if p.pid() == pid => Some(p),
             _ => None,
         })
-        .filter_map(|proc| {
-            let uid = proc.uid().expect("Can't get process UID");
-            let pid = proc.pid();
-
-            match proc.stat() {
-                Ok(stat) => {
-                    let cpu_percent = 0.0;
-
-                    let username = match users::UsersCache::new().get_user_by_uid(uid) {
-                        Some(user) => {
-                            let name: &std::ffi::OsStr = user.name();
-                            name.to_string_lossy().to_string()
-                        }
-                        None => "unknown".to_string(),
-                    };
-                    Some(Process {
-                        name: stat.comm.to_string(),
-                        pid,
-                        ruid: uid,
-                        username,
-                        cpu_percent,
-                    })
-                }
-                Err(e) => {
-                    println!("Can't get process stat due to error {e:?}");
-                    None
-                }
-            }
-        })
+        .filter_map(|proc| read_process_details(&proc, &users::UsersCache::new()))
         .next()
 }
 

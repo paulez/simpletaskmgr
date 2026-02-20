@@ -1,5 +1,5 @@
 use crate::cpu_tracker::CpuTracker;
-use crate::process::Process;
+use crate::process::{read_process_details, Process};
 use floem::prelude::{create_rw_signal, RwSignal, SignalUpdate};
 use imbl::Vector;
 use log::debug;
@@ -86,37 +86,14 @@ impl ProcessList {
                 },
             })
             .filter_map(|proc| {
-                let uid = proc.uid().expect("Can't get process UID");
-                let pid = proc.pid();
-
-                if matches!(filter, UserFilter::Current) && uid != current_uid {
-                    return None;
-                }
-
-                match proc.stat() {
-                    Ok(stat) => {
-                        let cpu_percent = 0.0;
-
-                        let username = match users_cache.get_user_by_uid(uid) {
-                            Some(user) => {
-                                let name: &std::ffi::OsStr = user.name();
-                                name.to_string_lossy().to_string()
-                            }
-                            None => "unknown".to_string(),
-                        };
-                        Some(Process {
-                            name: stat.comm.to_string(),
-                            pid,
-                            ruid: uid,
-                            username,
-                            cpu_percent,
-                        })
-                    }
-                    Err(e) => {
-                        println!("Can't get process stat due to error {e:?}");
-                        None
+                if matches!(filter, UserFilter::Current) {
+                    let uid = proc.uid().expect("Can't get process UID");
+                    if uid != current_uid {
+                        return None;
                     }
                 }
+
+                read_process_details(&proc, users_cache)
             })
             .collect()
     }
