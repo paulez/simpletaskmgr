@@ -56,12 +56,12 @@ impl IntoView for Process {
             label(move || name.to_string()),
         ))
         .style(move |s| {
-            s.items_center().gap(6).grid().grid_template_columns(vec![
-                auto(),
-                auto(),
-                auto(),
-                fr(1.),
-            ])
+            s.width_full()
+                .items_center()
+                .gap(6)
+                .grid()
+                .grid_template_columns(vec![auto(), auto(), auto(), fr(1.)])
+                .padding_vert(4)
         })
     }
 }
