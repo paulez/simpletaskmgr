@@ -1,5 +1,5 @@
 use floem::IntoView;
-use simplelog::Config as LogConfig;
+use log::info;
 use simplelog::*;
 use simpletaskmgr::config::Config;
 use simpletaskmgr::process::Process;
@@ -58,7 +58,11 @@ fn app_view() -> impl IntoView {
 }
 
 fn main() {
-    let _ = SimpleLogger::init(LevelFilter::Debug, LogConfig::default());
+    let log_config = ConfigBuilder::new()
+        .add_filter_allow_str("simpletaskmgr")
+        .build();
+    let _ = SimpleLogger::init(LevelFilter::Debug, log_config);
+    info!("Starting simpletaskmgr");
     if let Err(e) = run_app() {
         log::error!("Application error: {}", e);
         std::process::exit(1);
