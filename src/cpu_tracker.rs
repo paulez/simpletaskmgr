@@ -3,6 +3,8 @@ use std::collections::HashMap;
 
 use crate::process::Process;
 
+const CPU_HISTORY_SIZE: usize = 5;
+
 #[derive(Clone)]
 pub struct CpuTracker {
     process_usage: HashMap<i32, UsageStats>,
@@ -28,6 +30,27 @@ impl CpuTracker {
         }
     }
 
+    fn calculate_cpu_percent(
+        recent_utime: u64,
+        recent_stime: u64,
+        history_size: usize,
+        last_ticks: (u64, u64),
+    ) -> f64 {
+        let total_time_delta =
+            (recent_utime - last_ticks.0) as f64 + (recent_stime - last_ticks.1) as f64;
+        (total_time_delta / (100.0 * history_size as f64)) * 100.0
+    }
+
+    fn update_history(usage: &mut UsageStats, utime: u64, stime: u64) {
+        usage.utime_history.push(utime);
+        usage.stime_history.push(stime);
+
+        if usage.utime_history.len() > CPU_HISTORY_SIZE {
+            usage.utime_history.remove(0);
+            usage.stime_history.remove(0);
+        }
+    }
+
     pub fn update_process_cpu_usage(&mut self, processes: &mut HashMap<i32, Process>) {
         if let Ok(all_processes) = process::all_processes() {
             let mut stat_map: HashMap<i32, (u64, u64)> = HashMap::new();
@@ -45,24 +68,20 @@ impl CpuTracker {
                     match self.process_usage.entry(pid) {
                         std::collections::hash_map::Entry::Occupied(mut occ) => {
                             let usage = occ.get_mut();
-                            usage.utime_history.push(*utime);
-                            usage.stime_history.push(*stime);
-
-                            if usage.utime_history.len() > 5 {
-                                usage.utime_history.remove(0);
-                                usage.stime_history.remove(0);
-                            }
+                            Self::update_history(usage, *utime, *stime);
 
                             if usage.utime_history.len() >= 2 {
                                 let recent_utime: u64 =
                                     usage.utime_history.iter().rev().take(2).sum();
                                 let recent_stime: u64 =
                                     usage.stime_history.iter().rev().take(2).sum();
-                                let history_size = usage.utime_history.len() as f64;
 
-                                let cpu_time_delta = (recent_utime - usage.last_ticks.0) as f64
-                                    + (recent_stime - usage.last_ticks.1) as f64;
-                                let cpu_percent = (cpu_time_delta / (100.0 * history_size)) * 100.0;
+                                let cpu_percent = Self::calculate_cpu_percent(
+                                    recent_utime,
+                                    recent_stime,
+                                    usage.utime_history.len(),
+                                    usage.last_ticks,
+                                );
 
                                 if let Some(process) = processes.get_mut(&pid) {
                                     process.cpu_percent = cpu_percent;
@@ -73,8 +92,8 @@ impl CpuTracker {
                         }
                         std::collections::hash_map::Entry::Vacant(vac) => {
                             vac.insert(UsageStats {
-                                utime_history: vec![*utime],
-                                stime_history: vec![*stime],
+                                utime_history: vec![*utime; CPU_HISTORY_SIZE],
+                                stime_history: vec![*stime; CPU_HISTORY_SIZE],
                                 last_ticks: (*utime, *stime),
                             });
                         }
