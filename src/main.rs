@@ -45,7 +45,7 @@ fn app_view() -> impl IntoView {
             .scroll_style(|s| s.shrink_to_fit().handle_thickness(8));
 
             let main_container = match selected_process_id_item {
-                Some(pid) => container(
+                Some(_pid) => container(
                     h_stack((
                         process_scroll,
                         scroll(process_detail_view(

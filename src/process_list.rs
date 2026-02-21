@@ -3,7 +3,7 @@ use crate::process::{read_process_details, TaskMgrProcess};
 use anyhow::{Context, Result};
 use floem::prelude::{create_rw_signal, RwSignal, SignalUpdate};
 use imbl::Vector;
-use log::debug;
+use log::{debug, warn};
 use procfs::process;
 use std::cell::{LazyCell, RefCell};
 use users::{Users, UsersCache};
@@ -62,53 +62,43 @@ impl ProcessList {
         let current_uid = self.users_cache.get_current_uid();
 
         let all_processes_iter = process::all_processes().context("Can't read /proc filesystem")?;
-        let all_processes: Vec<process::Process> = all_processes_iter
-            .filter_map(|p| match p {
-                Ok(p) => Some(p),
-                Err(_) => None,
-            })
+        let all_processes: Vec<process::Process> =
+            all_processes_iter.filter_map(|p| p.ok()).collect();
+
+        let mut task_mgr_process_list: Vector<TaskMgrProcess> = all_processes
+            .iter()
+            .filter_map(
+                |process| match read_process_details(process, &self.users_cache) {
+                    Some(mut task_mgr_process) => {
+                        let _ = self
+                            .cpu_tracker
+                            .borrow_mut()
+                            .update_process_cpu_usage_for_process(&mut task_mgr_process, process);
+                        Some(task_mgr_process)
+                    }
+                    None => {
+                        warn!("Cannot convert {:?} to TaskMgrProcess", process);
+                        None
+                    }
+                },
+            )
+            .filter(|p| self.should_include_process(p, current_uid, self.show_all_processes))
             .collect();
 
-        let mut processes: Vector<TaskMgrProcess> = Vector::new();
-
-        for p in &all_processes {
-            let proc = p;
-
-            if !self.should_include_process(proc, current_uid, self.show_all_processes) {
-                continue;
-            }
-
-            if let Some(tm_process) = read_process_details(proc, &self.users_cache) {
-                processes.push_back(tm_process);
-            }
-        }
-
-        // Update CPU usage for each process using the process objects from the iterator
-        for proc in &all_processes {
-            // Find the corresponding TaskMgrProcess for this process
-            if let Some(tm_process) = processes.iter_mut().find(|p| p.pid == proc.pid()) {
-                self.cpu_tracker
-                    .borrow_mut()
-                    .update_process_cpu_usage_for_process(tm_process, proc)
-                    .context("Failed to update CPU usage")?;
-            }
-        }
-
         // Sort by CPU usage (highest first)
-        processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
+        task_mgr_process_list.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
 
-        Ok(processes)
+        Ok(task_mgr_process_list)
     }
 
     fn should_include_process(
         &self,
-        proc: &process::Process,
+        proc: &TaskMgrProcess,
         current_uid: u32,
         show_all: bool,
     ) -> bool {
         if !show_all {
-            let uid = proc.uid().expect("Can't get process UID");
-            return uid == current_uid;
+            return proc.ruid == current_uid;
         }
         true
     }
