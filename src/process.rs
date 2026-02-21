@@ -113,28 +113,6 @@ pub fn get_process(pid: i32) -> Result<Process> {
     process_option.ok_or_else(|| anyhow::anyhow!("Process with PID {} not found", pid))
 }
 
-// Helper functions for GUI navigation
-pub fn show_process_detail(pid: i32) {
-    match get_process(pid) {
-        Ok(process) => {
-            log::info!("\n--- Process Details ---");
-            log::info!("PID: {}", process.pid);
-            log::info!("Name: {}", process.name);
-            log::info!("UID: {}", process.ruid);
-            log::info!("Username: {}", process.username);
-            log::info!("CPU Usage: {:.1}%", process.cpu_percent);
-            log::info!("---------------------\n");
-        }
-        Err(e) => {
-            log::error!("Failed to show process details: {}", e);
-        }
-    }
-}
-
-pub fn close_process_detail() {
-    log::info!("Process detail dialog closed");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
