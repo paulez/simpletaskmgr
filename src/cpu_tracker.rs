@@ -1,4 +1,5 @@
 use anyhow::Result;
+use log::debug;
 use procfs::process;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -9,6 +10,7 @@ use crate::process::TaskMgrProcess;
 pub struct CpuTracker {
     process_usage: HashMap<i32, UsageStats>,
     tps: u64,
+    start_instant: Instant,
 }
 
 #[derive(Clone, Default)]
@@ -37,6 +39,7 @@ impl CpuTracker {
         Self {
             process_usage: HashMap::new(),
             tps: procfs::ticks_per_second(),
+            start_instant: Instant::now(),
         }
     }
 
@@ -83,13 +86,24 @@ impl CpuTracker {
             let pid = task_mgr_process.pid;
 
             // Use Instant for high-resolution timing
-            let start_instant = Instant::now();
-            let current_timestamp = start_instant.elapsed().as_secs_f64();
+            let current_timestamp = self.start_instant.elapsed().as_secs_f64();
 
             match self.process_usage.entry(pid) {
                 std::collections::hash_map::Entry::Occupied(mut occ) => {
                     let usage = occ.get_mut();
                     Self::update_history(usage, utime, stime, current_timestamp);
+                    match usage.last_timestamp {
+                        Some(last_timestamp) => debug!(
+                            "Computing usage with current timestamp: {}, last timestamp: {}, delta: {}",
+                            current_timestamp,
+                            last_timestamp,
+                            (current_timestamp - last_timestamp) * 10000.0
+                        ),
+                        None => debug!(
+                            "Computing usage with current timestamp: {}, no last timestamp",
+                            current_timestamp
+                        ),
+                    }
 
                     // Calculate CPU percentage using the delta between current and last ticks
                     let cpu_percent = Self::calculate_cpu_percent(
