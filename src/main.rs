@@ -15,7 +15,7 @@ use floem::unit::UnitExt;
 use floem::views::{container, h_stack, scroll, Decorators, ScrollExt};
 
 fn app_view() -> impl IntoView {
-    let selected_process = create_rw_signal(None);
+    let selected_process_id = create_rw_signal(None);
     let tick = create_rw_signal(());
     let process_list = Rc::new(ProcessList::init());
     let process_list_for_view = Rc::clone(&process_list);
@@ -31,22 +31,26 @@ fn app_view() -> impl IntoView {
     });
 
     let main_view = dyn_container(
-        move || selected_process.get(),
-        move |selected_process_item| {
+        move || selected_process_id.get(),
+        move |selected_process_id_item| {
             let process_scroll =
                 process_list_view(process_list_for_view.processes, move |process: Process| {
-                    selected_process.set(Some(process.clone()));
+                    selected_process_id.set(Some(process.pid));
                 })
                 .style(|s| s.max_width_full().width_full())
                 .scroll()
                 .style(|s| s.padding(10).padding_right(14))
                 .scroll_style(|s| s.shrink_to_fit().handle_thickness(8));
-            let main_container = match selected_process_item {
-                Some(process) => container(
+
+            let main_container = match selected_process_id_item {
+                Some(pid) => container(
                     h_stack((
                         process_scroll,
-                        scroll(process_detail_view(process))
-                            .style(|s| s.width(50_i32.pct()).height_full()),
+                        scroll(process_detail_view(
+                            selected_process_id,
+                            process_list_for_view.processes,
+                        ))
+                        .style(|s| s.width(50_i32.pct()).height_full()),
                     ))
                     .style(|s| s.width_full().height_full()),
                 ),
