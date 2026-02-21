@@ -97,22 +97,6 @@ pub(crate) fn read_process_details(
     }
 }
 
-pub fn get_process(pid: i32) -> Result<TaskMgrProcess> {
-    let users_cache = users::UsersCache::new();
-
-    let all_processes = process::all_processes().context("Can't read /proc filesystem")?;
-
-    let process_option: Option<TaskMgrProcess> = all_processes
-        .filter_map(|p| match p {
-            Ok(p) if p.pid() == pid => Some(p),
-            _ => None,
-        })
-        .filter_map(|proc| read_process_details(&proc, &users_cache))
-        .next();
-
-    process_option.ok_or_else(|| anyhow::anyhow!("Process with PID {} not found", pid))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
