@@ -1,5 +1,5 @@
 use floem::IntoView;
-use log::info;
+use log::{debug, info};
 use simplelog::*;
 use simpletaskmgr::config::Config;
 use simpletaskmgr::process::Process;
@@ -8,10 +8,11 @@ use simpletaskmgr::ui::{process_detail_view, process_list_view};
 use std::rc::Rc;
 
 use floem::action::exec_after;
+use floem::prelude::*;
 use floem::prelude::{create_rw_signal, SignalGet, SignalTrack, SignalUpdate};
 use floem::reactive::create_effect;
 use floem::unit::UnitExt;
-use floem::views::{container, h_stack, scroll, Decorators, ScrollExt};
+use floem::views::{container, dyn_stack, h_stack, scroll, Container, Decorators, ScrollExt};
 
 fn app_view() -> impl IntoView {
     let selected_process = create_rw_signal(None);
@@ -29,25 +30,32 @@ fn app_view() -> impl IntoView {
         });
     });
 
-    let process_scroll =
-        process_list_view(process_list_for_view.processes, move |process: Process| {
-            selected_process.set(Some(process.clone()));
-        })
-        .style(|s| s.max_width_full().width_full())
-        .scroll()
-        .style(|s| s.padding(10).padding_right(14))
-        .scroll_style(|s| s.shrink_to_fit().handle_thickness(8));
-
-    let main_view = match selected_process.get() {
-        Some(process) => container(
-            h_stack((
-                process_scroll,
-                scroll(process_detail_view(process)).style(|s| s.width(50_i32.pct()).height_full()),
-            ))
-            .style(|s| s.width_full().height_full()),
-        ),
-        None => container(process_scroll).style(|s| s.width_full().height_full().border(1.0)),
-    };
+    let main_view = dyn_container(
+        move || selected_process.get(),
+        move |selected_process_item| {
+            let process_scroll =
+                process_list_view(process_list_for_view.processes, move |process: Process| {
+                    selected_process.set(Some(process.clone()));
+                })
+                .style(|s| s.max_width_full().width_full())
+                .scroll()
+                .style(|s| s.padding(10).padding_right(14))
+                .scroll_style(|s| s.shrink_to_fit().handle_thickness(8));
+            match selected_process_item {
+                Some(process) => container(
+                    h_stack((
+                        process_scroll,
+                        scroll(process_detail_view(process))
+                            .style(|s| s.width(50_i32.pct()).height_full()),
+                    ))
+                    .style(|s| s.width_full().height_full()),
+                ),
+                None => {
+                    container(process_scroll).style(|s| s.width_full().height_full().border(1.0))
+                }
+            }
+        },
+    );
 
     main_view.style(|s| {
         s.size(100_i32.pct(), 100_i32.pct())

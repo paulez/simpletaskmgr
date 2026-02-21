@@ -4,12 +4,14 @@ use floem::unit::UnitExt;
 use floem::views::{container, dyn_stack, label, scroll, v_stack, Decorators};
 use floem::{IntoView, View};
 use imbl::Vector;
+use log::debug;
 use std::rc::Rc;
 
 /// Creates a clickable view for a single process item
 pub fn process_item_view(process: Process, on_click: Rc<dyn Fn(Process)>) -> Box<dyn View> {
     let process_clone = process.clone();
     Box::new(process.into_view().on_click(move |_| {
+        debug!("That's a click! Clicked process is {:?}", process_clone);
         on_click(process_clone.clone());
         floem::event::EventPropagation::Continue
     }))
