@@ -1,5 +1,4 @@
 use anyhow::Result;
-use log::warn;
 use procfs::process;
 use std::collections::HashMap;
 
@@ -52,58 +51,60 @@ impl CpuTracker {
         }
     }
 
+    pub fn update_process_cpu_usage_for_process(
+        &mut self,
+        task_mgr_process: &mut TaskMgrProcess,
+        process_obj: &process::Process,
+    ) -> Result<()> {
+        // Read stat for the process
+        if let Ok(proc_stat) = process_obj.stat() {
+            let utime = proc_stat.utime;
+            let stime = proc_stat.stime;
+            let pid = task_mgr_process.pid;
+
+            match self.process_usage.entry(pid) {
+                std::collections::hash_map::Entry::Occupied(mut occ) => {
+                    let usage = occ.get_mut();
+                    Self::update_history(usage, utime, stime);
+
+                    if usage.utime_history.len() >= 2 {
+                        let recent_utime: u64 = usage.utime_history.iter().rev().take(2).sum();
+                        let recent_stime: u64 = usage.stime_history.iter().rev().take(2).sum();
+
+                        let cpu_percent = Self::calculate_cpu_percent(
+                            recent_utime,
+                            recent_stime,
+                            usage.utime_history.len(),
+                            usage.last_ticks,
+                        );
+
+                        task_mgr_process.cpu_percent = cpu_percent;
+                    }
+
+                    usage.last_ticks = (utime, stime);
+                }
+                std::collections::hash_map::Entry::Vacant(vac) => {
+                    vac.insert(UsageStats {
+                        utime_history: vec![utime; Config::CPU_HISTORY_SIZE],
+                        stime_history: vec![stime; Config::CPU_HISTORY_SIZE],
+                        last_ticks: (utime, stime),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn update_process_cpu_usage(
         &mut self,
         processes: &mut HashMap<i32, TaskMgrProcess>,
         process_objects: &HashMap<i32, process::Process>,
     ) -> Result<()> {
-        let mut stat_map: HashMap<i32, (u64, u64)> = HashMap::new();
-
-        // Use the pre-opened process objects to read stats
-        for (pid, process_obj) in process_objects.iter() {
-            // Try to read stat for each process using the pre-opened objects
-            if let Ok(proc_stat) = process_obj.stat() {
-                stat_map.insert(*pid, (proc_stat.utime, proc_stat.stime));
-            } else {
-                warn!("Failed to read process stat for PID {}", pid);
-            }
-        }
-
-        let pids: Vec<i32> = processes.keys().copied().collect();
-
-        for pid in pids {
-            if let Some((utime, stime)) = stat_map.get(&pid) {
-                match self.process_usage.entry(pid) {
-                    std::collections::hash_map::Entry::Occupied(mut occ) => {
-                        let usage = occ.get_mut();
-                        Self::update_history(usage, *utime, *stime);
-
-                        if usage.utime_history.len() >= 2 {
-                            let recent_utime: u64 = usage.utime_history.iter().rev().take(2).sum();
-                            let recent_stime: u64 = usage.stime_history.iter().rev().take(2).sum();
-
-                            let cpu_percent = Self::calculate_cpu_percent(
-                                recent_utime,
-                                recent_stime,
-                                usage.utime_history.len(),
-                                usage.last_ticks,
-                            );
-
-                            if let Some(process) = processes.get_mut(&pid) {
-                                process.cpu_percent = cpu_percent;
-                            }
-                        }
-
-                        usage.last_ticks = (*utime, *stime);
-                    }
-                    std::collections::hash_map::Entry::Vacant(vac) => {
-                        vac.insert(UsageStats {
-                            utime_history: vec![*utime; Config::CPU_HISTORY_SIZE],
-                            stime_history: vec![*stime; Config::CPU_HISTORY_SIZE],
-                            last_ticks: (*utime, *stime),
-                        });
-                    }
-                }
+        // Call the new method for each process
+        for (pid, tm_process) in processes.iter_mut() {
+            if let Some(proc_obj) = process_objects.get(pid) {
+                self.update_process_cpu_usage_for_process(tm_process, proc_obj)?;
             }
         }
 
