@@ -41,7 +41,7 @@ fn app_view() -> impl IntoView {
                 .scroll()
                 .style(|s| s.padding(10).padding_right(14))
                 .scroll_style(|s| s.shrink_to_fit().handle_thickness(8));
-            match selected_process_item {
+            let main_container = match selected_process_item {
                 Some(process) => container(
                     h_stack((
                         process_scroll,
@@ -50,10 +50,9 @@ fn app_view() -> impl IntoView {
                     ))
                     .style(|s| s.width_full().height_full()),
                 ),
-                None => {
-                    container(process_scroll).style(|s| s.width_full().height_full().border(1.0))
-                }
-            }
+                None => container(process_scroll),
+            };
+            main_container.style(|s| s.width_full().height_full().border(1.0))
         },
     );
 
