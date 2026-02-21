@@ -47,7 +47,7 @@ impl ProcessList {
     }
 
     pub fn update_process_list(&self) {
-        match self.process_list() {
+        match self.refresh_process_list() {
             Ok(processes) => self.processes.set(processes),
             Err(e) => {
                 log::error!("Failed to update process list: {}", e);
@@ -56,11 +56,32 @@ impl ProcessList {
         }
     }
 
-    fn process_list(&self) -> Result<Vector<TaskMgrProcess>> {
+    pub fn refresh_process_list(&self) -> Result<Vector<TaskMgrProcess>> {
         debug!("Refreshing process list");
-        // Get process list using process_names() from lib.rs
-        let processes = Self::process_names(&self.users_cache, self.show_all_processes)
-            .context("Failed to get process names")?;
+
+        let current_uid = self.users_cache.get_current_uid();
+
+        let all_processes = process::all_processes().context("Can't read /proc filesystem")?;
+
+        let mut processes: Vector<TaskMgrProcess> = all_processes
+            .filter_map(|p| match p {
+                Ok(p) => Some(p),
+                Err(e) => match e {
+                    procfs::ProcError::NotFound(_) => None,
+                    procfs::ProcError::Io(_e, _path) => None,
+                    x => {
+                        log::warn!("Can't read process due to error: {}", x);
+                        None
+                    }
+                },
+            })
+            .filter_map(|proc| {
+                if !self.should_include_process(&proc, current_uid, self.show_all_processes) {
+                    return None;
+                }
+                read_process_details(&proc, &self.users_cache)
+            })
+            .collect();
 
         // Update CPU usage for each process
         let mut process_map: std::collections::HashMap<i32, TaskMgrProcess> = processes
@@ -81,42 +102,16 @@ impl ProcessList {
         Ok(processes)
     }
 
-    fn should_include_process(proc: &process::Process, current_uid: u32, show_all: bool) -> bool {
+    fn should_include_process(
+        &self,
+        proc: &process::Process,
+        current_uid: u32,
+        show_all: bool,
+    ) -> bool {
         if !show_all {
             let uid = proc.uid().expect("Can't get process UID");
             return uid == current_uid;
         }
         true
-    }
-
-    pub fn process_names(
-        users_cache: &UsersCache,
-        show_all: bool,
-    ) -> Result<Vector<TaskMgrProcess>> {
-        let current_uid = users_cache.get_current_uid();
-
-        let all_processes = process::all_processes().context("Can't read /proc filesystem")?;
-
-        let processes: Vector<TaskMgrProcess> = all_processes
-            .filter_map(|p| match p {
-                Ok(p) => Some(p),
-                Err(e) => match e {
-                    procfs::ProcError::NotFound(_) => None,
-                    procfs::ProcError::Io(_e, _path) => None,
-                    x => {
-                        log::warn!("Can't read process due to error: {}", x);
-                        None
-                    }
-                },
-            })
-            .filter_map(|proc| {
-                if !Self::should_include_process(&proc, current_uid, show_all) {
-                    return None;
-                }
-                read_process_details(&proc, users_cache)
-            })
-            .collect();
-
-        Ok(processes)
     }
 }

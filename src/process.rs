@@ -1,4 +1,3 @@
-use anyhow::{Context, Result};
 use floem::{
     taffy::style_helpers::{auto, fr},
     views::{h_stack, label, Decorators, Stack},

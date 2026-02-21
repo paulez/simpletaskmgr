@@ -1,7 +1,6 @@
 use imbl::Vector;
 use rstest::*;
 use simpletaskmgr::{process::TaskMgrProcess, process_list::ProcessList};
-use users::UsersCache;
 
 #[rstest]
 fn test_process_names_returns_vector(all_processes: Vector<TaskMgrProcess>) {
@@ -53,6 +52,8 @@ fn test_process_names_handles_missing_users(all_processes: Vector<TaskMgrProcess
 
 #[fixture]
 fn all_processes() -> Vector<TaskMgrProcess> {
-    let users_cache = UsersCache::new();
-    ProcessList::process_names(&users_cache, true).expect("Failed to get process list")
+    let process_list = ProcessList::init();
+    process_list
+        .refresh_process_list()
+        .expect("Failed to get process list")
 }
