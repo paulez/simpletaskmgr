@@ -63,25 +63,40 @@ impl ProcessList {
 
         let all_processes = process::all_processes().context("Can't read /proc filesystem")?;
 
-        let mut processes: Vector<TaskMgrProcess> = all_processes
-            .filter_map(|p| match p {
-                Ok(p) => Some(p),
+        // Collect both TaskMgrProcess objects and their Process objects in a single pass
+        let mut processes: Vector<TaskMgrProcess> = Vector::new();
+        let mut process_objects_map: std::collections::HashMap<i32, process::Process> =
+            std::collections::HashMap::new();
+
+        for p in all_processes {
+            let proc = match p {
+                Ok(p) => p,
                 Err(e) => match e {
-                    procfs::ProcError::NotFound(_) => None,
-                    procfs::ProcError::Io(_e, _path) => None,
+                    procfs::ProcError::NotFound(_) => continue,
+                    procfs::ProcError::Io(_e, _path) => continue,
                     x => {
                         log::warn!("Can't read process due to error: {}", x);
-                        None
+                        continue;
                     }
                 },
-            })
-            .filter_map(|proc| {
-                if !self.should_include_process(&proc, current_uid, self.show_all_processes) {
-                    return None;
-                }
-                read_process_details(&proc, &self.users_cache)
-            })
-            .collect();
+            };
+
+            // Store process object for CPU tracking (even if not included in final list)
+            // We need to create a new Process since we can't clone the iterator item
+            // This is still better than what we had before since we're only creating
+            // Process objects for PIDs that actually exist
+            if let Ok(new_proc) = process::Process::new(proc.pid()) {
+                process_objects_map.insert(proc.pid(), new_proc);
+            }
+
+            if !self.should_include_process(&proc, current_uid, self.show_all_processes) {
+                continue;
+            }
+
+            if let Some(tm_process) = read_process_details(&proc, &self.users_cache) {
+                processes.push_back(tm_process);
+            }
+        }
 
         // Update CPU usage for each process
         let mut process_map: std::collections::HashMap<i32, TaskMgrProcess> = processes
@@ -90,7 +105,7 @@ impl ProcessList {
             .collect();
         self.cpu_tracker
             .borrow_mut()
-            .update_process_cpu_usage(&mut process_map)
+            .update_process_cpu_usage(&mut process_map, &process_objects_map)
             .context("Failed to update CPU usage")?;
 
         // Convert back to vector

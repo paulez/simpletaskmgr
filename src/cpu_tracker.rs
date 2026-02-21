@@ -55,20 +55,17 @@ impl CpuTracker {
     pub fn update_process_cpu_usage(
         &mut self,
         processes: &mut HashMap<i32, TaskMgrProcess>,
+        process_objects: &HashMap<i32, process::Process>,
     ) -> Result<()> {
         let mut stat_map: HashMap<i32, (u64, u64)> = HashMap::new();
 
-        // Iterate over the processes argument instead of calling process::all_processes()
-        for (pid, _process) in processes.iter() {
-            // Try to read stat for each process
-            if let Ok(process_obj) = process::Process::new(*pid) {
-                if let Ok(proc_stat) = process_obj.stat() {
-                    stat_map.insert(*pid, (proc_stat.utime, proc_stat.stime));
-                } else {
-                    warn!("Failed to read process stat for PID {}", pid);
-                }
+        // Use the pre-opened process objects to read stats
+        for (pid, process_obj) in process_objects.iter() {
+            // Try to read stat for each process using the pre-opened objects
+            if let Ok(proc_stat) = process_obj.stat() {
+                stat_map.insert(*pid, (proc_stat.utime, proc_stat.stime));
             } else {
-                warn!("Failed to create process object for PID {}", pid);
+                warn!("Failed to read process stat for PID {}", pid);
             }
         }
 
@@ -199,7 +196,7 @@ mod tests {
 
         // Update CPU usage using the processes argument
         // In test environment without /proc, it may fail but shouldn't panic
-        let _ = cpu_tracker.update_process_cpu_usage(&mut processes);
+        let _ = cpu_tracker.update_process_cpu_usage(&mut processes, &HashMap::new());
 
         // Function should not panic even if it returns an error
 
@@ -217,7 +214,7 @@ mod tests {
         let mut processes = HashMap::new();
 
         // Test with empty process list
-        let result = cpu_tracker.update_process_cpu_usage(&mut processes);
+        let result = cpu_tracker.update_process_cpu_usage(&mut processes, &HashMap::new());
 
         // Should not panic and should return appropriate result
         match result {
@@ -246,7 +243,7 @@ mod tests {
         assert_eq!(processes.get(&400).unwrap().cpu_percent, 0.0);
 
         // Try to update (will fail in test environment, but shouldn't panic)
-        let _ = cpu_tracker.update_process_cpu_usage(&mut processes);
+        let _ = cpu_tracker.update_process_cpu_usage(&mut processes, &HashMap::new());
 
         // Process should still exist after update attempt
         assert_eq!(processes.len(), 1);
