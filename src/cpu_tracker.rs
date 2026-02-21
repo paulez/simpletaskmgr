@@ -4,7 +4,7 @@ use procfs::process;
 use std::collections::HashMap;
 
 use crate::config::Config;
-use crate::process::Process;
+use crate::process::TaskMgrProcess;
 
 #[derive(Clone)]
 pub struct CpuTracker {
@@ -54,7 +54,7 @@ impl CpuTracker {
 
     pub fn update_process_cpu_usage(
         &mut self,
-        processes: &mut HashMap<i32, Process>,
+        processes: &mut HashMap<i32, TaskMgrProcess>,
     ) -> Result<()> {
         let mut stat_map: HashMap<i32, (u64, u64)> = HashMap::new();
 
@@ -184,9 +184,9 @@ mod tests {
         let mut processes = HashMap::new();
 
         // Create test processes
-        let p1 = Process::new("test1".to_string(), 100, 1000, "user1".to_string(), 0.0);
-        let p2 = Process::new("test2".to_string(), 200, 1000, "user2".to_string(), 0.0);
-        let p3 = Process::new("test3".to_string(), 300, 1000, "user3".to_string(), 0.0);
+        let p1 = TaskMgrProcess::new("test1".to_string(), 100, 1000, "user1".to_string(), 0.0);
+        let p2 = TaskMgrProcess::new("test2".to_string(), 200, 1000, "user2".to_string(), 0.0);
+        let p3 = TaskMgrProcess::new("test3".to_string(), 300, 1000, "user3".to_string(), 0.0);
 
         processes.insert(100, p1);
         processes.insert(200, p2);
@@ -233,7 +233,7 @@ mod tests {
         let mut processes = HashMap::new();
 
         // Add a process that hasn't been tracked yet
-        let p1 = Process::new(
+        let p1 = TaskMgrProcess::new(
             "new_process".to_string(),
             400,
             1000,

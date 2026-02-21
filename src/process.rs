@@ -8,7 +8,7 @@ pub use procfs::process;
 pub use users::{Users, UsersCache};
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Process {
+pub struct TaskMgrProcess {
     pub name: String,
     pub pid: i32,
     pub ruid: u32,
@@ -16,9 +16,9 @@ pub struct Process {
     pub cpu_percent: f64, // Running average of CPU usage over last 5 seconds
 }
 
-impl Eq for Process {}
+impl Eq for TaskMgrProcess {}
 
-impl std::hash::Hash for Process {
+impl std::hash::Hash for TaskMgrProcess {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.name.hash(state);
         self.pid.hash(state);
@@ -27,7 +27,7 @@ impl std::hash::Hash for Process {
     }
 }
 
-impl Process {
+impl TaskMgrProcess {
     pub fn new(name: String, pid: i32, ruid: u32, username: String, cpu_percent: f64) -> Self {
         Self {
             name,
@@ -43,7 +43,7 @@ impl Process {
     }
 }
 
-impl IntoView for Process {
+impl IntoView for TaskMgrProcess {
     type V = Stack;
 
     fn into_view(self) -> Self::V {
@@ -69,7 +69,7 @@ impl IntoView for Process {
 pub(crate) fn read_process_details(
     proc: &process::Process,
     users_cache: &UsersCache,
-) -> Option<crate::process::Process> {
+) -> Option<crate::process::TaskMgrProcess> {
     let uid = proc.uid().expect("Can't get process UID");
     let pid = proc.pid();
 
@@ -82,7 +82,7 @@ pub(crate) fn read_process_details(
                 }
                 None => "unknown".to_string(),
             };
-            Some(Process {
+            Some(TaskMgrProcess {
                 name: stat.comm.to_string(),
                 pid,
                 ruid: uid,
@@ -97,12 +97,12 @@ pub(crate) fn read_process_details(
     }
 }
 
-pub fn get_process(pid: i32) -> Result<Process> {
+pub fn get_process(pid: i32) -> Result<TaskMgrProcess> {
     let users_cache = users::UsersCache::new();
 
     let all_processes = process::all_processes().context("Can't read /proc filesystem")?;
 
-    let process_option: Option<Process> = all_processes
+    let process_option: Option<TaskMgrProcess> = all_processes
         .filter_map(|p| match p {
             Ok(p) if p.pid() == pid => Some(p),
             _ => None,
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_process_struct_creation() {
-        let p = Process::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
+        let p = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
         assert_eq!(p.name, "test");
         assert_eq!(p.pid, 123);
         assert_eq!(p.ruid, 456);
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_process_struct_clone() {
-        let p1 = Process::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
+        let p1 = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
         let p2 = p1.clone();
         assert_eq!(p1, p2);
         assert!(p1 == p2);
@@ -137,9 +137,9 @@ mod tests {
 
     #[test]
     fn test_process_struct_partial_eq() {
-        let p1 = Process::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
-        let p2 = Process::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
-        let p3 = Process::new("different".to_string(), 123, 456, "user".to_string(), 0.0);
+        let p1 = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
+        let p2 = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
+        let p3 = TaskMgrProcess::new("different".to_string(), 123, 456, "user".to_string(), 0.0);
 
         assert_eq!(p1, p2);
         assert_ne!(p1, p3);
@@ -147,14 +147,14 @@ mod tests {
 
     #[test]
     fn test_process_struct_debug() {
-        let p = Process::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
+        let p = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
         let debug_string = format!("{:?}", p);
-        assert!(debug_string.contains("Process"));
+        assert!(debug_string.contains("TaskMgrProcess"));
     }
 
     #[test]
     fn test_process_fields_have_valid_values() {
-        let p = Process::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
+        let p = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
         assert!(!p.name.is_empty());
         assert!(p.pid > 0);
         assert!(p.ruid >= 0);
@@ -165,9 +165,9 @@ mod tests {
     #[test]
     fn test_process_view_with_different_values() {
         let test_cases = vec![
-            Process::new("bash".to_string(), 1, 0, "root".to_string(), 0.0),
-            Process::new("firefox".to_string(), 1234, 1000, "paul".to_string(), 0.0),
-            Process::new("systemd".to_string(), 1, 0, "root".to_string(), 0.0),
+            TaskMgrProcess::new("bash".to_string(), 1, 0, "root".to_string(), 0.0),
+            TaskMgrProcess::new("firefox".to_string(), 1234, 1000, "paul".to_string(), 0.0),
+            TaskMgrProcess::new("systemd".to_string(), 1, 0, "root".to_string(), 0.0),
         ];
 
         for p in test_cases {
@@ -182,9 +182,9 @@ mod tests {
 
     #[test]
     fn test_process_struct_hash() {
-        let p1 = Process::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
-        let p2 = Process::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
-        let p3 = Process::new("different".to_string(), 456, 123, "other".to_string(), 0.0);
+        let p1 = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
+        let p2 = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
+        let p3 = TaskMgrProcess::new("different".to_string(), 456, 123, "other".to_string(), 0.0);
 
         assert_eq!(p1, p2);
         assert_ne!(p1, p3);

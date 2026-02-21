@@ -1,15 +1,15 @@
 use imbl::Vector;
 use rstest::*;
-use simpletaskmgr::{process::Process, process_list::ProcessList};
+use simpletaskmgr::{process::TaskMgrProcess, process_list::ProcessList};
 use users::UsersCache;
 
 #[rstest]
-fn test_process_names_returns_vector(all_processes: Vector<Process>) {
+fn test_process_names_returns_vector(all_processes: Vector<TaskMgrProcess>) {
     assert!(!all_processes.is_empty());
 }
 
 #[rstest]
-fn test_process_names_contains_expected_fields(all_processes: Vector<Process>) {
+fn test_process_names_contains_expected_fields(all_processes: Vector<TaskMgrProcess>) {
     for process in all_processes.iter() {
         assert!(!process.name.is_empty());
         assert!(process.pid > 0);
@@ -19,7 +19,7 @@ fn test_process_names_contains_expected_fields(all_processes: Vector<Process>) {
 }
 
 #[rstest]
-fn test_process_names_has_unique_pids(all_processes: Vector<Process>) {
+fn test_process_names_has_unique_pids(all_processes: Vector<TaskMgrProcess>) {
     let mut pids = std::collections::HashSet::new();
     for process in all_processes.iter() {
         assert!(
@@ -31,7 +31,7 @@ fn test_process_names_has_unique_pids(all_processes: Vector<Process>) {
 }
 
 #[rstest]
-fn test_process_names_struct_fields_accessible(all_processes: Vector<Process>) {
+fn test_process_names_struct_fields_accessible(all_processes: Vector<TaskMgrProcess>) {
     if let Some(process) = all_processes.get(0) {
         let _name: String = process.name.clone();
         let _pid: i32 = process.pid;
@@ -41,7 +41,7 @@ fn test_process_names_struct_fields_accessible(all_processes: Vector<Process>) {
 }
 
 #[rstest]
-fn test_process_names_handles_missing_users(all_processes: Vector<Process>) {
+fn test_process_names_handles_missing_users(all_processes: Vector<TaskMgrProcess>) {
     // This test verifies that processes with non-existent users still work
     for process in all_processes.iter() {
         // Even if username is "unknown", it's still a valid result
@@ -52,7 +52,7 @@ fn test_process_names_handles_missing_users(all_processes: Vector<Process>) {
 }
 
 #[fixture]
-fn all_processes() -> Vector<Process> {
+fn all_processes() -> Vector<TaskMgrProcess> {
     let users_cache = UsersCache::new();
     ProcessList::process_names(&users_cache, true).expect("Failed to get process list")
 }

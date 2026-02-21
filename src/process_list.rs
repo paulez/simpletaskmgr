@@ -1,5 +1,5 @@
 use crate::cpu_tracker::CpuTracker;
-use crate::process::{read_process_details, Process};
+use crate::process::{read_process_details, TaskMgrProcess};
 use anyhow::{Context, Result};
 use floem::prelude::{create_rw_signal, RwSignal, SignalUpdate};
 use imbl::Vector;
@@ -15,7 +15,7 @@ thread_local! {
 }
 
 pub struct ProcessList {
-    pub processes: RwSignal<Vector<Process>>,
+    pub processes: RwSignal<Vector<TaskMgrProcess>>,
     cpu_tracker: RefCell<CpuTracker>,
     users_cache: UsersCache,
     show_all_processes: bool,
@@ -56,16 +56,16 @@ impl ProcessList {
         }
     }
 
-    fn process_list(&self) -> Result<Vector<Process>> {
+    fn process_list(&self) -> Result<Vector<TaskMgrProcess>> {
         debug!("Refreshing process list");
         // Get process list using process_names() from lib.rs
         let processes = Self::process_names(&self.users_cache, self.show_all_processes)
             .context("Failed to get process names")?;
 
         // Update CPU usage for each process
-        let mut process_map: std::collections::HashMap<i32, Process> = processes
+        let mut process_map: std::collections::HashMap<i32, TaskMgrProcess> = processes
             .iter()
-            .map(|p: &Process| (p.pid, p.clone()))
+            .map(|p: &TaskMgrProcess| (p.pid, p.clone()))
             .collect();
         self.cpu_tracker
             .borrow_mut()
@@ -73,7 +73,7 @@ impl ProcessList {
             .context("Failed to update CPU usage")?;
 
         // Convert back to vector
-        let mut processes: Vector<Process> = process_map.values().cloned().collect();
+        let mut processes: Vector<TaskMgrProcess> = process_map.values().cloned().collect();
 
         // Sort by CPU usage (highest first)
         processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
@@ -89,12 +89,15 @@ impl ProcessList {
         true
     }
 
-    pub fn process_names(users_cache: &UsersCache, show_all: bool) -> Result<Vector<Process>> {
+    pub fn process_names(
+        users_cache: &UsersCache,
+        show_all: bool,
+    ) -> Result<Vector<TaskMgrProcess>> {
         let current_uid = users_cache.get_current_uid();
 
         let all_processes = process::all_processes().context("Can't read /proc filesystem")?;
 
-        let processes: Vector<Process> = all_processes
+        let processes: Vector<TaskMgrProcess> = all_processes
             .filter_map(|p| match p {
                 Ok(p) => Some(p),
                 Err(e) => match e {

@@ -1,4 +1,4 @@
-use crate::process::Process;
+use crate::process::TaskMgrProcess;
 use floem::prelude::{RwSignal, SignalGet};
 use floem::unit::UnitExt;
 use floem::views::{container, dyn_container, dyn_stack, label, scroll, text, v_stack, Decorators};
@@ -8,7 +8,10 @@ use log::{debug, error};
 use std::rc::Rc;
 
 /// Creates a clickable view for a single process item
-pub fn process_item_view(process: Process, on_click: Rc<dyn Fn(Process)>) -> Box<dyn View> {
+pub fn process_item_view(
+    process: TaskMgrProcess,
+    on_click: Rc<dyn Fn(TaskMgrProcess)>,
+) -> Box<dyn View> {
     let process_clone = process.clone();
     Box::new(process.into_view().on_click(move |_| {
         debug!("That's a click! Clicked process is {:?}", process_clone);
@@ -20,7 +23,7 @@ pub fn process_item_view(process: Process, on_click: Rc<dyn Fn(Process)>) -> Box
 /// Creates a detailed view showing comprehensive information about a process
 pub fn process_detail_view(
     pid_signal: RwSignal<Option<i32>>,
-    processes: RwSignal<Vector<Process>>,
+    processes: RwSignal<Vector<TaskMgrProcess>>,
 ) -> Box<dyn View> {
     let pid = pid_signal.get();
     match pid {
@@ -68,13 +71,13 @@ pub fn process_detail_view(
 
 /// Creates a dynamic stack view that displays the list of processes
 pub fn process_list_view(
-    processes: RwSignal<Vector<Process>>,
-    on_click: impl Fn(Process) + 'static,
+    processes: RwSignal<Vector<TaskMgrProcess>>,
+    on_click: impl Fn(TaskMgrProcess) + 'static,
 ) -> impl IntoView {
     let on_click = Rc::new(on_click);
     dyn_stack(
         move || processes.get(),
-        |process: &Process| process.clone(),
+        |process: &TaskMgrProcess| process.clone(),
         move |process| process_item_view(process, on_click.clone()),
     )
     .style(|s| s.flex_col().min_size(0, 0))

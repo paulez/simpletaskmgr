@@ -2,7 +2,7 @@ use floem::IntoView;
 use log::info;
 use simplelog::*;
 use simpletaskmgr::config::Config;
-use simpletaskmgr::process::Process;
+use simpletaskmgr::process::TaskMgrProcess;
 use simpletaskmgr::process_list::ProcessList;
 use simpletaskmgr::ui::{process_detail_view, process_list_view};
 use std::rc::Rc;
@@ -33,14 +33,16 @@ fn app_view() -> impl IntoView {
     let main_view = dyn_container(
         move || selected_process_id.get(),
         move |selected_process_id_item| {
-            let process_scroll =
-                process_list_view(process_list_for_view.processes, move |process: Process| {
+            let process_scroll = process_list_view(
+                process_list_for_view.processes,
+                move |process: TaskMgrProcess| {
                     selected_process_id.set(Some(process.pid));
-                })
-                .style(|s| s.max_width_full().width_full())
-                .scroll()
-                .style(|s| s.padding(10).padding_right(14))
-                .scroll_style(|s| s.shrink_to_fit().handle_thickness(8));
+                },
+            )
+            .style(|s| s.max_width_full().width_full())
+            .scroll()
+            .style(|s| s.padding(10).padding_right(14))
+            .scroll_style(|s| s.shrink_to_fit().handle_thickness(8));
 
             let main_container = match selected_process_id_item {
                 Some(pid) => container(
