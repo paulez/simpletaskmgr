@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use log::warn;
 use procfs::process;
 use std::collections::HashMap;
@@ -56,18 +56,19 @@ impl CpuTracker {
         &mut self,
         processes: &mut HashMap<i32, Process>,
     ) -> Result<()> {
-        let all_processes = process::all_processes().context("Failed to read /proc filesystem")?;
-
         let mut stat_map: HashMap<i32, (u64, u64)> = HashMap::new();
 
-        for proc in all_processes.flatten() {
-            match proc.stat() {
-                Ok(stat) => {
-                    stat_map.insert(proc.pid(), (stat.utime, stat.stime));
+        // Iterate over the processes argument instead of calling process::all_processes()
+        for (pid, _process) in processes.iter() {
+            // Try to read stat for each process
+            if let Ok(process_obj) = process::Process::new(*pid) {
+                if let Ok(proc_stat) = process_obj.stat() {
+                    stat_map.insert(*pid, (proc_stat.utime, proc_stat.stime));
+                } else {
+                    warn!("Failed to read process stat for PID {}", pid);
                 }
-                Err(e) => {
-                    warn!("Failed to read process stat for PID {}: {}", proc.pid(), e);
-                }
+            } else {
+                warn!("Failed to create process object for PID {}", pid);
             }
         }
 
@@ -196,12 +197,11 @@ mod tests {
         assert_eq!(processes.get(&200).unwrap().cpu_percent, 0.0);
         assert_eq!(processes.get(&300).unwrap().cpu_percent, 0.0);
 
-        // Update CPU usage (this will fail in test environment since /proc is not available)
-        // But we can test that the function doesn't panic and handles the case gracefully
+        // Update CPU usage using the processes argument
+        // In test environment without /proc, it may fail but shouldn't panic
         let _ = cpu_tracker.update_process_cpu_usage(&mut processes);
 
         // Function should not panic even if it returns an error
-        // (expected in test environment without /proc filesystem)
 
         // Verify all processes still exist and have valid data
         assert_eq!(processes.len(), 3);
