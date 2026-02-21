@@ -117,13 +117,13 @@ pub fn get_process(pid: i32) -> Result<Process> {
 pub fn show_process_detail(pid: i32) {
     match get_process(pid) {
         Ok(process) => {
-            log::info!("\n=== Process Details ===");
+            log::info!("\n--- Process Details ---");
             log::info!("PID: {}", process.pid);
             log::info!("Name: {}", process.name);
             log::info!("UID: {}", process.ruid);
             log::info!("Username: {}", process.username);
             log::info!("CPU Usage: {:.1}%", process.cpu_percent);
-            log::info!("======================\n");
+            log::info!("---------------------\n");
         }
         Err(e) => {
             log::error!("Failed to show process details: {}", e);

@@ -30,7 +30,8 @@ pub fn process_detail_view(process: Process) -> Box<dyn View> {
             scroll(
                 container(
                     v_stack((
-                        label(move || "=== Process Details ==="),
+                        label(move || "Process Details")
+                            .style(move |s| s.font_bold().font_size(18.0)),
                         label(move || format!("PID: {}", pid)),
                         label(move || format!("Name: {}", name)),
                         label(move || format!("UID: {}", ruid)),

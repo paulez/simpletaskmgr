@@ -1,5 +1,5 @@
 use floem::IntoView;
-use log::{debug, info};
+use log::info;
 use simplelog::*;
 use simpletaskmgr::config::Config;
 use simpletaskmgr::process::Process;
@@ -12,7 +12,7 @@ use floem::prelude::*;
 use floem::prelude::{create_rw_signal, SignalGet, SignalTrack, SignalUpdate};
 use floem::reactive::create_effect;
 use floem::unit::UnitExt;
-use floem::views::{container, dyn_stack, h_stack, scroll, Container, Decorators, ScrollExt};
+use floem::views::{container, h_stack, scroll, Decorators, ScrollExt};
 
 fn app_view() -> impl IntoView {
     let selected_process = create_rw_signal(None);
