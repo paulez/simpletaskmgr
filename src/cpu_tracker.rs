@@ -1,6 +1,7 @@
 use anyhow::Result;
 use log::debug;
 use procfs::process;
+use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -16,14 +17,14 @@ pub struct CpuTracker {
 #[derive(Clone, Default)]
 pub struct UsageStats {
     pub last_ticks: (u64, u64),
-    pub last_timestamp: Option<f64>,
+    pub last_timestamp: f64,
 }
 
 impl UsageStats {
-    fn new(utime: u64, stime: u64) -> Self {
+    fn new(utime: u64, stime: u64, last_timestamp: f64) -> Self {
         Self {
             last_ticks: (utime, stime),
-            last_timestamp: None,
+            last_timestamp,
         }
     }
 }
@@ -46,19 +47,15 @@ impl CpuTracker {
     fn calculate_cpu_percent(
         recent_utime: u64,
         recent_stime: u64,
-        _history_size: usize,
         last_ticks: (u64, u64),
         tps: u64,
         current_timestamp: f64,
-        last_timestamp: Option<f64>,
+        last_timestamp: f64,
     ) -> f64 {
         let total_time_delta =
             (recent_utime - last_ticks.0) as f64 + (recent_stime - last_ticks.1) as f64;
 
-        let time_elapsed = match last_timestamp {
-            Some(last_ts) => current_timestamp - last_ts,
-            None => return 0.0, // Not enough data yet
-        };
+        let time_elapsed = current_timestamp - last_timestamp;
 
         if time_elapsed <= 0.0 {
             return 0.0;
@@ -71,7 +68,7 @@ impl CpuTracker {
 
     fn update_history(usage: &mut UsageStats, utime: u64, stime: u64, timestamp: f64) {
         usage.last_ticks = (utime, stime);
-        usage.last_timestamp = Some(timestamp);
+        usage.last_timestamp = timestamp;
     }
 
     pub fn update_process_cpu_usage_for_process(
@@ -89,27 +86,13 @@ impl CpuTracker {
             let current_timestamp = self.start_instant.elapsed().as_secs_f64();
 
             match self.process_usage.entry(pid) {
-                std::collections::hash_map::Entry::Occupied(mut occ) => {
+                Occupied(mut occ) => {
                     let usage = occ.get_mut();
-                    Self::update_history(usage, utime, stime, current_timestamp);
-                    match usage.last_timestamp {
-                        Some(last_timestamp) => debug!(
-                            "Computing usage with current timestamp: {}, last timestamp: {}, delta: {}",
-                            current_timestamp,
-                            last_timestamp,
-                            (current_timestamp - last_timestamp) * 10000.0
-                        ),
-                        None => debug!(
-                            "Computing usage with current timestamp: {}, no last timestamp",
-                            current_timestamp
-                        ),
-                    }
 
                     // Calculate CPU percentage using the delta between current and last ticks
                     let cpu_percent = Self::calculate_cpu_percent(
                         utime,
                         stime,
-                        0, // history_size no longer needed
                         usage.last_ticks,
                         self.tps,
                         current_timestamp,
@@ -117,9 +100,10 @@ impl CpuTracker {
                     );
 
                     task_mgr_process.cpu_percent = cpu_percent;
+                    Self::update_history(usage, utime, stime, current_timestamp);
                 }
-                std::collections::hash_map::Entry::Vacant(vac) => {
-                    vac.insert(UsageStats::new(utime, stime));
+                Vacant(vac) => {
+                    vac.insert(UsageStats::new(utime, stime, current_timestamp));
                 }
             }
         }
@@ -154,16 +138,14 @@ mod tests {
         // Simulate a process using 100% CPU
         let recent_utime = 200;
         let recent_stime = 200;
-        let history_size = 2;
         let last_ticks = (100, 100);
         let tps = 100;
         let current_timestamp = 1001_f64;
-        let last_timestamp = Some(1000_f64);
+        let last_timestamp = 1000_f64;
 
         let cpu_percent = CpuTracker::calculate_cpu_percent(
             recent_utime,
             recent_stime,
-            history_size,
             last_ticks,
             tps,
             current_timestamp,
@@ -181,16 +163,14 @@ mod tests {
     fn test_cpu_percent_0_percent() {
         let recent_utime = 100;
         let recent_stime = 100;
-        let history_size = 2;
         let last_ticks = (100, 100);
         let tps = 100;
         let current_timestamp = 1001_f64;
-        let last_timestamp = Some(1000_f64);
+        let last_timestamp = 1000_f64;
 
         let cpu_percent = CpuTracker::calculate_cpu_percent(
             recent_utime,
             recent_stime,
-            history_size,
             last_ticks,
             tps,
             current_timestamp,
@@ -208,16 +188,14 @@ mod tests {
     fn test_cpu_percent_partial_usage() {
         let recent_utime = 150;
         let recent_stime = 150;
-        let history_size = 2;
         let last_ticks = (100, 100);
         let tps = 100;
         let current_timestamp = 1002_f64;
-        let last_timestamp = Some(1000_f64);
+        let last_timestamp = 1000_f64;
 
         let cpu_percent = CpuTracker::calculate_cpu_percent(
             recent_utime,
             recent_stime,
-            history_size,
             last_ticks,
             tps,
             current_timestamp,
@@ -295,16 +273,14 @@ mod tests {
     fn test_cpu_percent_different_time_intervals() {
         let recent_utime = 300;
         let recent_stime = 300;
-        let history_size = 2;
         let last_ticks = (100, 100);
         let tps = 100;
         let current_timestamp = 1010_f64;
-        let last_timestamp = Some(1000_f64);
+        let last_timestamp = 1000_f64;
 
         let cpu_percent = CpuTracker::calculate_cpu_percent(
             recent_utime,
             recent_stime,
-            history_size,
             last_ticks,
             tps,
             current_timestamp,
@@ -322,16 +298,14 @@ mod tests {
     fn test_cpu_percent_minimal_history() {
         let recent_utime = 200;
         let recent_stime = 100;
-        let history_size = 2;
         let last_ticks = (100, 50);
         let tps = 100;
         let current_timestamp = 1001_f64;
-        let last_timestamp = Some(1000_f64);
+        let last_timestamp = 1000_f64;
 
         let cpu_percent = CpuTracker::calculate_cpu_percent(
             recent_utime,
             recent_stime,
-            history_size,
             last_ticks,
             tps,
             current_timestamp,
@@ -349,16 +323,14 @@ mod tests {
     fn test_cpu_percent_subsecond_precision() {
         let recent_utime = 150;
         let recent_stime = 150;
-        let history_size = 2;
         let last_ticks = (100, 100);
         let tps = 100;
         let current_timestamp = 1000.5_f64;
-        let last_timestamp = Some(1000.0_f64);
+        let last_timestamp = 1000.0_f64;
 
         let cpu_percent = CpuTracker::calculate_cpu_percent(
             recent_utime,
             recent_stime,
-            history_size,
             last_ticks,
             tps,
             current_timestamp,
