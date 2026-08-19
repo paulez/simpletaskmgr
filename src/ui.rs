@@ -8,7 +8,7 @@ use floem::unit::UnitExt;
 use floem::views::{container, dyn_container, dyn_stack, label, scroll, text, v_stack, Decorators};
 use floem::{IntoView, View};
 use imbl::Vector;
-use log::{debug, error};
+use log::debug;
 use std::rc::Rc;
 
 /// Creates a clickable view for a single process item
@@ -38,7 +38,8 @@ pub fn process_detail_view(
                 let process = processes.iter().find(|p| p.pid == pid).cloned();
                 match process {
                     None => {
-                        error!("Process not found for pid: {pid}");
+                        // A selected process exiting is expected, not an error; keep it quiet.
+                        debug!("Process not found for pid: {pid}");
                         container(text(format!("Process not found for pid: {pid}")))
                     }
                     Some(process) => {
