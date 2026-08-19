@@ -69,7 +69,13 @@ pub(crate) fn read_process_details(
     proc: &process::Process,
     users_cache: &UsersCache,
 ) -> Option<crate::process::TaskMgrProcess> {
-    let uid = proc.uid().expect("Can't get process UID");
+    let uid = match proc.uid() {
+        Ok(uid) => uid,
+        Err(e) => {
+            log::warn!("Can't get process UID for pid {}: {e:?}", proc.pid());
+            return None;
+        }
+    };
     let pid = proc.pid();
 
     match proc.stat() {
