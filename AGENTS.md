@@ -19,9 +19,10 @@ cargo test -- --test-threads=1  # Run tests sequentially (useful for UI/state te
 
 ### Linting
 ```bash
-cargo clippy        # Run clippy linter with suggestions
-cargo fmt            # Format code using rustfmt
-cargo fmt --check   # Check if code is formatted
+cargo clippy --all-targets   # Lint lib AND tests/binaries (required: plain `cargo clippy` skips test files)
+cargo clippy                 # Lint the lib/bin only
+cargo fmt                    # Format code using rustfmt
+cargo fmt --check            # Check if code is formatted
 ```
 
 ### Running
@@ -186,21 +187,25 @@ pub fn new(name: String, pid: i32, ruid: u32, username: String, cpu_percent: f64
 
 ## Development Workflow
 
-Keep a short development cycle. For each change, repeat these steps:
+Work in a tight loop, completing one small, self-contained change at a time.
+Treat steps 2-4 as a single **validation gate**: you may commit *only* when every
+one of them passes together, run *after your last edit*.
 
-1. **Implement a small change** - one focused change at a time
-2. **Add unit tests** for the change in `#[cfg(test)] mod tests`
-3. **Run `cargo test`** - all tests must pass
-4. **Run `cargo clippy`** - address all warnings
-5. **Format** - `cargo fmt` (check with `cargo fmt --check`)
-6. **Commit** with a detailed description of the change (what changed, why, and how it was verified)
+1. **Implement** - one focused change at a time; keep it small
+2. **Add unit tests** - add or update tests in `#[cfg(test)] mod tests`, then run `cargo test`; every test must pass (this also compiles the code)
+3. **Lint** - run `cargo clippy --all-targets`; it must finish with **zero warnings** (`--all-targets` is required so test files are linted too)
+4. **Format** - run `cargo fmt` (verify clean with `cargo fmt --check`)
+5. **Commit** - only once steps 2-4 are all green, with a message stating what changed, why, and how it was verified
 
-Only commit after all of the above pass. Never commit with failing tests or clippy warnings.
+Gate rules:
+- Re-run the whole gate after every edit; a green gate from an earlier state does not count
+- Never commit with failing tests or any clippy warning
+- Do not push unless explicitly asked
 
 ### Important Development Notes
 - **Build regularly** to fix build errors; use `rustc --explain <error number>` for help
 - **Always run unit tests** before committing
-- **Run cargo clippy** before committing and address all findings
+- **Run `cargo clippy --all-targets`** before committing and address all findings
 - **Focus on small changes** and commit when you get something to build and pass tests
 - **Read floem crate documentation** for examples on implementing UI changes
 - **Read Rust crate documentation** this documentation is located in generated_docs/<crate>. To refresh run `cargo docs-md docs`
