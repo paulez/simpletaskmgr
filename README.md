@@ -39,7 +39,7 @@ The project uses the following Rust crates:
 
 - **floem** 0.2.0 - Modern GUI framework
 - **im** 15.1.0 - Immutable data structures
-- **procfs** 0.17.0 - Linux procfs filesystem bindings
+- **procfs** 0.18.0 - Linux procfs filesystem bindings
 
 ## How It Works
 
