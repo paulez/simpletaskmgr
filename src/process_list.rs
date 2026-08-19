@@ -121,30 +121,32 @@ impl ProcessList {
     /// Sorts the process list by the specified column and direction
     pub fn sort_processes(&self, column: crate::SortColumn, direction: crate::SortDirection) {
         let mut processes = self.processes.get();
+        // `i32`/`String` have a total order via `cmp`; `f64` uses `total_cmp` so values
+        // (including NaN) sort without panicking, unlike `partial_cmp().unwrap()`.
         match (column, direction) {
             (crate::SortColumn::Pid, crate::SortDirection::Ascending) => {
-                processes.sort_by(|a, b| a.pid.partial_cmp(&b.pid).unwrap());
+                processes.sort_by(|a, b| a.pid.cmp(&b.pid));
             }
             (crate::SortColumn::Pid, crate::SortDirection::Descending) => {
-                processes.sort_by(|a, b| b.pid.partial_cmp(&a.pid).unwrap());
+                processes.sort_by(|a, b| b.pid.cmp(&a.pid));
             }
             (crate::SortColumn::Username, crate::SortDirection::Ascending) => {
-                processes.sort_by(|a, b| a.username.partial_cmp(&b.username).unwrap());
+                processes.sort_by(|a, b| a.username.cmp(&b.username));
             }
             (crate::SortColumn::Username, crate::SortDirection::Descending) => {
-                processes.sort_by(|a, b| b.username.partial_cmp(&a.username).unwrap());
+                processes.sort_by(|a, b| b.username.cmp(&a.username));
             }
             (crate::SortColumn::CpuPercent, crate::SortDirection::Ascending) => {
-                processes.sort_by(|a, b| a.cpu_percent.partial_cmp(&b.cpu_percent).unwrap());
+                processes.sort_by(|a, b| a.cpu_percent.total_cmp(&b.cpu_percent));
             }
             (crate::SortColumn::CpuPercent, crate::SortDirection::Descending) => {
-                processes.sort_by(|a, b| b.cpu_percent.partial_cmp(&a.cpu_percent).unwrap());
+                processes.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
             }
             (crate::SortColumn::Name, crate::SortDirection::Ascending) => {
-                processes.sort_by(|a, b| a.name.partial_cmp(&b.name).unwrap());
+                processes.sort_by(|a, b| a.name.cmp(&b.name));
             }
             (crate::SortColumn::Name, crate::SortDirection::Descending) => {
-                processes.sort_by(|a, b| b.name.partial_cmp(&a.name).unwrap());
+                processes.sort_by(|a, b| b.name.cmp(&a.name));
             }
         }
         self.processes.set(processes);
@@ -160,5 +162,53 @@ impl ProcessList {
             return proc.ruid == current_uid;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::process::TaskMgrProcess;
+
+    /// A `f64` NaN must not panic the sort (regression for `partial_cmp().unwrap()`).
+    #[test]
+    fn test_sort_by_cpu_percent_with_nan_does_not_panic() {
+        let list = ProcessList::new();
+        let mut vec = imbl::Vector::new();
+        vec.push_back(TaskMgrProcess::new(
+            "a".to_string(),
+            1,
+            1,
+            "u".to_string(),
+            f64::NAN,
+        ));
+        vec.push_back(TaskMgrProcess::new(
+            "b".to_string(),
+            2,
+            1,
+            "u".to_string(),
+            5.0,
+        ));
+        vec.push_back(TaskMgrProcess::new(
+            "c".to_string(),
+            3,
+            1,
+            "u".to_string(),
+            -1.0,
+        ));
+        list.processes.set(vec);
+
+        list.sort_processes(
+            crate::SortColumn::CpuPercent,
+            crate::SortDirection::Ascending,
+        );
+        list.sort_processes(
+            crate::SortColumn::CpuPercent,
+            crate::SortDirection::Descending,
+        );
+
+        // Sorting must leave the list intact with the same set of PIDs.
+        let pids: Vec<i32> = list.processes.get().iter().map(|p| p.pid).collect();
+        assert_eq!(pids.len(), 3);
     }
 }
