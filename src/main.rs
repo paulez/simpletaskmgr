@@ -28,12 +28,13 @@ fn app_view() -> impl IntoView {
     create_effect(move |_| {
         tick_for_effect.track();
         let process_list_for_effect = Rc::clone(&process_list_for_effect);
-        let sort_column_for_effect = sort_column.get();
-        let sort_direction_for_effect = sort_direction.get();
+        // Read the sort column/direction at fire-time so a user's sort change is
+        // applied to the freshly loaded data, not the values from the previous tick.
         exec_after(Config::refresh_interval(), move |_| {
+            let column = sort_column.get();
+            let direction = sort_direction.get();
             process_list_for_effect.update_process_list();
-            process_list_for_effect
-                .sort_processes(sort_column_for_effect, sort_direction_for_effect);
+            process_list_for_effect.sort_processes(column, direction);
             tick_for_effect.set(());
         });
     });
