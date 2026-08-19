@@ -1,7 +1,5 @@
-use anyhow::Result;
 use log::debug;
 use procfs::prelude::Current;
-use procfs::process;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -118,80 +116,64 @@ impl CpuTracker {
         usage.last_timestamp = timestamp;
     }
 
-    pub fn update_process_cpu_usage_for_process(
+    /// Updates `task_mgr_process`'s CPU% using the tick delta since the last sample.
+    ///
+    /// Expects a `stat` that was already read (and shared with the caller) so the
+    /// `/proc` `stat` file is only opened once per refresh.
+    pub fn update_process_cpu(
         &mut self,
         task_mgr_process: &mut TaskMgrProcess,
-        process_obj: &process::Process,
-    ) -> Result<()> {
-        // Read stat for the process
-        if let Ok(proc_stat) = process_obj.stat() {
-            let utime = proc_stat.utime;
-            let stime = proc_stat.stime;
-            let pid = task_mgr_process.pid;
+        stat: &procfs::process::Stat,
+    ) {
+        let utime = stat.utime;
+        let stime = stat.stime;
+        let pid = task_mgr_process.pid;
 
-            // Use Instant for high-resolution timing
-            let current_timestamp = self.start_instant.elapsed().as_secs_f64();
+        // Use Instant for high-resolution timing
+        let current_timestamp = self.start_instant.elapsed().as_secs_f64();
 
-            match self.process_usage.entry(pid) {
-                Occupied(mut occ) => {
-                    let usage = occ.get_mut();
+        match self.process_usage.entry(pid) {
+            Occupied(mut occ) => {
+                let usage = occ.get_mut();
 
-                    // Calculate CPU percentage using the delta between current and last ticks
-                    // A `None` result means the ticks decreased, so the PID was reused by a
-                    // new process: discard the stale baseline and treat this as a new process.
-                    let cpu_percent = Self::calculate_cpu_percent(
-                        utime,
-                        stime,
-                        usage.last_ticks,
-                        self.tps,
-                        current_timestamp,
-                        usage.last_timestamp,
-                    );
+                // Calculate CPU percentage using the delta between current and last ticks
+                // A `None` result means the ticks decreased, so the PID was reused by a
+                // new process: discard the stale baseline and treat this as a new process.
+                let cpu_percent = Self::calculate_cpu_percent(
+                    utime,
+                    stime,
+                    usage.last_ticks,
+                    self.tps,
+                    current_timestamp,
+                    usage.last_timestamp,
+                );
 
-                    if let Some(cpu_percent) = cpu_percent {
-                        task_mgr_process.cpu_percent = cpu_percent;
-                        Self::update_history(usage, utime, stime, current_timestamp);
-                    } else {
-                        debug!("PID {} was reused, resetting CPU baseline", pid);
-                        occ.insert(UsageStats::new(utime, stime, current_timestamp));
-                        task_mgr_process.cpu_percent = Self::lifetime_avg_percent(
-                            utime,
-                            stime,
-                            proc_stat.starttime,
-                            self.tps,
-                            self.system_uptime_secs(),
-                        );
-                    }
-                }
-                Vacant(vac) => {
-                    vac.insert(UsageStats::new(utime, stime, current_timestamp));
+                if let Some(cpu_percent) = cpu_percent {
+                    task_mgr_process.cpu_percent = cpu_percent;
+                    Self::update_history(usage, utime, stime, current_timestamp);
+                } else {
+                    debug!("PID {} was reused, resetting CPU baseline", pid);
+                    occ.insert(UsageStats::new(utime, stime, current_timestamp));
                     task_mgr_process.cpu_percent = Self::lifetime_avg_percent(
                         utime,
                         stime,
-                        proc_stat.starttime,
+                        stat.starttime,
                         self.tps,
                         self.system_uptime_secs(),
                     );
                 }
             }
-        }
-
-        Ok(())
-    }
-
-    pub fn update_process_cpu_usage(
-        &mut self,
-        processes: &mut HashMap<i32, TaskMgrProcess>,
-        process_objects: &HashMap<i32, process::Process>,
-    ) -> Result<()> {
-        // Call the new method for each process
-        for (pid, tm_process) in processes.iter_mut() {
-            if let Some(proc_obj) = process_objects.get(pid) {
-                self.update_process_cpu_usage_for_process(tm_process, proc_obj)?;
+            Vacant(vac) => {
+                vac.insert(UsageStats::new(utime, stime, current_timestamp));
+                task_mgr_process.cpu_percent = Self::lifetime_avg_percent(
+                    utime,
+                    stime,
+                    stat.starttime,
+                    self.tps,
+                    self.system_uptime_secs(),
+                );
             }
         }
-
-        Ok(())
     }
 
     /// Removes tracking entries for PIDs that no longer exist,
@@ -204,7 +186,6 @@ impl CpuTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     /// Test CPU percent calculation for 100% usage (maximum CPU usage)
     #[test]
@@ -279,69 +260,6 @@ mod tests {
         );
 
         assert_eq!(cpu_percent, Some(50.0), "Should calculate 50% CPU usage");
-    }
-
-    /// Test that update_process_cpu_usage refreshes stats for all processes
-    #[test]
-    fn test_update_process_cpu_usage_refreshes_all_processes() {
-        let mut cpu_tracker = CpuTracker::new();
-        let mut processes = HashMap::new();
-
-        let p1 = TaskMgrProcess::new("test1".to_string(), 100, 1000, "user1".to_string(), 0.0);
-        let p2 = TaskMgrProcess::new("test2".to_string(), 200, 1000, "user2".to_string(), 0.0);
-        let p3 = TaskMgrProcess::new("test3".to_string(), 300, 1000, "user3".to_string(), 0.0);
-
-        processes.insert(100, p1);
-        processes.insert(200, p2);
-        processes.insert(300, p3);
-
-        assert_eq!(processes.get(&100).unwrap().cpu_percent, 0.0);
-        assert_eq!(processes.get(&200).unwrap().cpu_percent, 0.0);
-        assert_eq!(processes.get(&300).unwrap().cpu_percent, 0.0);
-
-        let _ = cpu_tracker.update_process_cpu_usage(&mut processes, &HashMap::new());
-
-        assert_eq!(processes.len(), 3);
-        assert!(processes.contains_key(&100));
-        assert!(processes.contains_key(&200));
-        assert!(processes.contains_key(&300));
-    }
-
-    /// Test that update_process_cpu_usage handles empty process list
-    #[test]
-    fn test_update_process_cpu_usage_empty_list() {
-        let mut cpu_tracker = CpuTracker::new();
-        let mut processes = HashMap::new();
-
-        let result = cpu_tracker.update_process_cpu_usage(&mut processes, &HashMap::new());
-
-        match result {
-            Ok(_) => {}  // Success
-            Err(_) => {} // Expected in test environment
-        }
-    }
-
-    /// Test that update_process_cpu_usage initializes new processes correctly
-    #[test]
-    fn test_update_process_cpu_usage_initializes_new_processes() {
-        let mut cpu_tracker = CpuTracker::new();
-        let mut processes = HashMap::new();
-
-        let p1 = TaskMgrProcess::new(
-            "new_process".to_string(),
-            400,
-            1000,
-            "user4".to_string(),
-            0.0,
-        );
-        processes.insert(400, p1);
-
-        assert_eq!(processes.get(&400).unwrap().cpu_percent, 0.0);
-
-        let _ = cpu_tracker.update_process_cpu_usage(&mut processes, &HashMap::new());
-
-        assert_eq!(processes.len(), 1);
-        assert!(processes.contains_key(&400));
     }
 
     /// Test CPU percent calculation with different time intervals

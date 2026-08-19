@@ -1,5 +1,5 @@
 use crate::cpu_tracker::CpuTracker;
-use crate::process::{read_process_details, TaskMgrProcess};
+use crate::process::{build_task_mgr_process, TaskMgrProcess};
 use anyhow::{Context, Result};
 use floem::prelude::SignalGet;
 use floem::prelude::{create_rw_signal, RwSignal, SignalUpdate};
@@ -68,23 +68,34 @@ impl ProcessList {
             all_processes_iter.filter_map(|p| p.ok()).collect();
         debug!("Retrieved {} processes from /proc", all_processes.len());
 
+        // Each /proc file is read once per process per refresh.
         let task_mgr_process_list: Vector<TaskMgrProcess> = all_processes
             .iter()
-            .filter_map(
-                |process| match read_process_details(process, &self.users_cache) {
-                    Some(mut task_mgr_process) => {
-                        let _ = self
-                            .cpu_tracker
-                            .borrow_mut()
-                            .update_process_cpu_usage_for_process(&mut task_mgr_process, process);
-                        Some(task_mgr_process)
+            .filter_map(|proc| {
+                let stat = match proc.stat() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!("Can't read stat for pid {}: {e:?}", proc.pid());
+                        return None;
                     }
-                    None => {
-                        warn!("Cannot convert {:?} to TaskMgrProcess", process);
-                        None
+                };
+                let ruid = match proc.uid() {
+                    Ok(u) => u,
+                    Err(e) => {
+                        warn!("Can't read UID for pid {}: {e:?}", proc.pid());
+                        return None;
                     }
-                },
-            )
+                };
+                let username = match self.users_cache.get_user_by_uid(ruid) {
+                    Some(user) => user.name().to_string_lossy().into_owned(),
+                    None => "unknown".to_string(),
+                };
+                let mut task_mgr_process = build_task_mgr_process(&stat, ruid, username);
+                self.cpu_tracker
+                    .borrow_mut()
+                    .update_process_cpu(&mut task_mgr_process, &stat);
+                Some(task_mgr_process)
+            })
             .collect();
 
         // Drop tracking entries for PIDs that no longer exist

@@ -65,40 +65,21 @@ impl IntoView for TaskMgrProcess {
     }
 }
 
-pub(crate) fn read_process_details(
-    proc: &process::Process,
-    users_cache: &UsersCache,
-) -> Option<crate::process::TaskMgrProcess> {
-    let uid = match proc.uid() {
-        Ok(uid) => uid,
-        Err(e) => {
-            log::warn!("Can't get process UID for pid {}: {e:?}", proc.pid());
-            return None;
-        }
-    };
-    let pid = proc.pid();
-
-    match proc.stat() {
-        Ok(stat) => {
-            let username = match users_cache.get_user_by_uid(uid) {
-                Some(user) => {
-                    let name: &std::ffi::OsStr = user.name();
-                    name.to_string_lossy().to_string()
-                }
-                None => "unknown".to_string(),
-            };
-            Some(TaskMgrProcess {
-                name: stat.comm.to_string(),
-                pid,
-                ruid: uid,
-                username,
-                cpu_percent: 0.0,
-            })
-        }
-        Err(e) => {
-            log::error!("Can't get process stat due to error {e:?}");
-            None
-        }
+/// Builds a `TaskMgrProcess` from an already-read `stat` and the resolved UID.
+///
+/// Pure: performs no I/O. The caller is responsible for reading `/proc` once and
+/// resolving the username, which lets the CPU tracker reuse the same `stat`.
+pub(crate) fn build_task_mgr_process(
+    stat: &procfs::process::Stat,
+    ruid: u32,
+    username: String,
+) -> crate::process::TaskMgrProcess {
+    TaskMgrProcess {
+        name: stat.comm.clone(),
+        pid: stat.pid,
+        ruid,
+        username,
+        cpu_percent: 0.0,
     }
 }
 
