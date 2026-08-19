@@ -1,7 +1,6 @@
 use imbl::Vector;
-use log::{info, LevelFilter};
+use log::LevelFilter;
 use rstest::*;
-use simplelog::SimpleLogger;
 use simpletaskmgr::{process::TaskMgrProcess, process_list::ProcessList};
 
 #[cfg(test)]
