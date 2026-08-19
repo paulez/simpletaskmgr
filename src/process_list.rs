@@ -56,8 +56,24 @@ impl ProcessList {
         debug!("Current UID: {}", current_uid);
 
         let all_processes_iter = process::all_processes().context("Can't read /proc filesystem")?;
-        let all_processes: Vec<process::Process> =
-            all_processes_iter.filter_map(|p| p.ok()).collect();
+        let mut all_processes = Vec::new();
+        let mut failed = 0u32;
+        let mut last_err = None;
+        for result in all_processes_iter {
+            match result {
+                Ok(proc) => all_processes.push(proc),
+                Err(e) => {
+                    failed += 1;
+                    last_err = Some(e);
+                }
+            }
+        }
+        if failed > 0 {
+            warn!(
+                "Failed to enumerate {} of the listed processes; last error: {last_err:?}",
+                failed
+            );
+        }
         debug!("Retrieved {} processes from /proc", all_processes.len());
 
         // Each /proc file is read once per process per refresh.
