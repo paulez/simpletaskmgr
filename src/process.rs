@@ -127,7 +127,6 @@ mod tests {
         let p = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
         assert!(!p.name.is_empty());
         assert!(p.pid > 0);
-        assert!(p.ruid >= 0);
         assert!(!p.username.is_empty());
         assert_eq!(p.cpu_percent, 0.0);
     }
@@ -144,7 +143,6 @@ mod tests {
             // Each process should be able to be created with valid fields
             assert!(!p.name.is_empty());
             assert!(p.pid > 0);
-            assert!(p.ruid >= 0);
             assert!(!p.username.is_empty());
             assert_eq!(p.cpu_percent, 0.0);
         }

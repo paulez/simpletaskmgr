@@ -29,7 +29,6 @@ mod tests {
         for process in all_processes.iter() {
             assert!(!process.name.is_empty());
             assert!(process.pid > 0);
-            assert!(process.ruid >= 0);
             assert!(!process.username.is_empty());
         }
     }
