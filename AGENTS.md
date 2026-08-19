@@ -186,13 +186,16 @@ pub fn new(name: String, pid: i32, ruid: u32, username: String, cpu_percent: f64
 
 ## Development Workflow
 
-1. **Before committing**: Run `cargo clippy`, `cargo fmt --check`, and `cargo test`
-2. **Check formatting**: `cargo fmt --check`
-3. **Fix clippy issues**: `cargo clippy` and address warnings
-4. **Run tests**: `cargo test` (ensure all tests pass)
-5. **Build**: `cargo build` to ensure the build succeeds
-6. **Run**: `cargo run` to launch the application
-7. **Commit**: Only after tests pass and code is formatted
+Keep a short development cycle. For each change, repeat these steps:
+
+1. **Implement a small change** - one focused change at a time
+2. **Add unit tests** for the change in `#[cfg(test)] mod tests`
+3. **Run `cargo test`** - all tests must pass
+4. **Run `cargo clippy`** - address all warnings
+5. **Format** - `cargo fmt` (check with `cargo fmt --check`)
+6. **Commit** with a detailed description of the change (what changed, why, and how it was verified)
+
+Only commit after all of the above pass. Never commit with failing tests or clippy warnings.
 
 ### Important Development Notes
 - **Build regularly** to fix build errors; use `rustc --explain <error number>` for help
@@ -203,94 +206,3 @@ pub fn new(name: String, pid: i32, ruid: u32, username: String, cpu_percent: f64
 - **Read Rust crate documentation** this documentation is located in generated_docs/<crate>. To refresh run `cargo docs-md docs`
 - **Use tests** to validate your changes; do not run the app
 - **Always update README.md** when you add or modify features
-
-## RTK Token Optimization
-
-### Golden Rule
-
-**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
-
-**Important**: Even in command chains with `&&`, use `rtk`:
-```bash
-# ❌ Wrong
-git add . && git commit -m "msg" && git push
-
-# ✅ Correct
-rtk git add . && rtk git commit -m "msg" && rtk git push
-```
-
-### RTK Commands by Workflow
-
-#### Build & Compile (80-90% savings)
-```bash
-rtk cargo build         # Cargo build output
-rtk cargo check         # Cargo check output
-rtk cargo clippy        # Clippy warnings grouped by file (80%)
-rtk tsc                 # TypeScript errors grouped by file/code (83%)
-rtk lint                # ESLint/Biome violations grouped (84%)
-rtk prettier --check    # Files needing format only (70%)
-rtk next build          # Next.js build with route metrics (87%)
-```
-
-#### Test (90-99% savings)
-```bash
-rtk cargo test          # Cargo test failures only (90%)
-rtk vitest run          # Vitest failures only (99.5%)
-rtk playwright test     # Playwright failures only (94%)
-rtk test <cmd>          # Generic test wrapper - failures only
-```
-
-#### Git (59-80% savings)
-```bash
-rtk git status          # Compact status
-rtk git log             # Compact log (works with all git flags)
-rtk git diff            # Compact diff (80%)
-rtk git show            # Compact show (80%)
-rtk git add             # Ultra-compact confirmations (59%)
-rtk git commit          # Ultra-compact confirmations (59%)
-rtk git push            # Ultra-compact confirmations
-rtk git pull            # Ultra-compact confirmations
-rtk git branch          # Compact branch list
-rtk git fetch           # Compact fetch
-rtk git stash           # Compact stash
-rtk git worktree        # Compact worktree
-```
-
-Note: Git passthrough works for ALL subcommands, even those not explicitly listed.
-
-#### Files & Search (60-75% savings)
-```bash
-rtk ls <path>           # Tree format, compact (65%)
-rtk read <file>         # Code reading with filtering (60%)
-rtk grep <pattern>      # Search grouped by file (75%)
-NOT COMPATIBLE with GNU find: rtk find <pattern>      # Find grouped by directory (70%)
-```
-
-#### Analysis & Debug (70-90% savings)
-```bash
-rtk err <cmd>           # Filter errors only from any command
-rtk log <file>          # Deduplicated logs with counts
-rtk json <file>         # JSON structure without values
-rtk deps                # Dependency overview
-rtk env                 # Environment variables compact
-rtk summary <cmd>       # Smart summary of command output
-rtk diff                # Ultra-compact diffs
-```
-
-#### Network (65-70% savings)
-```bash
-rtk curl <url>          # Compact HTTP responses (70%)
-rtk wget <url>          # Compact download output (65%)
-```
-
-#### Meta Commands
-```bash
-rtk gain                # View token savings statistics
-rtk gain --history      # View command history with savings
-rtk discover            # Analyze Claude Code sessions for missed RTK usage
-rtk proxy <cmd>         # Run command without filtering (for debugging)
-rtk init                # Add RTK instructions to CLAUDE.md
-rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
-```
-
-**Note**: For workflow-specific RTK usage, see CLAUDE.md for additional context and examples.

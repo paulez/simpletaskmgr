@@ -44,6 +44,11 @@ impl CpuTracker {
         }
     }
 
+    /// Calculates CPU percentage from tick deltas.
+    ///
+    /// Returns `None` when the current tick totals are lower than the stored
+    /// baseline, which indicates the PID was reused by a new process and the
+    /// baseline must be reset instead of subtracting (which would underflow).
     fn calculate_cpu_percent(
         recent_utime: u64,
         recent_stime: u64,
@@ -51,19 +56,20 @@ impl CpuTracker {
         tps: u64,
         current_timestamp: f64,
         last_timestamp: f64,
-    ) -> f64 {
-        let total_time_delta =
-            (recent_utime - last_ticks.0) as f64 + (recent_stime - last_ticks.1) as f64;
+    ) -> Option<f64> {
+        let recent_total = recent_utime.checked_add(recent_stime)?;
+        let last_total = last_ticks.0.checked_add(last_ticks.1)?;
+        let total_ticks_delta = recent_total.checked_sub(last_total)?;
 
         let time_elapsed = current_timestamp - last_timestamp;
 
         if time_elapsed <= 0.0 {
-            return 0.0;
+            return Some(0.0);
         }
 
         // Convert ticks to seconds and calculate percentage
-        let cpu_seconds = total_time_delta / tps as f64;
-        (cpu_seconds / time_elapsed) * 100.0
+        let cpu_seconds = total_ticks_delta as f64 / tps as f64;
+        Some((cpu_seconds / time_elapsed) * 100.0)
     }
 
     fn update_history(usage: &mut UsageStats, utime: u64, stime: u64, timestamp: f64) {
@@ -90,6 +96,8 @@ impl CpuTracker {
                     let usage = occ.get_mut();
 
                     // Calculate CPU percentage using the delta between current and last ticks
+                    // A `None` result means the ticks decreased, so the PID was reused by a
+                    // new process: discard the stale baseline and treat this as a new process.
                     let cpu_percent = Self::calculate_cpu_percent(
                         utime,
                         stime,
@@ -99,8 +107,13 @@ impl CpuTracker {
                         usage.last_timestamp,
                     );
 
-                    task_mgr_process.cpu_percent = cpu_percent;
-                    Self::update_history(usage, utime, stime, current_timestamp);
+                    if let Some(cpu_percent) = cpu_percent {
+                        task_mgr_process.cpu_percent = cpu_percent;
+                        Self::update_history(usage, utime, stime, current_timestamp);
+                    } else {
+                        debug!("PID {} was reused, resetting CPU baseline", pid);
+                        occ.insert(UsageStats::new(utime, stime, current_timestamp));
+                    }
                 }
                 Vacant(vac) => {
                     vac.insert(UsageStats::new(utime, stime, current_timestamp));
@@ -124,6 +137,12 @@ impl CpuTracker {
         }
 
         Ok(())
+    }
+
+    /// Removes tracking entries for PIDs that no longer exist,
+    /// so the map does not grow unboundedly as processes come and go.
+    pub fn evict_dead_processes(&mut self, live_pids: impl Fn(i32) -> bool) {
+        self.process_usage.retain(|pid, _| live_pids(*pid));
     }
 }
 
@@ -153,7 +172,8 @@ mod tests {
         );
 
         assert_eq!(
-            cpu_percent, 200.0,
+            cpu_percent,
+            Some(200.0),
             "Should calculate CPU usage based on ticks"
         );
     }
@@ -178,7 +198,8 @@ mod tests {
         );
 
         assert_eq!(
-            cpu_percent, 0.0,
+            cpu_percent,
+            Some(0.0),
             "Should calculate 0% CPU usage for idle process"
         );
     }
@@ -202,7 +223,7 @@ mod tests {
             last_timestamp,
         );
 
-        assert_eq!(cpu_percent, 50.0, "Should calculate 50% CPU usage");
+        assert_eq!(cpu_percent, Some(50.0), "Should calculate 50% CPU usage");
     }
 
     /// Test that update_process_cpu_usage refreshes stats for all processes
@@ -288,7 +309,8 @@ mod tests {
         );
 
         assert_eq!(
-            cpu_percent, 40.0,
+            cpu_percent,
+            Some(40.0),
             "Should handle different time intervals correctly"
         );
     }
@@ -313,9 +335,76 @@ mod tests {
         );
 
         assert_eq!(
-            cpu_percent, 150.0,
+            cpu_percent,
+            Some(150.0),
             "Should handle minimal history correctly"
         );
+    }
+
+    /// Test that decreased ticks (PID reuse) returns None instead of underflowing
+    #[test]
+    fn test_cpu_percent_pid_reuse_returns_none() {
+        // New process inherited the PID and has fewer ticks than the old one
+        let recent_utime = 5;
+        let recent_stime = 5;
+        let last_ticks = (100, 100);
+        let tps = 100;
+        let current_timestamp = 1001_f64;
+        let last_timestamp = 1000_f64;
+
+        let cpu_percent = CpuTracker::calculate_cpu_percent(
+            recent_utime,
+            recent_stime,
+            last_ticks,
+            tps,
+            current_timestamp,
+            last_timestamp,
+        );
+
+        assert_eq!(
+            cpu_percent, None,
+            "Should detect PID reuse when ticks decrease"
+        );
+    }
+
+    /// Test CPU percent calculation when tick totals overflow u64 components sum
+    #[test]
+    fn test_cpu_percent_ticks_overflow_returns_none() {
+        let recent_utime = u64::MAX;
+        let recent_stime = 1;
+        let last_ticks = (1, 1);
+        let tps = 100;
+        let current_timestamp = 1001_f64;
+        let last_timestamp = 1000_f64;
+
+        let cpu_percent = CpuTracker::calculate_cpu_percent(
+            recent_utime,
+            recent_stime,
+            last_ticks,
+            tps,
+            current_timestamp,
+            last_timestamp,
+        );
+
+        assert_eq!(cpu_percent, None, "Should handle tick overflow safely");
+    }
+
+    /// Test that evict_dead_processes removes entries for dead PIDs
+    #[test]
+    fn test_evict_dead_processes() {
+        let mut tracker = CpuTracker::new();
+        tracker
+            .process_usage
+            .insert(100, UsageStats::new(10, 10, 0.0));
+        tracker
+            .process_usage
+            .insert(200, UsageStats::new(20, 20, 0.0));
+
+        tracker.evict_dead_processes(|pid| pid == 100);
+
+        assert_eq!(tracker.process_usage.len(), 1);
+        assert!(tracker.process_usage.contains_key(&100));
+        assert!(!tracker.process_usage.contains_key(&200));
     }
 
     /// Test CPU percent calculation with sub-second precision
@@ -338,7 +427,7 @@ mod tests {
         );
 
         assert!(
-            (cpu_percent - 200.0).abs() < 0.01,
+            (cpu_percent.unwrap() - 200.0).abs() < 0.01,
             "Should handle sub-second precision correctly"
         );
     }
