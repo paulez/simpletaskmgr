@@ -4,7 +4,8 @@ use simplelog::*;
 use simpletaskmgr::config::Config;
 use simpletaskmgr::process::TaskMgrProcess;
 use simpletaskmgr::process_list::ProcessList;
-use simpletaskmgr::ui::{process_detail_view, process_list_view};
+use simpletaskmgr::ui::{process_detail_view, process_list_header, process_list_view};
+use simpletaskmgr::{SortColumn, SortDirection};
 use std::rc::Rc;
 
 use floem::action::exec_after;
@@ -17,22 +18,56 @@ use floem::views::{container, h_stack, scroll, Decorators, ScrollExt};
 fn app_view() -> impl IntoView {
     let selected_process_id = create_rw_signal(None);
     let tick = create_rw_signal(());
+    let sort_column = create_rw_signal(crate::SortColumn::CpuPercent);
+    let sort_direction = create_rw_signal(crate::SortDirection::Descending);
     let process_list = Rc::new(ProcessList::init());
     let process_list_for_view = Rc::clone(&process_list);
     let tick_for_effect = tick;
 
+    let process_list_for_effect = Rc::clone(&process_list);
     create_effect(move |_| {
         tick_for_effect.track();
-        let process_list_for_effect = Rc::clone(&process_list);
+        let process_list_for_effect = Rc::clone(&process_list_for_effect);
+        let sort_column_for_effect = sort_column.get();
+        let sort_direction_for_effect = sort_direction.get();
         exec_after(Config::refresh_interval(), move |_| {
             process_list_for_effect.update_process_list();
+            process_list_for_effect
+                .sort_processes(sort_column_for_effect, sort_direction_for_effect);
             tick_for_effect.set(());
         });
+    });
+
+    let process_list_for_sort = Rc::clone(&process_list);
+    create_effect(move |_| {
+        sort_column.track();
+        sort_direction.track();
+        let column = sort_column.get();
+        let direction = sort_direction.get();
+        let process_list_for_sort = Rc::clone(&process_list_for_sort);
+        process_list_for_sort.sort_processes(column, direction);
     });
 
     let main_view = dyn_container(
         move || selected_process_id.get(),
         move |selected_process_id_item| {
+            let header = process_list_header(sort_column, sort_direction, move |column| {
+                let current_column = sort_column.get();
+                let current_direction = sort_direction.get();
+                let new_direction = if current_column == column {
+                    match current_direction {
+                        SortDirection::Ascending => SortDirection::Descending,
+                        SortDirection::Descending => SortDirection::Ascending,
+                    }
+                } else {
+                    SortDirection::Ascending
+                };
+                if current_column != column {
+                    sort_column.set(column);
+                }
+                sort_direction.set(new_direction);
+            });
+
             let process_scroll = process_list_view(
                 process_list_for_view.processes,
                 move |process: TaskMgrProcess| {
@@ -58,7 +93,8 @@ fn app_view() -> impl IntoView {
                 ),
                 None => container(process_scroll),
             };
-            main_container.style(|s| s.width_full().height_full().border(1.0))
+            container(v_stack((header, main_container)))
+                .style(|s| s.width_full().height_full().border(1.0))
         },
     );
 

@@ -1,5 +1,9 @@
 use crate::process::TaskMgrProcess;
-use floem::prelude::{RwSignal, SignalGet};
+use crate::SortColumn;
+use crate::SortDirection;
+use floem::prelude::{h_stack, RwSignal, SignalGet};
+
+use floem::taffy::style_helpers::{auto, fr};
 use floem::unit::UnitExt;
 use floem::views::{container, dyn_container, dyn_stack, label, scroll, text, v_stack, Decorators};
 use floem::{IntoView, View};
@@ -82,4 +86,102 @@ pub fn process_list_view(
     )
     .style(|s| s.flex_col().min_size(0, 0))
     .debug_name("Process List Stack")
+}
+
+/// Creates a header row for the process list with clickable columns
+/// that allow sorting by different fields
+pub fn process_list_header(
+    sort_column: RwSignal<crate::SortColumn>,
+    sort_direction: RwSignal<crate::SortDirection>,
+    on_sort: impl Fn(crate::SortColumn) + 'static,
+) -> impl IntoView {
+    let on_sort = Rc::new(on_sort);
+
+    h_stack((
+        // PID Header
+        label(move || {
+            let mut pid_header = "PID".to_string();
+            if sort_column.get() == SortColumn::Pid {
+                pid_header.push_str(match sort_direction.get() {
+                    SortDirection::Ascending => " ↑",
+                    SortDirection::Descending => " ↓",
+                });
+            }
+            pid_header
+        })
+        .on_click({
+            let on_sort_clone = on_sort.clone();
+            move |_| {
+                on_sort_clone(SortColumn::Pid);
+                floem::event::EventPropagation::Continue
+            }
+        })
+        .style(move |s| s.padding_vert(4)),
+        // Username Header
+        label(move || {
+            let mut username_header = "Username".to_string();
+            if sort_column.get() == SortColumn::Username {
+                username_header.push_str(match sort_direction.get() {
+                    SortDirection::Ascending => " ↑",
+                    SortDirection::Descending => " ↓",
+                });
+            }
+            username_header
+        })
+        .on_click({
+            let on_sort_clone = on_sort.clone();
+            move |_| {
+                on_sort_clone(SortColumn::Username);
+                floem::event::EventPropagation::Continue
+            }
+        })
+        .style(move |s| s.padding_vert(4)),
+        // CPU Header
+        label(move || {
+            let mut cpu_header = "CPU%".to_string();
+            if sort_column.get() == SortColumn::CpuPercent {
+                cpu_header.push_str(match sort_direction.get() {
+                    SortDirection::Ascending => " ↑",
+                    SortDirection::Descending => " ↓",
+                });
+            }
+            cpu_header
+        })
+        .on_click({
+            let on_sort_clone = on_sort.clone();
+            move |_| {
+                on_sort_clone(SortColumn::CpuPercent);
+                floem::event::EventPropagation::Continue
+            }
+        })
+        .style(move |s| s.padding_vert(4)),
+        // Name Header
+        label(move || {
+            let mut name_header = "Name".to_string();
+            if sort_column.get() == SortColumn::Name {
+                name_header.push_str(match sort_direction.get() {
+                    SortDirection::Ascending => " ↑",
+                    SortDirection::Descending => " ↓",
+                });
+            }
+            name_header
+        })
+        .on_click({
+            let on_sort_clone = on_sort.clone();
+            move |_| {
+                on_sort_clone(SortColumn::Name);
+                floem::event::EventPropagation::Continue
+            }
+        })
+        .style(move |s| s.padding_vert(4)),
+    ))
+    .style(move |s| {
+        s.width_full()
+            .items_center()
+            .gap(6)
+            .grid()
+            .grid_template_columns(vec![auto(), auto(), auto(), fr(1.)])
+            .padding_vert(4)
+            .background(floem::prelude::Color::LIGHT_GRAY)
+    })
 }
