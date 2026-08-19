@@ -1,5 +1,6 @@
 use anyhow::Result;
 use log::debug;
+use procfs::prelude::Current;
 use procfs::process;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
@@ -44,6 +45,18 @@ impl CpuTracker {
         }
     }
 
+    /// Total system uptime in seconds, as read from /proc/uptime.
+    /// Returns 0 if the file can't be read (e.g. in test sandboxes).
+    fn system_uptime_secs(&self) -> f64 {
+        match procfs::Uptime::current() {
+            Ok(u) => u.uptime,
+            Err(e) => {
+                debug!("Can't read /proc/uptime: {}", e);
+                0.0
+            }
+        }
+    }
+
     /// Calculates CPU percentage from tick deltas.
     ///
     /// Returns `None` when the current tick totals are lower than the stored
@@ -70,6 +83,34 @@ impl CpuTracker {
         // Convert ticks to seconds and calculate percentage
         let cpu_seconds = total_ticks_delta as f64 / tps as f64;
         Some((cpu_seconds / time_elapsed) * 100.0)
+    }
+
+    /// Computes a process's since-start average CPU% the way `top` does on
+    /// its first frame: `lifetime tick delta / system uptime` (library/pids.c:768-779,
+    /// src/top/top.c:2842-2850). Used instead of 0.0 for a newly-tracked process
+    /// so the list shows a meaningful, non-zero value immediately.
+    ///
+    /// Returns 0.0 if the process's elapsed lifetime is non-positive
+    /// (e.g. /proc/uptime unreadable or stale `starttime`).
+    fn lifetime_avg_percent(
+        utime: u64,
+        stime: u64,
+        start_in_ticks: u64,
+        tps: u64,
+        uptime_secs: f64,
+    ) -> f64 {
+        let total_ticks = match utime.checked_add(stime) {
+            Some(t) => t,
+            None => return 0.0,
+        };
+        // Process age in ticks. `stat.starttime` is already in system ticks;
+        // so process_age_ticks = uptime_ticks - start_in_ticks.
+        let uptime_ticks = (uptime_secs * tps as f64) as u64;
+        let elapsed_ticks = match uptime_ticks.checked_sub(start_in_ticks) {
+            Some(s) if s > 0 => s,
+            _ => return 0.0,
+        };
+        (total_ticks as f64) / (elapsed_ticks as f64) * 100.0
     }
 
     fn update_history(usage: &mut UsageStats, utime: u64, stime: u64, timestamp: f64) {
@@ -113,10 +154,24 @@ impl CpuTracker {
                     } else {
                         debug!("PID {} was reused, resetting CPU baseline", pid);
                         occ.insert(UsageStats::new(utime, stime, current_timestamp));
+                        task_mgr_process.cpu_percent = Self::lifetime_avg_percent(
+                            utime,
+                            stime,
+                            proc_stat.starttime,
+                            self.tps,
+                            self.system_uptime_secs(),
+                        );
                     }
                 }
                 Vacant(vac) => {
                     vac.insert(UsageStats::new(utime, stime, current_timestamp));
+                    task_mgr_process.cpu_percent = Self::lifetime_avg_percent(
+                        utime,
+                        stime,
+                        proc_stat.starttime,
+                        self.tps,
+                        self.system_uptime_secs(),
+                    );
                 }
             }
         }
@@ -387,6 +442,37 @@ mod tests {
         );
 
         assert_eq!(cpu_percent, None, "Should handle tick overflow safely");
+    }
+
+    /// Test the since-start average used for a process's first sample.
+    /// A process that used 2000 ticks over its 100s lifetime shows 20%.
+    #[test]
+    fn test_lifetime_avg_percent() {
+        // tps=100, uptime=1000s => uptime_ticks=100_000
+        // starttime=90_000 ticks => process age = 10_000 ticks = 100s
+        let percent = CpuTracker::lifetime_avg_percent(800, 1200, 90_000, 100, 1000.0);
+        assert_eq!(percent, 20.0, "2000 ticks over 100s should be 20%");
+    }
+
+    /// Test that a process whose age can't be established yields 0.0
+    #[test]
+    fn test_lifetime_avg_percent_nonpositive_age_returns_zero() {
+        // starttime later than uptime: not possible in practice, guards the math
+        assert_eq!(
+            CpuTracker::lifetime_avg_percent(100, 100, 200_000, 100, 1000.0),
+            0.0
+        );
+        // uptime reads as 0 (e.g. unreadable /proc/uptime)
+        assert_eq!(CpuTracker::lifetime_avg_percent(100, 100, 0, 100, 0.0), 0.0);
+    }
+
+    /// Test that overflow of tick sums is handled safely
+    #[test]
+    fn test_lifetime_avg_percent_overflow_returns_zero() {
+        assert_eq!(
+            CpuTracker::lifetime_avg_percent(u64::MAX, 1, 90_000, 100, 1000.0),
+            0.0
+        );
     }
 
     /// Test that evict_dead_processes removes entries for dead PIDs

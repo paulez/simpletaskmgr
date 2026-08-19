@@ -12,7 +12,7 @@ pub struct TaskMgrProcess {
     pub pid: i32,
     pub ruid: u32,
     pub username: String,
-    pub cpu_percent: f64, // Running average of CPU usage over last 5 seconds
+    pub cpu_percent: f64, // top-style per-core CPU%, may exceed 100 for multi-threaded
 }
 
 impl Eq for TaskMgrProcess {}

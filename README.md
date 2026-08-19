@@ -5,7 +5,7 @@ A lightweight, interactive system process manager built with Rust that displays 
 ## Features
 
 - **Real-time Process Display**: Shows PID, Real User ID (RUID), and process name for each running process
-- **Auto-refresh**: The process list automatically updates every second
+- **Auto-refresh**: The process list automatically updates every 1.5 seconds
 - **Efficient Rendering**: Uses virtualized scrolling for smooth performance with many processes
 - **Modern UI**: Built with the Floem GUI framework for a responsive, clean interface
 - **Linux Native**: Direct access to Linux `/proc` filesystem for accurate process information
@@ -43,7 +43,12 @@ The project uses the following Rust crates:
 
 ## How It Works
 
-The application reads process information directly from the Linux `/proc` filesystem using the `procfs` crate. It then displays the data in a virtualized list that automatically refreshes every second using reactive programming with the Floem framework.
+The application reads process information directly from the Linux `/proc` filesystem using the `procfs` crate. It then displays the data in a virtualized list that automatically refreshes every 1.5 seconds using reactive programming with the Floem framework.
+
+CPU usage is reported in `top`-style per-core percentages: 100% means one core fully
+saturated, and multi-threaded processes can show more than 100%. A process's first
+sample shows its average CPU usage since it started, then switches to the
+per-interval rate.
 
 Each process entry shows:
 - **PID**: Process identifier
