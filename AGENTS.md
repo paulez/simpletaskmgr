@@ -195,12 +195,13 @@ one of them passes together, run *after your last edit*.
 2. **Add unit tests** - add or update tests in `#[cfg(test)] mod tests`, then run `cargo test`; every test must pass (this also compiles the code)
 3. **Lint** - run `cargo clippy --all-targets`; it must finish with **zero warnings** (`--all-targets` is required so test files are linted too)
 4. **Format** - run `cargo fmt` (verify clean with `cargo fmt --check`)
-5. **Commit** - only once steps 2-4 are all green, with a message stating what changed, why, and how it was verified
+5. **Commit** - only once steps 2-4 are all green, with a message stating what changed, why, and how it was verified. Do NOT include a `Co-Authored-By` trailer (no Claude/AI attribution line) in commit messages.
 
 Gate rules:
 - Re-run the whole gate after every edit; a green gate from an earlier state does not count
 - Never commit with failing tests or any clippy warning
 - Do not push unless explicitly asked
+- Commit messages must stay clean: no `Co-Authored-By` or similar AI attribution trailers
 
 ### Important Development Notes
 - **Build regularly** to fix build errors; use `rustc --explain <error number>` for help
