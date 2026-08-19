@@ -6,20 +6,13 @@ use floem::prelude::{create_rw_signal, RwSignal, SignalUpdate};
 use imbl::Vector;
 use log::{debug, warn};
 use procfs::process;
-use std::cell::{LazyCell, RefCell};
+use std::cell::RefCell;
 use users::{Users, UsersCache};
-
-thread_local! {
-    pub static PROCESS_LIST: LazyCell<ProcessList> = LazyCell::new(|| {
-        ProcessList::new()
-    })
-}
 
 pub struct ProcessList {
     pub processes: RwSignal<Vector<TaskMgrProcess>>,
     cpu_tracker: RefCell<CpuTracker>,
     users_cache: UsersCache,
-    show_all_processes: bool,
 }
 
 impl Default for ProcessList {
@@ -37,7 +30,6 @@ impl ProcessList {
             processes,
             cpu_tracker,
             users_cache,
-            show_all_processes: false,
         }
     }
 
@@ -112,9 +104,10 @@ impl ProcessList {
             processes_before_filter
         );
 
+        // Only the current user's processes are shown (the "show all" toggle is not yet implemented).
         let task_mgr_process_list_filtered: Vector<TaskMgrProcess> = task_mgr_process_list
             .into_iter()
-            .filter(|p| self.should_include_process(p, current_uid, self.show_all_processes))
+            .filter(|p| p.ruid == current_uid)
             .collect();
 
         let filtered_count = task_mgr_process_list_filtered.len();
@@ -161,18 +154,6 @@ impl ProcessList {
             }
         }
         self.processes.set(processes);
-    }
-
-    fn should_include_process(
-        &self,
-        proc: &TaskMgrProcess,
-        current_uid: u32,
-        show_all: bool,
-    ) -> bool {
-        if !show_all {
-            return proc.ruid == current_uid;
-        }
-        true
     }
 }
 
