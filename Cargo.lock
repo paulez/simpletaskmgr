@@ -2625,7 +2625,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "floem",
- "im",
  "imbl",
  "libc",
  "log",
