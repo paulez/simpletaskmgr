@@ -71,9 +71,15 @@ impl SendResult {
 /// Creates a detailed view showing comprehensive information about one process,
 /// with buttons to send it SIGHUP or SIGKILL.
 ///
-/// Wraps the content in `dyn_view` so it re-runs reactively when the selected
-/// pid or the list changes. Each field label also reads the row's `value`
-/// signal so the numbers update in place when the data layer swaps it.
+/// Wraps the content in `dyn_view` subscribing to **only** the selected pid,
+/// so the detail subtree is torn down and rebuilt solely when the selection
+/// changes. The one-time row lookup reads the list **untracked**, and each
+/// field label then reads the row's stable `value` signal reactively; because
+/// `update_process_list` reuses the same `ProcessItem` (and `value` signal)
+/// for a surviving pid, a refresh rewrites that signal and the labels update
+/// in place — without re-firing this container. Avoiding that per-refresh
+/// teardown is what stops the flood of taffy remove/re-add cycles that
+/// otherwise trip floem's shared `ViewState` bug (`invalid SlotMap key used`).
 pub fn process_detail_view(
     selected_pid: RwSignal<Option<i32>>,
     processes: RwSignal<Vector<ProcessItem>>,
@@ -114,59 +120,61 @@ pub fn process_detail_view(
     };
 
     Box::new(dyn_view(move || {
-        match (selected_pid.get(), processes.get()) {
+        let selected = selected_pid.get();
+        // Untracked: the pid→row lookup must not subscribe this container to
+        // the list; it only changes the *identity* of the value signal the
+        // labels read (see module doc above).
+        let item = selected.and_then(|pid| {
+            processes
+                .get_untracked()
+                .iter()
+                .find(|item| item.pid == pid)
+                .cloned()
+        });
+        match (selected, item) {
             (None, _) => container(text("No process selected")).into_any(),
-            (Some(pid), processes) => {
-                match processes.iter().find(|item| item.pid == pid).cloned() {
-                    None => {
-                        debug!("Process not found for pid: {pid}");
-                        container(text(format!("Process not found for pid: {pid}"))).into_any()
-                    }
-                    Some(item) => {
-                        let value = item.value;
-                        let pid = item.pid;
-                        let status_for_line = status;
+            (Some(pid), None) => {
+                debug!("Process not found for pid: {pid}");
+                container(text(format!("Process not found for pid: {pid}"))).into_any()
+            }
+            (Some(pid), Some(item)) => {
+                let value = item.value;
+                let status_for_line = status;
+                container(
+                    scroll(
                         container(
-                            scroll(
-                                container(
-                                    v_stack((
-                                        label(move || "Process Details")
-                                            .style(move |s| s.font_bold().font_size(18.0)),
-                                        label(move || format!("PID: {}", pid)),
-                                        label(move || format!("Name: {}", value.get().name)),
-                                        label(move || format!("UID: {}", value.get().ruid)),
-                                        label(move || {
-                                            format!("Username: {}", value.get().username)
-                                        }),
-                                        label(move || {
-                                            format!("CPU Usage: {}", value.get().cpu_percent_str())
-                                        }),
-                                        h_stack((
-                                            button(text("Send SIGHUP"))
-                                                .action(send_for(Signal::Sighup)),
-                                            button(text("Send SIGKILL"))
-                                                .action(send_for(Signal::Sigkill)),
-                                        ))
-                                        .style(move |s| s.flex_row().gap(8)),
-                                        label(move || {
-                                            status_for_line
-                                                .get()
-                                                .filter(|(attempted, _)| *attempted == pid)
-                                                .map(|(_, r)| r.message())
-                                                .unwrap_or_default()
-                                        })
-                                        .style(move |s| s.font_size(13.0)),
-                                    ))
-                                    .style(move |s: floem::style::Style| s.flex_col().gap(8)),
-                                )
-                                .style(move |s| s.padding(20.0)),
-                            )
-                            .style(move |s| s.width(100_i32.pct())),
+                            v_stack((
+                                label(move || "Process Details")
+                                    .style(move |s| s.font_bold().font_size(18.0)),
+                                label(move || format!("PID: {}", pid)),
+                                label(move || format!("Name: {}", value.get().name)),
+                                label(move || format!("UID: {}", value.get().ruid)),
+                                label(move || format!("Username: {}", value.get().username)),
+                                label(move || {
+                                    format!("CPU Usage: {}", value.get().cpu_percent_str())
+                                }),
+                                h_stack((
+                                    button(text("Send SIGHUP")).action(send_for(Signal::Sighup)),
+                                    button(text("Send SIGKILL")).action(send_for(Signal::Sigkill)),
+                                ))
+                                .style(move |s| s.flex_row().gap(8)),
+                                label(move || {
+                                    status_for_line
+                                        .get()
+                                        .filter(|(attempted, _)| *attempted == pid)
+                                        .map(|(_, r)| r.message())
+                                        .unwrap_or_default()
+                                })
+                                .style(move |s| s.font_size(13.0)),
+                            ))
+                            .style(move |s: floem::style::Style| s.flex_col().gap(8)),
                         )
-                        .style(move |s| s.width(100_i32.pct()))
-                        .into_any()
-                    }
-                }
+                        .style(move |s| s.padding(20.0)),
+                    )
+                    .style(move |s| s.width(100_i32.pct())),
+                )
+                .style(move |s| s.width(100_i32.pct()))
+                .into_any()
             }
         }
     }))

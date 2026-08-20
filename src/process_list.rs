@@ -185,6 +185,8 @@ impl ProcessList {
         // (floem_reactive runs subscriber effects eagerly on every set, with no
         // equality check).
         let mut processes = self.processes.get_untracked();
+        // The current ordering, to detect a no-op sort below.
+        let previous_pids: Vec<i32> = processes.iter().map(|i| i.pid).collect();
         // Each row's fields live in its `value` signal; read the snapshot
         // untracked for the comparison (we only reorder, never mutate values).
         // `f64` uses `total_cmp` so NaN values sort without panicking, unlike
@@ -231,7 +233,16 @@ impl ProcessList {
                 processes.sort_by(|a, b| b.value_untracked().name.cmp(&a.value_untracked().name));
             }
         }
-        self.processes.set(processes);
+        // Publish only when the order actually changed (mirrors
+        // `update_process_list`): floem_reactive runs subscriber effects
+        // unconditionally on every `set`, with no equality check, so a no-op
+        // sort would needlessly re-fire the layout effects — including a full
+        // rebuild of the process list every ~1.5s refresh, even though the rows
+        // (keyed by pid) are unchanged.
+        let new_pids: Vec<i32> = processes.iter().map(|i| i.pid).collect();
+        if previous_pids != new_pids {
+            self.processes.set(processes);
+        }
     }
 }
 
