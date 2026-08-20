@@ -2,9 +2,12 @@ use floem::IntoView;
 use log::info;
 use simplelog::*;
 use simpletaskmgr::config::Config;
+use simpletaskmgr::metrics::SystemMetrics;
 use simpletaskmgr::process_list::ProcessList;
 use simpletaskmgr::ui::{process_detail_view, process_list_header, process_list_view};
+use simpletaskmgr::usage_graph::usage_graph_view;
 use simpletaskmgr::{SortColumn, SortDirection};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use floem::action::exec_after;
@@ -22,11 +25,16 @@ fn app_view() -> impl IntoView {
     let process_list = Rc::new(ProcessList::init());
     let process_list_for_view = Rc::clone(&process_list);
     let tick_for_effect = tick;
+    // System CPU/memory history shared between the refresh loop (which appends
+    // samples) and the graph view (which reads them reactively).
+    let metrics = Rc::new(RefCell::new(SystemMetrics::new()));
 
     let process_list_for_effect = Rc::clone(&process_list);
+    let metrics_for_effect = Rc::clone(&metrics);
     create_effect(move |_| {
         tick_for_effect.track();
         let process_list_for_effect = Rc::clone(&process_list_for_effect);
+        let metrics_for_effect = Rc::clone(&metrics_for_effect);
         // Read the sort column/direction at fire-time so a user's sort change is
         // applied to the freshly loaded data, not the values from the previous tick.
         exec_after(Config::refresh_interval(), move |_| {
@@ -34,6 +42,9 @@ fn app_view() -> impl IntoView {
             let direction = sort_direction.get();
             process_list_for_effect.update_process_list();
             process_list_for_effect.sort_processes(column, direction);
+            // Take a system-wide CPU/memory sample each refresh so the graph
+            // scrolls at the same cadence as the list.
+            metrics_for_effect.borrow_mut().push_sample();
             tick_for_effect.set(());
         });
     });
@@ -48,9 +59,12 @@ fn app_view() -> impl IntoView {
         process_list_for_sort.sort_processes(column, direction);
     });
 
+    let metrics_for_view = Rc::clone(&metrics);
+    let history_signal = metrics_for_view.borrow().history_signal;
     let main_view = dyn_container(
         move || selected_process_id.get(),
         move |selected_process_id_item| {
+            let usage_graph = usage_graph_view(history_signal);
             let header = process_list_header(sort_column, sort_direction, move |column| {
                 let current_column = sort_column.get();
                 let current_direction = sort_direction.get();
@@ -94,7 +108,7 @@ fn app_view() -> impl IntoView {
                 ),
                 None => container(process_scroll),
             };
-            container(v_stack((header, main_container)))
+            container(v_stack((usage_graph, header, main_container)))
                 .style(|s| s.width_full().height_full().border(1.0))
         },
     );

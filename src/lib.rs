@@ -1,9 +1,11 @@
 pub mod config;
 pub mod cpu_tracker;
+pub mod metrics;
 pub mod process;
 pub mod process_list;
 pub mod signal;
 pub mod ui;
+pub mod usage_graph;
 
 /// Represents the column by which processes can be sorted
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

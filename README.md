@@ -11,6 +11,7 @@ A lightweight, interactive system process manager built with Rust that displays 
 - **Linux Native**: Direct access to Linux `/proc` filesystem for accurate process information
 - **Process Detail View**: Click any process to inspect its PID, name, UID, user, and CPU usage
 - **Signal Management**: Send SIGHUP or SIGKILL to a selected process from its detail view, with success/failure feedback
+- **Resource Usage Graph**: An always-on chart above the process list shows system-wide CPU and memory usage over time (a rolling window of ~3 minutes), updating with each refresh
 
 ## Requirements
 
@@ -51,6 +52,12 @@ CPU usage is reported in `top`-style per-core percentages: 100% means one core f
 saturated, and multi-threaded processes can show more than 100%. A process's first
 sample shows its average CPU usage since it started, then switches to the
 per-interval rate.
+
+System-wide CPU and memory usage are sampled once per refresh and kept in a
+rolling history (the last ~120 samples). CPU% is computed from the delta in the
+aggregate `/proc/stat` `cpu` line; memory% is `(MemTotal − MemAvailable) /
+MemTotal` from `/proc/meminfo`. The resource graph renders both as area charts on
+a shared 0-100% axis.
 
 Each process entry shows:
 - **PID**: Process identifier
