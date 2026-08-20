@@ -2627,6 +2627,7 @@ dependencies = [
  "floem",
  "im",
  "imbl",
+ "libc",
  "log",
  "procfs",
  "rstest",

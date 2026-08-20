@@ -9,6 +9,8 @@ A lightweight, interactive system process manager built with Rust that displays 
 - **Efficient Rendering**: Uses virtualized scrolling for smooth performance with many processes
 - **Modern UI**: Built with the Floem GUI framework for a responsive, clean interface
 - **Linux Native**: Direct access to Linux `/proc` filesystem for accurate process information
+- **Process Detail View**: Click any process to inspect its PID, name, UID, user, and CPU usage
+- **Signal Management**: Send SIGHUP or SIGKILL to a selected process from its detail view, with success/failure feedback
 
 ## Requirements
 

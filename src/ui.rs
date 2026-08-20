@@ -6,10 +6,14 @@ use crate::SortDirection;
 use floem::prelude::{h_stack, RwSignal, SignalGet, SignalUpdate};
 use floem::taffy::style_helpers::{auto, fr};
 use floem::unit::UnitExt;
-use floem::views::{container, dyn_stack, dyn_view, label, scroll, text, v_stack, Decorators};
+use floem::views::{
+    button, container, dyn_stack, dyn_view, label, scroll, text, v_stack, Decorators,
+};
 use floem::{IntoView, View};
 use imbl::Vector;
 use log::debug;
+
+use crate::signal::{self, Signal};
 
 /// Creates a clickable view for a single process row.
 ///
@@ -48,7 +52,24 @@ pub fn process_item_view(
     )
 }
 
-/// Creates a detailed view showing comprehensive information about one process.
+/// The possible outcomes of a signal attempt, shown as a status line.
+#[derive(Clone, PartialEq)]
+enum SendResult {
+    Ok(Signal),
+    Err(String),
+}
+
+impl SendResult {
+    fn message(&self) -> String {
+        match self {
+            SendResult::Ok(sig) => format!("{} sent", sig.name()),
+            SendResult::Err(msg) => format!("Failed: {msg}"),
+        }
+    }
+}
+
+/// Creates a detailed view showing comprehensive information about one process,
+/// with buttons to send it SIGHUP or SIGKILL.
 ///
 /// Wraps the content in `dyn_view` so it re-runs reactively when the selected
 /// pid or the list changes. Each field label also reads the row's `value`
@@ -57,6 +78,41 @@ pub fn process_detail_view(
     selected_pid: RwSignal<Option<i32>>,
     processes: RwSignal<Vector<ProcessItem>>,
 ) -> Box<dyn View> {
+    // Last signal attempt for the currently selected process. Keyed by the
+    // attempted pid so the status line belongs to whichever process it refers
+    // to (a pid change clears a stale result).
+    let status = floem::prelude::create_rw_signal::<Option<(i32, SendResult)>>(None);
+
+    let send_for = move |sig: Signal| {
+        let status = status;
+        let selected_pid = selected_pid;
+        let processes = processes;
+        move || {
+            // Read untracked: the button callback must not subscribe to the
+            // list just to find the pid — the click handler already knows it.
+            let pid = match selected_pid.get_untracked() {
+                Some(pid) => pid,
+                None => return,
+            };
+            let name = processes
+                .get_untracked()
+                .iter()
+                .find(|item| item.pid == pid)
+                .map(|i| i.value_untracked().name)
+                .unwrap_or_default();
+            match signal::send_signal(pid, sig) {
+                Ok(()) => {
+                    log::info!("{} delivered to pid {pid} ({name})", sig.name());
+                    status.set(Some((pid, SendResult::Ok(sig))));
+                }
+                Err(e) => {
+                    log::error!("{} to pid {pid} ({name}) failed: {e}", sig.name());
+                    status.set(Some((pid, SendResult::Err(e.to_string()))));
+                }
+            }
+        }
+    };
+
     Box::new(dyn_view(move || {
         match (selected_pid.get(), processes.get()) {
             (None, _) => container(text("No process selected")).into_any(),
@@ -69,6 +125,7 @@ pub fn process_detail_view(
                     Some(item) => {
                         let value = item.value;
                         let pid = item.pid;
+                        let status_for_line = status;
                         container(
                             scroll(
                                 container(
@@ -84,6 +141,21 @@ pub fn process_detail_view(
                                         label(move || {
                                             format!("CPU Usage: {}", value.get().cpu_percent_str())
                                         }),
+                                        h_stack((
+                                            button(text("Send SIGHUP"))
+                                                .action(send_for(Signal::Sighup)),
+                                            button(text("Send SIGKILL"))
+                                                .action(send_for(Signal::Sigkill)),
+                                        ))
+                                        .style(move |s| s.flex_row().gap(8)),
+                                        label(move || {
+                                            status_for_line
+                                                .get()
+                                                .filter(|(attempted, _)| *attempted == pid)
+                                                .map(|(_, r)| r.message())
+                                                .unwrap_or_default()
+                                        })
+                                        .style(move |s| s.font_size(13.0)),
                                     ))
                                     .style(move |s: floem::style::Style| s.flex_col().gap(8)),
                                 )
