@@ -45,9 +45,13 @@ impl ProcessList {
                 // still present so an already-rendered row updates in place; build a
                 // fresh row only for a pid that appeared this refresh. Dropped pids
                 // simply fall out of the new vector (their signals are then disposed).
+                //
+                // Read untracked: `update_process_list` may be called from inside a
+                // reactive effect, and reading the list here must not subscribe that
+                // effect to the `processes` signal (which is written just below).
                 let mut existing: std::collections::HashMap<i32, ProcessItem> = self
                     .processes
-                    .get()
+                    .get_untracked()
                     .into_iter()
                     .map(|item| (item.pid, item))
                     .collect();
@@ -61,7 +65,19 @@ impl ProcessList {
                         None => ProcessItem::new(&p),
                     })
                     .collect();
-                self.processes.set(new_items);
+                // Publish only when the row set actually changed; floem_reactive
+                // runs subscriber effects unconditionally on every set, so
+                // skipping a no-op write avoids needless effect runs.
+                let current_pids: Vec<i32> = self
+                    .processes
+                    .get_untracked()
+                    .iter()
+                    .map(|i| i.pid)
+                    .collect();
+                let new_pids: Vec<i32> = new_items.iter().map(|i| i.pid).collect();
+                if current_pids != new_pids {
+                    self.processes.set(new_items);
+                }
             }
             Err(e) => {
                 log::error!("Failed to update process list: {}", e);
@@ -161,7 +177,14 @@ impl ProcessList {
 
     /// Sorts the process list by the specified column and direction
     pub fn sort_processes(&self, column: crate::SortColumn, direction: crate::SortDirection) {
-        let mut processes = self.processes.get();
+        // Read the list untracked: this is an imperative operation and it must
+        // not subscribe the caller's effect to the `processes` signal. Tracking
+        // here would make the sort effect re-subscribe to the very signal it
+        // writes at the end, so each `set` synchronously re-runs the effect,
+        // which sorts and sets again, recursing until the stack overflows
+        // (floem_reactive runs subscriber effects eagerly on every set, with no
+        // equality check).
+        let mut processes = self.processes.get_untracked();
         // Each row's fields live in its `value` signal; read the snapshot
         // untracked for the comparison (we only reorder, never mutate values).
         // `f64` uses `total_cmp` so NaN values sort without panicking, unlike
@@ -243,5 +266,53 @@ mod tests {
         let mut pids: Vec<i32> = list.processes.get().iter().map(|p| p.pid).collect();
         pids.sort_unstable();
         assert_eq!(pids, vec![1, 2, 3]);
+    }
+
+    /// Re-sorting while subscribed to the list from a reactive effect must not
+    /// re-subscribe that effect to the list it writes. floem_reactive runs
+    /// subscriber effects eagerly (no equality check) on every set, so if
+    /// `sort_processes` tracked the list it read, each `processes.set` would
+    /// synchronously re-run the effect, which sorted and set again, recursing
+    /// until the stack overflowed (the startup crash).
+    #[test]
+    fn test_sort_processes_in_effect_does_not_recurse() {
+        use floem::prelude::{SignalGet, SignalTrack, SignalUpdate};
+        use floem::reactive::create_effect;
+
+        fn make_items(pid: i32) -> ProcessItem {
+            let p =
+                TaskMgrProcess::new(format!("name{}", pid), pid, 1, "u".to_string(), pid as f64);
+            ProcessItem::new(&p)
+        }
+
+        let items: Vector<ProcessItem> = (6..=10).map(make_items).collect();
+
+        let list = std::rc::Rc::new(ProcessList::new());
+        list.processes.set(items.clone());
+
+        let sort_column = create_rw_signal(crate::SortColumn::CpuPercent);
+        let sort_direction = create_rw_signal(crate::SortDirection::Descending);
+
+        let effect_list = std::rc::Rc::clone(&list);
+        create_effect(move |_| {
+            sort_column.track();
+            sort_direction.track();
+            effect_list.sort_processes(sort_column.get(), sort_direction.get());
+        });
+
+        // A refresh of the process list must not re-trigger the sort effect
+        // (before the fix this recursed until the stack overflowed).
+        list.processes.set(items.clone());
+
+        // The sort effect still reacts to sort changes and applies them.
+        sort_column.set(crate::SortColumn::Pid);
+        sort_column.set(crate::SortColumn::CpuPercent);
+
+        // Then the sort effect still reacts to a sort change and applies it.
+        sort_column.set(crate::SortColumn::Pid);
+        sort_column.set(crate::SortColumn::CpuPercent);
+
+        let pids: Vec<i32> = list.processes.get().iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![10, 9, 8, 7, 6]);
     }
 }
