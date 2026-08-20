@@ -1,53 +1,74 @@
-use crate::process::TaskMgrProcess;
+use std::rc::Rc;
+
+use crate::process::ProcessItem;
 use crate::SortColumn;
 use crate::SortDirection;
-use floem::prelude::{h_stack, RwSignal, SignalGet};
-
+use floem::prelude::{h_stack, RwSignal, SignalGet, SignalUpdate};
 use floem::taffy::style_helpers::{auto, fr};
 use floem::unit::UnitExt;
-use floem::views::{container, dyn_container, dyn_stack, label, scroll, text, v_stack, Decorators};
+use floem::views::{container, dyn_stack, dyn_view, label, scroll, text, v_stack, Decorators};
 use floem::{IntoView, View};
 use imbl::Vector;
 use log::debug;
-use std::rc::Rc;
 
-/// Creates a clickable view for a single process item
+/// Creates a clickable view for a single process row.
+///
+/// Every label reads the row's `value` signal reactively, so when the data
+/// layer swaps in a new snapshot for this `pid` the row's text updates in
+/// place instead of the row being torn down and rebuilt.
 pub fn process_item_view(
-    process: TaskMgrProcess,
-    on_click: Rc<dyn Fn(TaskMgrProcess)>,
+    item: ProcessItem,
+    selected_pid: RwSignal<Option<i32>>,
+    on_click: Rc<dyn Fn(i32)>,
 ) -> Box<dyn View> {
-    let process_clone = process.clone();
-    Box::new(process.into_view().on_click(move |_| {
-        debug!("That's a click! Clicked process is {:?}", process_clone);
-        on_click(process_clone.clone());
-        floem::event::EventPropagation::Continue
-    }))
+    let pid = item.pid;
+    let value = item.value;
+
+    Box::new(
+        h_stack((
+            label(move || value.get().pid.to_string()),
+            label(move || value.get().username.clone()),
+            label(move || value.get().cpu_percent_str()),
+            label(move || value.get().name.clone()),
+        ))
+        .style(move |s| {
+            s.width_full()
+                .items_center()
+                .gap(6)
+                .grid()
+                .grid_template_columns(vec![auto(), auto(), fr(1.), fr(1.)])
+                .padding_vert(4)
+        })
+        .on_click(move |_| {
+            debug!("Clicked process pid {:?}", pid);
+            selected_pid.set(Some(pid));
+            on_click(pid);
+            floem::event::EventPropagation::Continue
+        }),
+    )
 }
 
-/// Creates a detailed view showing comprehensive information about a process
+/// Creates a detailed view showing comprehensive information about one process.
+///
+/// Wraps the content in `dyn_view` so it re-runs reactively when the selected
+/// pid or the list changes. Each field label also reads the row's `value`
+/// signal so the numbers update in place when the data layer swaps it.
 pub fn process_detail_view(
-    pid_signal: RwSignal<Option<i32>>,
-    processes: RwSignal<Vector<TaskMgrProcess>>,
+    selected_pid: RwSignal<Option<i32>>,
+    processes: RwSignal<Vector<ProcessItem>>,
 ) -> Box<dyn View> {
-    let pid = pid_signal.get();
-    match pid {
-        None => Box::new(container(text("No process selected"))),
-        Some(pid) => Box::new(dyn_container(
-            move || processes.get(),
-            move |processes| {
-                let process = processes.iter().find(|p| p.pid == pid).cloned();
-                match process {
+    Box::new(dyn_view(move || {
+        match (selected_pid.get(), processes.get()) {
+            (None, _) => container(text("No process selected")).into_any(),
+            (Some(pid), processes) => {
+                match processes.iter().find(|item| item.pid == pid).cloned() {
                     None => {
-                        // A selected process exiting is expected, not an error; keep it quiet.
                         debug!("Process not found for pid: {pid}");
-                        container(text(format!("Process not found for pid: {pid}")))
+                        container(text(format!("Process not found for pid: {pid}"))).into_any()
                     }
-                    Some(process) => {
-                        let name = process.name.clone();
-                        let pid = process.pid;
-                        let ruid = process.ruid;
-                        let username = process.username.clone();
-                        let cpu_percent = process.cpu_percent;
+                    Some(item) => {
+                        let value = item.value;
+                        let pid = item.pid;
                         container(
                             scroll(
                                 container(
@@ -55,10 +76,14 @@ pub fn process_detail_view(
                                         label(move || "Process Details")
                                             .style(move |s| s.font_bold().font_size(18.0)),
                                         label(move || format!("PID: {}", pid)),
-                                        label(move || format!("Name: {}", name)),
-                                        label(move || format!("UID: {}", ruid)),
-                                        label(move || format!("Username: {}", username)),
-                                        label(move || format!("CPU Usage: {:.1}%", cpu_percent)),
+                                        label(move || format!("Name: {}", value.get().name)),
+                                        label(move || format!("UID: {}", value.get().ruid)),
+                                        label(move || {
+                                            format!("Username: {}", value.get().username)
+                                        }),
+                                        label(move || {
+                                            format!("CPU Usage: {}", value.get().cpu_percent_str())
+                                        }),
                                     ))
                                     .style(move |s: floem::style::Style| s.flex_col().gap(8)),
                                 )
@@ -67,23 +92,26 @@ pub fn process_detail_view(
                             .style(move |s| s.width(100_i32.pct())),
                         )
                         .style(move |s| s.width(100_i32.pct()))
+                        .into_any()
                     }
                 }
-            },
-        )),
-    }
+            }
+        }
+    }))
 }
 
-/// Creates a dynamic stack view that displays the list of processes
+/// Creates a dynamic stack view that displays the list of processes, keyed on
+/// the stable `pid` so each row is updated in place rather than rebuilt.
 pub fn process_list_view(
-    processes: RwSignal<Vector<TaskMgrProcess>>,
-    on_click: impl Fn(TaskMgrProcess) + 'static,
+    processes: RwSignal<Vector<ProcessItem>>,
+    selected_pid: RwSignal<Option<i32>>,
+    on_click: impl Fn(i32) + 'static,
 ) -> impl IntoView {
     let on_click = Rc::new(on_click);
     dyn_stack(
         move || processes.get(),
-        |process: &TaskMgrProcess| process.clone(),
-        move |process| process_item_view(process, on_click.clone()),
+        |item| item.pid,
+        move |item| process_item_view(item, selected_pid, on_click.clone()),
     )
     .style(|s| s.flex_col().min_size(0, 0))
     .debug_name("Process List Stack")

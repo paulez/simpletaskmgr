@@ -1,8 +1,7 @@
 use crate::cpu_tracker::CpuTracker;
-use crate::process::{build_task_mgr_process, TaskMgrProcess};
+use crate::process::{build_task_mgr_process, ProcessItem, TaskMgrProcess};
 use anyhow::{Context, Result};
-use floem::prelude::SignalGet;
-use floem::prelude::{create_rw_signal, RwSignal, SignalUpdate};
+use floem::prelude::{create_rw_signal, RwSignal, SignalGet, SignalUpdate};
 use imbl::Vector;
 use log::{debug, warn};
 use procfs::process;
@@ -10,7 +9,7 @@ use std::cell::RefCell;
 use users::{Users, UsersCache};
 
 pub struct ProcessList {
-    pub processes: RwSignal<Vector<TaskMgrProcess>>,
+    pub processes: RwSignal<Vector<ProcessItem>>,
     cpu_tracker: RefCell<CpuTracker>,
     users_cache: UsersCache,
 }
@@ -41,7 +40,29 @@ impl ProcessList {
 
     pub fn update_process_list(&self) {
         match self.refresh_process_list() {
-            Ok(processes) => self.processes.set(processes),
+            Ok(processes) => {
+                // Reuse the existing row (and its `value` signal) for any pid that is
+                // still present so an already-rendered row updates in place; build a
+                // fresh row only for a pid that appeared this refresh. Dropped pids
+                // simply fall out of the new vector (their signals are then disposed).
+                let mut existing: std::collections::HashMap<i32, ProcessItem> = self
+                    .processes
+                    .get()
+                    .into_iter()
+                    .map(|item| (item.pid, item))
+                    .collect();
+                let new_items: Vector<ProcessItem> = processes
+                    .into_iter()
+                    .map(|p| match existing.remove(&p.pid) {
+                        Some(item) => {
+                            item.copy_from(&p);
+                            item
+                        }
+                        None => ProcessItem::new(&p),
+                    })
+                    .collect();
+                self.processes.set(new_items);
+            }
             Err(e) => {
                 log::error!("Failed to update process list: {}", e);
                 self.processes.set(Vector::new());
@@ -141,8 +162,10 @@ impl ProcessList {
     /// Sorts the process list by the specified column and direction
     pub fn sort_processes(&self, column: crate::SortColumn, direction: crate::SortDirection) {
         let mut processes = self.processes.get();
-        // `i32`/`String` have a total order via `cmp`; `f64` uses `total_cmp` so values
-        // (including NaN) sort without panicking, unlike `partial_cmp().unwrap()`.
+        // Each row's fields live in its `value` signal; read the snapshot
+        // untracked for the comparison (we only reorder, never mutate values).
+        // `f64` uses `total_cmp` so NaN values sort without panicking, unlike
+        // `partial_cmp().unwrap()`.
         match (column, direction) {
             (crate::SortColumn::Pid, crate::SortDirection::Ascending) => {
                 processes.sort_by(|a, b| a.pid.cmp(&b.pid));
@@ -151,22 +174,38 @@ impl ProcessList {
                 processes.sort_by(|a, b| b.pid.cmp(&a.pid));
             }
             (crate::SortColumn::Username, crate::SortDirection::Ascending) => {
-                processes.sort_by(|a, b| a.username.cmp(&b.username));
+                processes.sort_by(|a, b| {
+                    a.value_untracked()
+                        .username
+                        .cmp(&b.value_untracked().username)
+                });
             }
             (crate::SortColumn::Username, crate::SortDirection::Descending) => {
-                processes.sort_by(|a, b| b.username.cmp(&a.username));
+                processes.sort_by(|a, b| {
+                    b.value_untracked()
+                        .username
+                        .cmp(&a.value_untracked().username)
+                });
             }
             (crate::SortColumn::CpuPercent, crate::SortDirection::Ascending) => {
-                processes.sort_by(|a, b| a.cpu_percent.total_cmp(&b.cpu_percent));
+                processes.sort_by(|a, b| {
+                    a.value_untracked()
+                        .cpu_percent
+                        .total_cmp(&b.value_untracked().cpu_percent)
+                });
             }
             (crate::SortColumn::CpuPercent, crate::SortDirection::Descending) => {
-                processes.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
+                processes.sort_by(|a, b| {
+                    b.value_untracked()
+                        .cpu_percent
+                        .total_cmp(&a.value_untracked().cpu_percent)
+                });
             }
             (crate::SortColumn::Name, crate::SortDirection::Ascending) => {
-                processes.sort_by(|a, b| a.name.cmp(&b.name));
+                processes.sort_by(|a, b| a.value_untracked().name.cmp(&b.value_untracked().name));
             }
             (crate::SortColumn::Name, crate::SortDirection::Descending) => {
-                processes.sort_by(|a, b| b.name.cmp(&a.name));
+                processes.sort_by(|a, b| b.value_untracked().name.cmp(&a.value_untracked().name));
             }
         }
         self.processes.set(processes);
@@ -182,29 +221,14 @@ mod tests {
     #[test]
     fn test_sort_by_cpu_percent_with_nan_does_not_panic() {
         let list = ProcessList::new();
-        let mut vec = imbl::Vector::new();
-        vec.push_back(TaskMgrProcess::new(
-            "a".to_string(),
-            1,
-            1,
-            "u".to_string(),
-            f64::NAN,
-        ));
-        vec.push_back(TaskMgrProcess::new(
-            "b".to_string(),
-            2,
-            1,
-            "u".to_string(),
-            5.0,
-        ));
-        vec.push_back(TaskMgrProcess::new(
-            "c".to_string(),
-            3,
-            1,
-            "u".to_string(),
-            -1.0,
-        ));
-        list.processes.set(vec);
+        let items = [(1, f64::NAN), (2, 5.0), (3, -1.0)]
+            .into_iter()
+            .map(|(pid, cpu)| {
+                let p = TaskMgrProcess::new(format!("name{}", pid), pid, 1, "u".to_string(), cpu);
+                ProcessItem::new(&p)
+            })
+            .collect();
+        list.processes.set(items);
 
         list.sort_processes(
             crate::SortColumn::CpuPercent,
@@ -216,7 +240,8 @@ mod tests {
         );
 
         // Sorting must leave the list intact with the same set of PIDs.
-        let pids: Vec<i32> = list.processes.get().iter().map(|p| p.pid).collect();
-        assert_eq!(pids.len(), 3);
+        let mut pids: Vec<i32> = list.processes.get().iter().map(|p| p.pid).collect();
+        pids.sort_unstable();
+        assert_eq!(pids, vec![1, 2, 3]);
     }
 }

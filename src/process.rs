@@ -1,11 +1,14 @@
-use floem::{
-    taffy::style_helpers::{auto, fr},
-    views::{h_stack, label, Decorators, Stack},
-    IntoView,
-};
+use floem::prelude::{create_rw_signal, RwSignal, SignalGet, SignalUpdate};
 pub use procfs::process;
 pub use users::{Users, UsersCache};
 
+/// A plain, immutable snapshot of a process row's data as read from `/proc`.
+///
+/// `PartialEq` compares the whole struct field-by-field. `cpu_percent` is an
+/// `f64`, so `Eq`/`Hash` are intentionally not implemented (an `f64` that can
+/// be `NaN` has a `PartialEq` that is not reflexive, and no caller of this repo
+/// needs it as a hash key anyway — `dyn_stack` keys rows on the stable `i32`
+/// `pid`, not on the value).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TaskMgrProcess {
     pub name: String,
@@ -13,17 +16,6 @@ pub struct TaskMgrProcess {
     pub ruid: u32,
     pub username: String,
     pub cpu_percent: f64, // top-style per-core CPU%, may exceed 100 for multi-threaded
-}
-
-impl Eq for TaskMgrProcess {}
-
-impl std::hash::Hash for TaskMgrProcess {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-        self.pid.hash(state);
-        self.ruid.hash(state);
-        self.username.hash(state);
-    }
 }
 
 impl TaskMgrProcess {
@@ -42,26 +34,46 @@ impl TaskMgrProcess {
     }
 }
 
-impl IntoView for TaskMgrProcess {
-    type V = Stack;
+/// One process row as rendered by the UI.
+///
+/// `pid` is the row's stable identity (what `dyn_stack` keys rows on), while
+/// `value` is a single signal holding the latest `TaskMgrProcess` snapshot. On
+/// each refresh we keep the same `ProcessItem` for a given `pid` and merely
+/// write a new snapshot into `value`, so an already-rendered row updates its
+/// labels in place instead of being torn down and rebuilt.
+///
+/// A `RwSignal` is `Copy` (an id into the reactive runtime), so cloning a
+/// `ProcessItem` shares the *same* underlying value signal as the original.
+#[derive(Clone, Debug)]
+pub struct ProcessItem {
+    pub pid: i32,
+    /// The row's current data; swapped in place on every refresh.
+    pub value: RwSignal<TaskMgrProcess>,
+}
 
-    fn into_view(self) -> Self::V {
-        let cpu_percent_str = self.cpu_percent_str();
-        let name = self.name.clone();
-        h_stack((
-            label(move || self.pid.to_string()),
-            label(move || self.username.clone()),
-            label(move || cpu_percent_str.clone()),
-            label(move || name.to_string()),
-        ))
-        .style(move |s| {
-            s.width_full()
-                .items_center()
-                .gap(6)
-                .grid()
-                .grid_template_columns(vec![auto(), auto(), auto(), fr(1.)])
-                .padding_vert(4)
-        })
+impl ProcessItem {
+    /// Creates a new row with a fresh value signal from a `TaskMgrProcess`.
+    pub fn new(p: &TaskMgrProcess) -> Self {
+        Self {
+            pid: p.pid,
+            value: create_rw_signal(p.clone()),
+        }
+    }
+
+    /// Writes a new snapshot into this row's existing value signal, so any
+    /// rendered labels that read it update in place (no row rebuild).
+    pub fn copy_from(&self, p: &TaskMgrProcess) {
+        self.value.set(p.clone());
+    }
+
+    /// The row's current snapshot (untracked read — safe outside an effect).
+    pub fn value_untracked(&self) -> TaskMgrProcess {
+        self.value.get_untracked()
+    }
+
+    /// The current CPU% as a `top`-style string, e.g. `"12.3%"`.
+    pub fn cpu_percent_str(&self) -> String {
+        self.value_untracked().cpu_percent_str()
     }
 }
 
@@ -87,74 +99,83 @@ pub(crate) fn build_task_mgr_process(
 mod tests {
     use super::*;
 
+    fn proc(pid: i32, cpu: f64) -> TaskMgrProcess {
+        TaskMgrProcess::new(format!("name{}", pid), pid, 1000, "paul".to_string(), cpu)
+    }
+
     #[test]
     fn test_process_struct_creation() {
-        let p = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
-        assert_eq!(p.name, "test");
+        let p = proc(123, 0.0);
+        assert_eq!(p.name, "name123");
         assert_eq!(p.pid, 123);
-        assert_eq!(p.ruid, 456);
-        assert_eq!(p.username, "user");
+        assert_eq!(p.ruid, 1000);
+        assert_eq!(p.username, "paul");
         assert_eq!(p.cpu_percent, 0.0);
     }
 
     #[test]
-    fn test_process_struct_clone() {
-        let p1 = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
-        let p2 = p1.clone();
-        assert_eq!(p1, p2);
-        assert!(p1 == p2);
+    fn test_process_struct_clone_and_eq() {
+        let a = proc(1, 5.0);
+        let b = a.clone();
+        assert_eq!(a, b);
+        assert!(a == b);
     }
 
     #[test]
     fn test_process_struct_partial_eq() {
-        let p1 = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
-        let p2 = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
-        let p3 = TaskMgrProcess::new("different".to_string(), 123, 456, "user".to_string(), 0.0);
-
-        assert_eq!(p1, p2);
-        assert_ne!(p1, p3);
+        let a = proc(1, 5.0);
+        let same = proc(1, 5.0);
+        let diff = TaskMgrProcess::new("other".to_string(), 1, 1000, "paul".to_string(), 5.0);
+        assert_eq!(a, same);
+        assert_ne!(a, diff);
     }
 
     #[test]
     fn test_process_struct_debug() {
-        let p = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
-        let debug_string = format!("{:?}", p);
-        assert!(debug_string.contains("TaskMgrProcess"));
+        let p = proc(123, 0.0);
+        assert!(format!("{:?}", p).contains("TaskMgrProcess"));
     }
 
     #[test]
-    fn test_process_fields_have_valid_values() {
-        let p = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
-        assert!(!p.name.is_empty());
-        assert!(p.pid > 0);
-        assert!(!p.username.is_empty());
-        assert_eq!(p.cpu_percent, 0.0);
+    fn test_task_mgr_process_cpu_percent_str() {
+        assert_eq!(proc(1, 0.0).cpu_percent_str(), "0.0%");
+        assert_eq!(proc(1, 12.34).cpu_percent_str(), "12.3%");
     }
 
+    /// A `ProcessItem` exposes its stable `pid` and a current snapshot.
     #[test]
-    fn test_process_view_with_different_values() {
-        let test_cases = vec![
-            TaskMgrProcess::new("bash".to_string(), 1, 0, "root".to_string(), 0.0),
-            TaskMgrProcess::new("firefox".to_string(), 1234, 1000, "paul".to_string(), 0.0),
-            TaskMgrProcess::new("systemd".to_string(), 1, 0, "root".to_string(), 0.0),
-        ];
-
-        for p in test_cases {
-            // Each process should be able to be created with valid fields
-            assert!(!p.name.is_empty());
-            assert!(p.pid > 0);
-            assert!(!p.username.is_empty());
-            assert_eq!(p.cpu_percent, 0.0);
-        }
+    fn test_process_item_new_and_value() {
+        let p = proc(7, 12.34);
+        let item = ProcessItem::new(&p);
+        assert_eq!(item.pid, 7);
+        assert_eq!(item.value_untracked(), p);
+        assert_eq!(item.cpu_percent_str(), "12.3%");
     }
 
+    /// `copy_from` writes a new snapshot into the *same* value signal, so a
+    /// clone (as is handed to a rendered row) reflects the update in place.
     #[test]
-    fn test_process_struct_hash() {
-        let p1 = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
-        let p2 = TaskMgrProcess::new("test".to_string(), 123, 456, "user".to_string(), 0.0);
-        let p3 = TaskMgrProcess::new("different".to_string(), 456, 123, "other".to_string(), 0.0);
+    fn test_process_item_copy_from_updates_in_place() {
+        let a = proc(7, 1.0);
+        let item = ProcessItem::new(&a);
+        assert_eq!(item.cpu_percent_str(), "1.0%");
 
-        assert_eq!(p1, p2);
-        assert_ne!(p1, p3);
+        let updated = proc(7, 42.0);
+        item.copy_from(&updated);
+        assert_eq!(item.value_untracked(), updated);
+        assert_eq!(item.cpu_percent_str(), "42.0%");
+    }
+
+    /// Cloning an item shares the underlying signal, which is what lets a
+    /// rendered row keep receiving updates after the list is re-sorted.
+    #[test]
+    fn test_process_item_clone_shares_value_signal() {
+        let a = proc(7, 1.0);
+        let item = ProcessItem::new(&a);
+        let rendered = item.clone();
+
+        item.copy_from(&proc(7, 99.0));
+        assert_eq!(rendered.value_untracked().cpu_percent, 99.0);
+        assert_eq!(item.pid, rendered.pid);
     }
 }

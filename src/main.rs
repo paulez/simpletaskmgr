@@ -2,7 +2,6 @@ use floem::IntoView;
 use log::info;
 use simplelog::*;
 use simpletaskmgr::config::Config;
-use simpletaskmgr::process::TaskMgrProcess;
 use simpletaskmgr::process_list::ProcessList;
 use simpletaskmgr::ui::{process_detail_view, process_list_header, process_list_view};
 use simpletaskmgr::{SortColumn, SortDirection};
@@ -71,8 +70,9 @@ fn app_view() -> impl IntoView {
 
             let process_scroll = process_list_view(
                 process_list_for_view.processes,
-                move |process: TaskMgrProcess| {
-                    selected_process_id.set(Some(process.pid));
+                selected_process_id,
+                move |pid: i32| {
+                    log::info!("Selected process pid {pid}");
                 },
             )
             .style(|s| s.max_width_full().width_full())
