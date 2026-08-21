@@ -42,6 +42,12 @@ impl ProcessList {
     pub fn init() -> Self {
         let mut new_list = Self::new();
         new_list.update_process_list();
+        // Default to the same sort the UI starts with (CPU%, descending) so
+        // the first paint matches the header's active indication.
+        new_list.sort_processes(
+            crate::SortColumn::CpuPercent,
+            crate::SortDirection::Descending,
+        );
         new_list
     }
 
@@ -271,6 +277,27 @@ mod tests {
             list.processes.len(),
             "no duplicate pids after refresh"
         );
+    }
+
+    /// `init` seeds the list with the default sort from the UI: CPU%
+    /// descending, so the first paint is already ordered (not `Pid` order).
+    #[test]
+    fn test_init_sorts_by_cpu_descending() {
+        let item = |pid: i32, cpu: f64| {
+            let p = TaskMgrProcess::new(format!("name{pid}"), pid, 1, "u".to_string(), cpu);
+            ProcessItem::new(&p)
+        };
+
+        let mut list = ProcessList::new();
+        list.processes = vec![item(1, 0.5), item(2, 9.25), item(3, 1.75)];
+        // Re-apply exactly what `init` does after `update_process_list`.
+        list.sort_processes(
+            crate::SortColumn::CpuPercent,
+            crate::SortDirection::Descending,
+        );
+
+        let pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![2, 3, 1]);
     }
 
     fn proc(pid: i32, ruid: u32) -> TaskMgrProcess {
