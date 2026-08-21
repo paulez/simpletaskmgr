@@ -50,9 +50,12 @@ The project uses the following Rust crates:
 ## How It Works
 
 The application reads process information directly from the Linux `/proc`
-filesystem using the `procfs` crate and displays it in a GTK 4 `ListBox`. A
-`glib::timeout_add_local` timer re-reads `/proc` every 1.5 seconds and rebuilds
-the list.
+filesystem using the `procfs` crate and displays it in a GTK 4 `ListView`
+backed by a `gio::ListStore` and a `SingleSelection` model. Each row is a
+`glib::Object` subclass (`ProcessRow`, see `src/process_row.rs`) that owns the
+current `ProcessItem` snapshot for one PID. A `glib::timeout_add_local` timer
+re-reads `/proc` every 1.5 seconds and republishes the store (clearing and
+re-adding rows), preserving the row's selection by PID.
 
 CPU usage is reported in `top`-style per-core percentages: 100% means one core fully
 saturated, and multi-threaded processes can show more than 100%. A process's first

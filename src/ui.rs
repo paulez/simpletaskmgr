@@ -1,12 +1,14 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use gtk4::gio::prelude::*;
 use gtk4::prelude::*;
 
 use crate::config::Config;
 use crate::metrics::SystemMetrics;
-use crate::process::{ProcessItem, TaskMgrProcess};
+use crate::process::ProcessItem;
 use crate::process_list::ProcessList;
+use crate::process_row::ProcessRow;
 use crate::signal::Signal;
 use crate::usage_graph::paint_usage_chart;
 use crate::{SortColumn, SortDirection};
@@ -19,7 +21,6 @@ struct State {
     sort_direction: SortDirection,
     metrics: SystemMetrics,
     selected_pid: Option<i32>,
-    rows: Vec<(i32, gtk4::ListBoxRow)>,
 }
 
 #[derive(Debug)]
@@ -40,7 +41,6 @@ impl State {
             sort_direction: SortDirection::Descending,
             metrics,
             selected_pid: None,
-            rows: Vec::new(),
         }
     }
 
@@ -49,7 +49,6 @@ impl State {
         self.process_list.update_process_list();
         self.process_list.sort_processes(col, dir);
         self.metrics.push_sample();
-        self.rows.clear();
     }
 
     fn on_sort_click(&mut self, col: SortColumn) {
@@ -120,13 +119,54 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     header.add_css_class("list-header");
 
     // ---- Process list --------------------------------------------------------
-    let list = gtk4::ListBox::new();
-    list.add_css_class("process-list");
-    list.set_selection_mode(gtk4::SelectionMode::Single);
-    list.set_activate_on_single_click(true);
+    let store = gtk4::gio::ListStore::new::<ProcessRow>();
+    let selection = gtk4::SingleSelection::new(Some(store.clone()));
+    let sel_holder = selection.clone();
+    let factory = gtk4::SignalListItemFactory::new();
+    factory.connect_setup(move |_f, li| {
+        let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
+        let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+        row_box.add_css_class("process-cell");
+        for class in ["col-pid", "col-user", "col-name", "col-cpu"] {
+            let l = gtk4::Label::new(None);
+            l.add_css_class(class);
+            l.set_hexpand(true);
+            l.set_xalign(0.0);
+            row_box.append(&l);
+        }
+        li.set_child(Some(&row_box));
+    });
+    factory.connect_bind(move |_f, li| {
+        let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
+        let row = li
+            .item()
+            .expect("a row object")
+            .downcast::<ProcessRow>()
+            .expect("a ProcessRow");
+        let p = &row.item().value;
+        let texts = [
+            p.pid.to_string(),
+            p.username.clone(),
+            p.name.clone(),
+            p.cpu_percent_str(),
+        ];
+        let box_ = li.child().expect("this row has a child");
+        let mut child = box_.first_child();
+        for text in texts {
+            let next = child.as_ref().and_then(|w| w.next_sibling());
+            if let Some(widget) = child {
+                if let Ok(label) = widget.downcast::<gtk4::Label>() {
+                    label.set_label(&text);
+                }
+            }
+            child = next;
+        }
+    });
+    let list_view = gtk4::ListView::new(Some(selection), Some(factory));
+    list_view.add_css_class("process-list");
     let list_scroll = gtk4::ScrolledWindow::new();
     list_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
-    list_scroll.set_child(Some(&list));
+    list_scroll.set_child(Some(&list_view));
     list_scroll.set_hexpand(true);
     list_scroll.set_vexpand(true);
 
@@ -160,9 +200,11 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let b_sighup = gtk4::Button::new();
     b_sighup.set_label("Send SIGHUP");
     b_sighup.add_css_class("signal-btn");
+    b_sighup.add_css_class("suggested-action");
     let b_sigkill = gtk4::Button::new();
     b_sigkill.set_label("Send SIGKILL");
-    b_sigkill.add_css_class("signal-btn-danger");
+    b_sigkill.add_css_class("signal-btn");
+    b_sigkill.add_css_class("destructive-action");
     btn_box.append(&b_sighup);
     btn_box.append(&b_sigkill);
     detail_box.append(&btn_box);
@@ -207,7 +249,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         (SortColumn::Name, "Name"),
         (SortColumn::CpuPercent, "CPU%"),
     ];
-    let mut header_buttons: Vec<(SortColumn, gtk4::Button)> = Vec::new();
+    let mut header_buttons: Vec<(SortColumn, gtk4::Button, gtk4::Label)> = Vec::new();
     for (col, label_text) in columns.iter() {
         let b = gtk4::Button::new();
         b.add_css_class("list-header-cell");
@@ -216,11 +258,12 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         lbl.add_css_class("list-header-title");
         b.set_child(Some(&lbl));
         header.append(&b);
-        header_buttons.push((*col, b));
+        header_buttons.push((*col, b, lbl));
     }
 
-    // ---- Shared closure: rebuild the list from state ----------------------------
-    let list_r = list.clone();
+    // ---- Shared closure: republish the store from state ------------------------
+    let store_r = store.clone();
+    let sel_r = sel_holder.clone();
     let state_r = state.clone();
     let dp_labels = Rc::new((
         d_pid.clone(),
@@ -230,33 +273,52 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         d_cpu.clone(),
         d_status.clone(),
     ));
-
     let dp_r = dp_labels.clone();
     let rebuild: Rc<dyn Fn()> = Rc::new(move || {
-        remove_all_rows(&state_r, &list_r);
-        let items = {
-            let mut s = state_r.borrow_mut();
-            s.rows.clear();
-            s.process_list.processes.clone()
-        };
-        for item in &items {
-            let row = make_row(item);
-            let pid = item.pid;
-            let row_copy = row.clone();
-            list_r.append(&row_copy);
-            state_r.borrow_mut().rows.push((pid, row));
-        }
-        let selected = state_r.borrow().selected_pid;
-        if let Some(pid) = selected {
-            if let Some((_, row)) = state_r.borrow().rows.iter().find(|(p, _)| *p == pid) {
-                list_r.select_row(Some(row));
+        // Remember the currently selected pid (if any) so we can restore it
+        // after the store is republished.
+        let prev_sel: Option<i32> = sel_r
+            .selected_item()
+            .as_ref()
+            .and_then(|o| o.downcast_ref::<ProcessRow>())
+            .map(|r| r.item().pid);
+        let items = state_r.borrow().process_list.processes.clone();
+
+        store_r.remove_all();
+        let mut next_sel_idx: Option<u32> = None;
+        for (i, item) in items.iter().enumerate() {
+            if let Some(p) = prev_sel {
+                if item.pid == p && next_sel_idx.is_none() {
+                    next_sel_idx = Some(i as u32);
+                }
             }
+            store_r.append(&ProcessRow::from_item(item));
         }
-        apply_detail(&dp_r, &state_r, selected);
+        if let Some(idx) = next_sel_idx {
+            sel_r.set_selected(idx);
+        }
+        apply_detail(&dp_r, &state_r, state_r.borrow().selected_pid);
     });
 
+    // ---- Row selection handler -------------------------------------------------
+    {
+        let state_s = state.clone();
+        let dp_s = dp_labels.clone();
+        let sel_n = sel_holder.clone();
+        let sel_inner = sel_n.clone();
+        sel_n.connect_selected_notify(move |_| {
+            let pid = sel_inner
+                .selected_item()
+                .as_ref()
+                .and_then(|o| o.downcast_ref::<ProcessRow>())
+                .map(|r| r.item().pid);
+            state_s.borrow_mut().selected_pid = pid;
+            apply_detail(&dp_s, &state_s, pid);
+        });
+    }
+
     // ---- Header button handlers -------------------------------------------------
-    for (col, b) in header_buttons.iter() {
+    for (col, b, _lbl) in header_buttons.iter() {
         let col = *col;
         let state_h = state.clone();
         let rebuild_h = rebuild.clone();
@@ -273,30 +335,14 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         let state_t = state.clone();
         let rebuild_t = rebuild.clone();
         toggle.connect_toggled(move |chk| {
-            let show_all = chk.is_active();
-            state_t.borrow_mut().process_list.set_show_all(show_all);
-            // Refresh now so the new filter takes effect immediately rather than
-            // waiting for the next 1.5s tick.
+            state_t
+                .borrow_mut()
+                .process_list
+                .set_show_all(chk.is_active());
+            // Refresh now so the filter change takes effect immediately rather
+            // than waiting up to the next 1.5s tick.
             state_t.borrow_mut().refresh();
             rebuild_t();
-        });
-    }
-
-    // ---- Row selected handler ----------------------------------------------------
-    {
-        let state_s = state.clone();
-        let dp_s = dp_labels.clone();
-        list.connect_row_selected(move |_lb, row| {
-            let pid = row.as_ref().and_then(|r| {
-                state_s
-                    .borrow()
-                    .rows
-                    .iter()
-                    .find(|(_p, w)| w.as_ptr() == r.as_ptr())
-                    .map(|(p, _)| *p)
-            });
-            state_s.borrow_mut().selected_pid = pid;
-            apply_detail(&dp_s, &state_s, pid);
         });
     }
 
@@ -314,8 +360,8 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         b_sigkill.connect_clicked(move |_| {
             let status = state_k.borrow_mut().kill(Signal::Sigkill);
             dp_k.5.set_label(&detail_status(&status));
-            // A killed process will disappear on the next refresh; force one now
-            // so the row is removed immediately instead of waiting up to 1.5s.
+            // A killed process disappears on the next refresh; force one now
+            // so the row is removed immediately rather than waiting up to 1.5s.
             state_k.borrow_mut().refresh();
             rebuild_k();
         });
@@ -328,69 +374,17 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // ---- Refresh timer ------------------------------------------------------------
     {
         let state_t = state.clone();
-        let list_t = list.clone();
-        let dp_t = dp_labels.clone();
+        let rebuild_t = rebuild.clone();
         let graph_t = graph_area.clone();
         glib::timeout_add_local(Config::refresh_interval(), move || {
             state_t.borrow_mut().refresh();
-            rebuild_for_timer(&state_t, &list_t, &dp_t);
+            rebuild_t();
             graph_t.queue_draw();
             glib::ControlFlow::Continue
         });
     }
 
     window
-}
-
-fn rebuild_for_timer(
-    state: &Rc<RefCell<State>>,
-    list: &gtk4::ListBox,
-    dp: &Rc<(
-        gtk4::Label,
-        gtk4::Label,
-        gtk4::Label,
-        gtk4::Label,
-        gtk4::Label,
-        gtk4::Label,
-    )>,
-) {
-    remove_all_rows(state, list);
-    let items = {
-        let mut s = state.borrow_mut();
-        s.rows.clear();
-        s.process_list.processes.clone()
-    };
-    for item in &items {
-        let row = make_row(item);
-        let pid = item.pid;
-        let row_copy = row.clone();
-        list.append(&row_copy);
-        state.borrow_mut().rows.push((pid, row));
-    }
-    let selected = state.borrow().selected_pid;
-    if let Some(pid) = selected {
-        if let Some((_, row)) = state.borrow().rows.iter().find(|(p, _)| *p == pid) {
-            list.select_row(Some(row));
-        } else {
-            state.borrow_mut().selected_pid = None;
-        }
-    }
-    apply_detail(dp, state, state.borrow().selected_pid);
-}
-
-/// Removes every row currently held in `state.rows` from `list`.
-///
-/// `GtkListBox::remove_all` requires GTK 4.12, which this project doesn't
-/// target (v4_10). We instead iterate the tracked rows and call `remove` on
-/// each.
-fn remove_all_rows(state: &Rc<RefCell<State>>, list: &gtk4::ListBox) {
-    let rows: Vec<gtk4::ListBoxRow> = {
-        let s = state.borrow();
-        s.rows.iter().map(|(_, r)| r.clone()).collect()
-    };
-    for row in rows.iter() {
-        list.remove(row);
-    }
 }
 
 fn apply_detail(
@@ -429,55 +423,30 @@ fn apply_detail(
     }
 }
 
-fn make_row(item: &ProcessItem) -> gtk4::ListBoxRow {
-    let row = gtk4::ListBoxRow::new();
-    row.add_css_class("process-row");
-
-    let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-    row_box.add_css_class("process-cell");
-
-    let p: &TaskMgrProcess = &item.value;
-    let cpu_str = p.cpu_percent_str();
-    let tmp = [
-        p.pid.to_string(),
-        p.username.clone(),
-        p.name.clone(),
-        cpu_str.clone(),
+fn update_header_indicators(buttons: &[(SortColumn, gtk4::Button, gtk4::Label)], state: &State) {
+    const COLUMN_TITLES: &[(SortColumn, &str)] = &[
+        (SortColumn::Pid, "PID"),
+        (SortColumn::Username, "User"),
+        (SortColumn::Name, "Name"),
+        (SortColumn::CpuPercent, "CPU%"),
     ];
-    for (text, class) in tmp
-        .iter()
-        .zip(["col-pid", "col-user", "col-name", "col-cpu"])
-    {
-        let l = gtk4::Label::new(Some(text));
-        l.add_css_class(class);
-        l.set_hexpand(true);
-        row_box.append(&l);
-    }
-
-    row.set_child(Some(&row_box));
-    row
-}
-
-fn update_header_indicators(buttons: &[(SortColumn, gtk4::Button)], state: &State) {
-    let (active, dir) = (state.sort_column, state.sort_direction);
-    for (col, b) in buttons.iter() {
-        if *col == active {
-            b.add_css_class("sort-active");
-            match dir {
-                SortDirection::Ascending => {
-                    b.remove_css_class("sort-desc");
-                    b.add_css_class("sort-asc");
-                }
-                SortDirection::Descending => {
-                    b.remove_css_class("sort-asc");
-                    b.add_css_class("sort-desc");
-                }
-            }
+    for (col, _b, lbl) in buttons.iter() {
+        let title = COLUMN_TITLES
+            .iter()
+            .find(|(c, _)| c == col)
+            .map(|(_, t)| *t)
+            .unwrap_or("Col");
+        let arrow = match (*col == state.sort_column, state.sort_direction) {
+            (true, SortDirection::Ascending) => "  ↑",
+            (true, SortDirection::Descending) => "  ↓",
+            (false, _) => "",
+        };
+        if *col == state.sort_column {
+            _b.add_css_class("sort-active");
         } else {
-            b.remove_css_class("sort-active");
-            b.remove_css_class("sort-asc");
-            b.remove_css_class("sort-desc");
+            _b.remove_css_class("sort-active");
         }
+        lbl.set_label(&format!("{title}{arrow}"));
     }
 }
 
@@ -496,6 +465,7 @@ fn load_css() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::TaskMgrProcess;
 
     fn item(pid: i32) -> ProcessItem {
         ProcessItem::new(&TaskMgrProcess::new(
@@ -566,8 +536,8 @@ mod tests {
         assert_eq!(after, before + 1, "one refresh appends exactly one sample");
     }
 
-    /// refresh() clears the tracked-rows Vec (the UI republishes it on the next
-    /// rebuild) but preserves the sort state and selected pid the caller used.
+    /// refresh() preserves the sort state and selected pid the caller used; it
+    /// only re-derives the process list and advances the metric history.
     #[test]
     fn test_refresh_preserves_sort_and_selection() {
         let mut s = State::new();
@@ -581,8 +551,6 @@ mod tests {
         assert_eq!(s.sort_column, SortColumn::Name);
         assert_eq!(s.sort_direction, SortDirection::Ascending);
         assert_eq!(s.selected_pid, Some(1));
-        // The rows Vec is republished by the UI after refresh, so it's cleared.
-        assert!(s.rows.is_empty());
     }
 
     /// Clicking a *different* column resets the direction back to the default

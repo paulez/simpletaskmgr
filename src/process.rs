@@ -46,6 +46,15 @@ pub struct ProcessItem {
     pub value: TaskMgrProcess,
 }
 
+impl Default for ProcessItem {
+    fn default() -> Self {
+        Self {
+            pid: 0,
+            value: TaskMgrProcess::new(String::new(), 0, 0, String::new(), 0.0),
+        }
+    }
+}
+
 impl ProcessItem {
     /// Creates a new row from a `TaskMgrProcess`.
     pub fn new(p: &TaskMgrProcess) -> Self {

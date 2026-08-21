@@ -1,8 +1,12 @@
-/* Simple Task Manager — GTK4 application styles. */
-
-.app-root {
-  background-color: #1e1e2e;
-}
+/* Simple Task Manager — GTK4 application styles.
+ *
+ * Structural rules only. Palette colors, selection highlight and button
+ * styling come from the active GTK 4 theme, so the app tracks whatever the
+ * user's desktop provides (light/dark, Catppuccin, Adwaita, etc.).
+ * Where semantic emphasis is needed we use GTK's built-in theme classes
+ * (`.destructive-action`, `.suggested-action`) so themes can style them
+ * consistently.
+ */
 
 .root {
   padding: 12px;
@@ -10,8 +14,6 @@
 
 /* ---- Usage graph --------------------------------------------------------- */
 .graph-area {
-  background-color: #181825;
-  border: 1px solid #313244;
   border-radius: 6px;
 }
 
@@ -30,20 +32,8 @@
 }
 
 .list-header-cell {
-  background-color: #11111b;
-  color: #cdd6f4;
   font-weight: bold;
-  border: 1px solid #313244;
   margin: 0 1px;
-}
-
-.list-header-cell:hover {
-  background-color: #1e1e2e;
-}
-
-.list-header-cell.sort-asc,
-.list-header-cell.sort-desc {
-  background-color: #313244;
 }
 
 .list-header-title {
@@ -52,17 +42,7 @@
 
 /* ---- Process list -------------------------------------------------------- */
 .process-list {
-  background-color: #181825;
   border-radius: 6px;
-}
-
-.process-row {
-  border-bottom: 1px solid #313244;
-}
-
-.process-row:selected {
-  background-color: #45475a;
-  color: #cdd6f4;
 }
 
 .process-cell {
@@ -87,7 +67,6 @@
 
 /* ---- Detail pane --------------------------------------------------------- */
 .detail-pane {
-  background-color: #181825;
   padding: 12px;
   margin-left: 12px;
 }
@@ -95,25 +74,23 @@
 .detail-title {
   font-size: large;
   font-weight: bold;
-  color: #cdd6f4;
 }
 
 .detail-row {
-  color: #cdd6f4;
   padding: 2px 0;
 }
 
 .detail-status {
-  color: #a6e3a1;
   padding-top: 6px;
 }
 
 /* ---- Signal buttons ------------------------------------------------------ */
+/*
+ * `.signal-btn` is kept as a structural marker (padding); the semantic color
+ * of each button comes from GTK's built-in theme classes:
+ *   - SIGHUP  → `suggested-action` (primary, themed accent)
+ *   - SIGKILL → `destructive-action` (themed destructive red)
+ */
 .signal-btn {
   padding: 6px 12px;
-}
-
-.signal-btn-danger {
-  background-color: #f38ba8;
-  color: #11111b;
 }
