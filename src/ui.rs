@@ -310,9 +310,14 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         });
         let state_k = state.clone();
         let dp_k = dp_labels.clone();
+        let rebuild_k = rebuild.clone();
         b_sigkill.connect_clicked(move |_| {
             let status = state_k.borrow_mut().kill(Signal::Sigkill);
             dp_k.5.set_label(&detail_status(&status));
+            // A killed process will disappear on the next refresh; force one now
+            // so the row is removed immediately instead of waiting up to 1.5s.
+            state_k.borrow_mut().refresh();
+            rebuild_k();
         });
     }
 
@@ -559,5 +564,41 @@ mod tests {
             "No process selected."
         );
         assert_eq!(detail_status(&KillStatus::Failed("boom".into())), "boom");
+    }
+
+    /// Encoding the #4 contract: once a selected process is killed and a refresh
+    /// runs (which the SIGKILL button now triggers immediately), the process is
+    /// gone from the visible list. Without the forced refresh, it would linger
+    /// up to 1.5s (the timer interval).
+    #[test]
+    fn test_refresh_drops_killed_process() {
+        let mut s = State::new();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id() as i32;
+
+        // Simulate the list already containing the process (as a prior
+        // `refresh_process_list` pass would have left it).
+        s.process_list.processes.push(item(pid));
+        s.selected_pid = Some(pid);
+
+        // Send SIGKILL — the very call the button makes.
+        match s.kill(Signal::Sigkill) {
+            KillStatus::Sent => {}
+            other => panic!("expected Sent, got {other:?}"),
+        }
+
+        // Give the kernel a beat to drop the /proc entry, then reap.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let _ = child.wait();
+
+        // A forced refresh (which the button now does immediately) must drop it.
+        s.refresh();
+        assert!(
+            s.process_list.processes.iter().all(|p| p.pid != pid),
+            "killed process should be dropped on the refresh the button triggers"
+        );
     }
 }
