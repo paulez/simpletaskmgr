@@ -7,6 +7,7 @@ A lightweight, interactive system process manager built with Rust that displays 
 - **Real-time Process Display**: Shows PID, Real User ID (RUID), and process name for each running process
 - **Auto-refresh**: The process list automatically updates every 1.5 seconds
 - **Sortable Columns**: Click any header (PID, User, Name, CPU%) to sort the list ascending/descending
+- **Show All Processes**: Toggle showing every process on the system, or only the current user's (the default)
 - **Modern UI**: Built with GTK 4 for a native, responsive, clean interface
 - **Linux Native**: Direct access to Linux `/proc` filesystem for accurate process information
 - **Process Detail View**: Click any process to inspect its PID, name, UID, user, and CPU usage

@@ -190,6 +190,16 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     root.append(&header);
     root.append(&body);
 
+    // ---- Toolbar: "show all processes" toggle -----------------------------------
+    let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    toolbar.add_css_class("toolbar");
+    let toggle = gtk4::CheckButton::new();
+    toggle.set_label(Some("Show all processes"));
+    toggle.add_css_class("show-all-toggle");
+    toggle.set_active(false);
+    toolbar.append(&toggle);
+    root.insert_child_after(&toolbar, Some(&header));
+
     // ---- Header buttons (created after list is available) ----------------------
     let columns: &[(SortColumn, &str)] = &[
         (SortColumn::Pid, "PID"),
@@ -255,6 +265,20 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
             state_h.borrow_mut().on_sort_click(col);
             rebuild_h();
             update_header_indicators(&header_all, &state_h.borrow());
+        });
+    }
+
+    // ---- "Show all" toggle handler ----------------------------------------------
+    {
+        let state_t = state.clone();
+        let rebuild_t = rebuild.clone();
+        toggle.connect_toggled(move |chk| {
+            let show_all = chk.is_active();
+            state_t.borrow_mut().process_list.set_show_all(show_all);
+            // Refresh now so the new filter takes effect immediately rather than
+            // waiting for the next 1.5s tick.
+            state_t.borrow_mut().refresh();
+            rebuild_t();
         });
     }
 

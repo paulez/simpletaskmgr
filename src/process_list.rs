@@ -7,6 +7,9 @@ use users::{Users, UsersCache};
 
 pub struct ProcessList {
     pub processes: Vec<ProcessItem>,
+    /// When `true`, the list shows every process on the system; when `false`
+    /// it is limited to the current user's processes.
+    pub show_all: bool,
     cpu_tracker: CpuTracker,
     users_cache: UsersCache,
 }
@@ -24,9 +27,16 @@ impl ProcessList {
         let cpu_tracker = CpuTracker::new();
         Self {
             processes,
+            show_all: false,
             cpu_tracker,
             users_cache,
         }
+    }
+
+    /// Sets the filter: `true` shows every process on the system, `false`
+    /// limits the list to the current user's processes.
+    pub fn set_show_all(&mut self, show_all: bool) {
+        self.show_all = show_all;
     }
 
     pub fn init() -> Self {
@@ -121,11 +131,10 @@ impl ProcessList {
             processes_before_filter
         );
 
-        // Only the current user's processes are shown (the "show all" toggle is not yet implemented).
-        let task_mgr_process_list_filtered: Vec<TaskMgrProcess> = task_mgr_process_list
-            .into_iter()
-            .filter(|p| p.ruid == current_uid)
-            .collect();
+        // Show every process when the "show all" toggle is on, otherwise only
+        // the current user's.
+        let task_mgr_process_list_filtered: Vec<TaskMgrProcess> =
+            filter_by_user(task_mgr_process_list, current_uid, self.show_all);
 
         let filtered_count = task_mgr_process_list_filtered.len();
         debug!("After filtering by UID: {} processes", filtered_count);
@@ -158,6 +167,23 @@ impl ProcessList {
             crate::SortDirection::Ascending => self.processes.sort_by(by),
             crate::SortDirection::Descending => self.processes.sort_by(|a, b| by(b, a)),
         }
+    }
+}
+
+/// Keeps the current user's processes unless `show_all` is set, in which case
+/// every process is kept. Extracted for pure, unit-testable behavior.
+fn filter_by_user(
+    processes: Vec<TaskMgrProcess>,
+    current_uid: u32,
+    show_all: bool,
+) -> Vec<TaskMgrProcess> {
+    if show_all {
+        processes
+    } else {
+        processes
+            .into_iter()
+            .filter(|p| p.ruid == current_uid)
+            .collect()
     }
 }
 
@@ -245,5 +271,38 @@ mod tests {
             list.processes.len(),
             "no duplicate pids after refresh"
         );
+    }
+
+    fn proc(pid: i32, ruid: u32) -> TaskMgrProcess {
+        TaskMgrProcess::new(format!("name{pid}"), pid, ruid, "u".to_string(), 0.0)
+    }
+
+    /// With `show_all` off, only the current user's rows survive the filter.
+    #[test]
+    fn test_filter_by_user_keeps_current_uid_when_show_all_off() {
+        let input = vec![proc(1, 1000), proc(2, 0), proc(3, 1000)];
+        let out = filter_by_user(input, 1000, false);
+        let pids: Vec<i32> = out.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![1, 3]);
+    }
+
+    /// With `show_all` on, every row is kept regardless of owner.
+    #[test]
+    fn test_filter_by_user_keeps_everything_when_show_all_on() {
+        let input = vec![proc(1, 1000), proc(2, 0), proc(3, 1234)];
+        let out = filter_by_user(input, 1000, true);
+        let pids: Vec<i32> = out.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![1, 2, 3]);
+    }
+
+    /// The setter round-trips the flag used by the refresh path.
+    #[test]
+    fn test_set_show_all_toggles_flag() {
+        let mut list = ProcessList::new();
+        assert!(!list.show_all);
+        list.set_show_all(true);
+        assert!(list.show_all);
+        list.set_show_all(false);
+        assert!(!list.show_all);
     }
 }
