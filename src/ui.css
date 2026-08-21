@@ -1,0 +1,110 @@
+/* Simple Task Manager — GTK4 application styles. */
+
+.app-root {
+  background-color: #1e1e2e;
+}
+
+.root {
+  padding: 12px;
+}
+
+/* ---- Usage graph --------------------------------------------------------- */
+.graph-area {
+  background-color: #181825;
+  border: 1px solid #313244;
+  border-radius: 6px;
+}
+
+/* ---- List header --------------------------------------------------------- */
+.list-header {
+  padding: 6px 0;
+}
+
+.list-header-cell {
+  background-color: #11111b;
+  color: #cdd6f4;
+  font-weight: bold;
+  border: 1px solid #313244;
+  margin: 0 1px;
+}
+
+.list-header-cell:hover {
+  background-color: #1e1e2e;
+}
+
+.list-header-cell.sort-asc,
+.list-header-cell.sort-desc {
+  background-color: #313244;
+}
+
+.list-header-title {
+  margin: 4px 8px;
+}
+
+/* ---- Process list -------------------------------------------------------- */
+.process-list {
+  background-color: #181825;
+  border-radius: 6px;
+}
+
+.process-row {
+  border-bottom: 1px solid #313244;
+}
+
+.process-row:selected {
+  background-color: #45475a;
+  color: #cdd6f4;
+}
+
+.process-cell {
+  padding: 6px 10px;
+}
+
+.col-pid {
+  min-width: 70px;
+}
+
+.col-user {
+  min-width: 90px;
+}
+
+.col-name {
+  min-width: 160px;
+}
+
+.col-cpu {
+  min-width: 70px;
+}
+
+/* ---- Detail pane --------------------------------------------------------- */
+.detail-pane {
+  background-color: #181825;
+  padding: 12px;
+  margin-left: 12px;
+}
+
+.detail-title {
+  font-size: large;
+  font-weight: bold;
+  color: #cdd6f4;
+}
+
+.detail-row {
+  color: #cdd6f4;
+  padding: 2px 0;
+}
+
+.detail-status {
+  color: #a6e3a1;
+  padding-top: 6px;
+}
+
+/* ---- Signal buttons ------------------------------------------------------ */
+.signal-btn {
+  padding: 6px 12px;
+}
+
+.signal-btn-danger {
+  background-color: #f38ba8;
+  color: #11111b;
+}

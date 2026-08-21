@@ -6,8 +6,8 @@ A lightweight, interactive system process manager built with Rust that displays 
 
 - **Real-time Process Display**: Shows PID, Real User ID (RUID), and process name for each running process
 - **Auto-refresh**: The process list automatically updates every 1.5 seconds
-- **Efficient Rendering**: Uses virtualized scrolling for smooth performance with many processes
-- **Modern UI**: Built with the Floem GUI framework for a responsive, clean interface
+- **Sortable Columns**: Click any header (PID, User, Name, CPU%) to sort the list ascending/descending
+- **Modern UI**: Built with GTK 4 for a native, responsive, clean interface
 - **Linux Native**: Direct access to Linux `/proc` filesystem for accurate process information
 - **Process Detail View**: Click any process to inspect its PID, name, UID, user, and CPU usage
 - **Signal Management**: Send SIGHUP or SIGKILL to a selected process from its detail view, with success/failure feedback
@@ -15,8 +15,9 @@ A lightweight, interactive system process manager built with Rust that displays 
 
 ## Requirements
 
-- Rust (1.70 or later)
+- Rust 1.75 or later
 - Linux operating system (uses procfs to read from `/proc`)
+- GTK 4.10 or later (development headers required: `libgtk-4-dev`, `libglib2.0-dev`, `libpango1.0-dev`, `libcairo2-dev` on Debian/Ubuntu)
 
 ## Building
 
@@ -40,13 +41,17 @@ cargo run
 
 The project uses the following Rust crates:
 
-- **floem** 0.2.0 - Modern GUI framework
-- **im** 15.1.0 - Immutable data structures
+- **gtk4** 0.11 (GTK 4 bindings) - GUI framework, target feature "v4_10"
+- **cairo-rs** 0.22 - Drawing library for the CPU/memory graph
 - **procfs** 0.18.0 - Linux procfs filesystem bindings
+- **glib** 0.22 - GLib objects & timers (via gtk4)
 
 ## How It Works
 
-The application reads process information directly from the Linux `/proc` filesystem using the `procfs` crate. It then displays the data in a virtualized list that automatically refreshes every 1.5 seconds using reactive programming with the Floem framework.
+The application reads process information directly from the Linux `/proc`
+filesystem using the `procfs` crate and displays it in a GTK 4 `ListBox`. A
+`glib::timeout_add_local` timer re-reads `/proc` every 1.5 seconds and rebuilds
+the list.
 
 CPU usage is reported in `top`-style per-core percentages: 100% means one core fully
 saturated, and multi-threaded processes can show more than 100%. A process's first
@@ -57,12 +62,13 @@ System-wide CPU and memory usage are sampled once per refresh and kept in a
 rolling history (the last ~120 samples). CPU% is computed from the delta in the
 aggregate `/proc/stat` `cpu` line; memory% is `(MemTotal − MemAvailable) /
 MemTotal` from `/proc/meminfo`. The resource graph renders both as area charts on
-a shared 0-100% axis.
+a shared 0-100% axis, drawn with cairo into a `DrawingArea`.
 
 Each process entry shows:
 - **PID**: Process identifier
-- **RUID**: Real user ID (the user who owns the process)
+- **User**: Real user ID / username (the user who owns the process)
 - **Name**: Process name
+- **CPU%**: Per-core CPU usage for the last sample
 
 ## License
 

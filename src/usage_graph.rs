@@ -1,164 +1,110 @@
-use floem::prelude::{Color, RwSignal, SignalGet};
-use floem::views::{container, empty, h_stack, label, svg, v_stack, Decorators};
+use cairo::Context;
 
 use crate::metrics::Sample;
 
-/// Solid colors for each series (mirrored between the SVG and the legend).
-pub const CPU_COLOR: Color = Color::rgb8(76, 175, 80);
-pub const MEM_COLOR: Color = Color::rgb8(33, 150, 243);
-/// 255-alpha equivalents of the above used inside the generated SVG.
-pub const CPU_HEX: &str = "#4CAF50";
-pub const MEM_HEX: &str = "#2196F3";
+/// RGB triplet (0–255) for the CPU series — green, matching the old floem
+/// `CPU_COLOR = rgb8(76, 175, 80)` / SVG `#4CAF50`.
+pub const CPU_RGB: (u8, u8, u8) = (76, 175, 80);
+/// RGB triplet (0–255) for the memory series — blue, matching the old floem
+/// `MEM_COLOR = rgb8(33, 150, 243)` / SVG `#2196F3`.
+pub const MEM_RGB: (u8, u8, u8) = (33, 150, 243);
+/// Translucent fill alpha so overlapping series areas read as distinct bands.
+pub const FILL_ALPHA: f64 = 0.22;
+/// Line width of each series (in pixels at the draw-time scale).
+pub const LINE_WIDTH: f64 = 1.5;
+/// Radius of the "latest sample" marker dot (in pixels).
+pub const DOT_RADIUS: f64 = 1.5;
 
-/// Logical width (in SVG user units) of the generated chart.
-pub const CHART_W: f64 = 100.0;
-/// Logical height of the generated chart.
-pub const CHART_H: f64 = 60.0;
-
-/// Maps the i-th of `len` samples to an x position across the full width.
-///
-/// A single sample is centered so it isn't pinned to the left edge; two or
-/// more span edge to edge. Indexes past the end clamp to the last position.
-pub fn sample_x(i: usize, len: usize) -> f64 {
-    sample_x_in(i, len, CHART_W)
-}
-
-/// Maps a 0-100 percent value to a y position, where 100 is the top (y=0) and
-/// 0 is the bottom (y=h). Values are clamped so they never spill off the chart.
-pub fn sample_y(value: f64, h: f64) -> f64 {
-    let clamped = value.clamp(0.0, 100.0);
-    h - (clamped / 100.0) * h
-}
-
-fn sample_x_in(i: usize, len: usize, w: f64) -> f64 {
+/// Maps the i-th of `len` samples to a normalized x position (0..=1) across the
+/// full width. A single sample is centered so it isn't pinned to the left edge;
+/// two or more span edge to edge. Indexes past the end clamp to the last
+/// position.
+pub fn sample_x_frac(i: usize, len: usize) -> f64 {
     if len <= 1 {
-        return w / 2.0;
+        return 0.5;
     }
-    (i.min(len - 1) as f64 / (len - 1) as f64) * w
+    let i = i.min(len - 1) as f64;
+    let denominator = (len - 1) as f64;
+    i / denominator
 }
 
-/// Renders a single metric's area fill, top line and current-value marker into
-/// `out`.
+/// Maps a 0–100 percent value to a normalized y position (0..=1) where 100 is
+/// the top (y=0) and 0 is the bottom (y=1). Values are clamped so they never
+/// spill off the chart.
+pub fn sample_y_frac(value: f64) -> f64 {
+    let clamped = value.clamp(0.0, 100.0);
+    1.0 - clamped / 100.0
+}
+
+/// Draws one series (area fill + line + latest-sample dot) into `ctx`, laid out
+/// across the widget's pixel size `(w, h)`. `value_of` picks the sampled value
+/// for either the CPU or memory field.
 fn draw_series(
-    out: &mut String,
+    ctx: &Context,
+    w: f64,
+    h: f64,
     samples: &[Sample],
     value_of: impl Fn(&Sample) -> f64,
-    color: &str,
+    rgb: (u8, u8, u8),
 ) {
     if samples.is_empty() {
         return;
     }
-    let pts: Vec<String> = samples
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            format!(
-                "{:.2},{:.2}",
-                sample_x_in(i, samples.len(), CHART_W),
-                sample_y(value_of(s), CHART_H)
-            )
-        })
-        .collect();
+    let (r, g, b) = (
+        rgb.0 as f64 / 255.0,
+        rgb.1 as f64 / 255.0,
+        rgb.2 as f64 / 255.0,
+    );
+    let to_px = |i: usize| {
+        (
+            sample_x_frac(i, samples.len()) * w,
+            sample_y_frac(value_of(&samples[i])) * h,
+        )
+    };
 
-    // Area: bottom-left corner, the series in order, bottom-right corner.
-    let mut area = vec![format!("{:.2},{:.2}", 0.0, CHART_H)];
-    area.extend(pts.iter().cloned());
-    area.push(format!("{:.2},{:.2}", CHART_W, CHART_H));
-
-    out.push_str(&format!(
-        "<polygon points=\"{}\" fill=\"{}\" fill-opacity=\"0.22\"/>",
-        area.join(" "),
-        color
-    ));
-    out.push_str(&format!(
-        "<polyline points=\"{}\" fill=\"none\" stroke=\"{}\" stroke-width=\"1.5\"/>",
-        pts.join(" "),
-        color
-    ));
-
-    // A small dot on the latest sample so the "now" value is always visible,
-    // even before a second sample arrives to form a line.
-    if let Some(s) = samples.last() {
-        let cx = sample_x_in(samples.len() - 1, samples.len(), CHART_W);
-        let cy = sample_y(value_of(s), CHART_H);
-        out.push_str(&format!(
-            "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"1.5\" fill=\"{}\"/>",
-            cx, cy, color
-        ));
+    // 1) Area fill (low alpha): bottom-left, samples in order, bottom-right.
+    let n = samples.len();
+    ctx.new_path();
+    ctx.move_to(0.0, h);
+    for i in 0..n {
+        let (x, y) = to_px(i);
+        ctx.line_to(x, y);
     }
+    ctx.line_to(w, h);
+    ctx.close_path();
+    ctx.set_source_rgba(r, g, b, FILL_ALPHA);
+    let _ = ctx.fill();
+
+    // 2) Series outline.
+    ctx.new_path();
+    let (x0, y0) = to_px(0);
+    ctx.move_to(x0, y0);
+    for i in 1..n {
+        let (x, y) = to_px(i);
+        ctx.line_to(x, y);
+    }
+    ctx.set_source_rgb(r, g, b);
+    ctx.set_line_width(LINE_WIDTH);
+    let _ = ctx.stroke();
+
+    // 3) "Latest sample" marker so the "now" value stays visible even before a
+    //    second sample arrives to form a line.
+    let (cx, cy) = to_px(n - 1);
+    ctx.new_path();
+    ctx.arc(cx, cy, DOT_RADIUS, 0.0, std::f64::consts::TAU);
+    ctx.set_source_rgb(r, g, b);
+    let _ = ctx.fill();
 }
 
-/// Renders the current sample history as an SVG string.
-///
-/// Memory (blue) is drawn first so CPU (green) is painted on top. The result is
-/// a self-contained, valid SVG at all times (including an empty history), so it
-/// can be handed directly to an `svg` view.
-pub fn render_usage_svg(samples: &[Sample]) -> String {
-    let mut out = String::new();
-    out.push_str(&format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {0} {1}\">",
-        CHART_W, CHART_H
-    ));
-    draw_series(&mut out, samples, |s| s.mem, MEM_HEX);
-    draw_series(&mut out, samples, |s| s.cpu, CPU_HEX);
-    out.push_str("</svg>");
-    out
-}
-
-/// A small colored square used as a legend swatch.
-fn swatch(color: Color) -> impl floem::IntoView {
-    container(empty()).style(move |s| {
-        s.width(12.0)
-            .height(12.0)
-            .background(color)
-            .border_radius(2.0)
-    })
-}
-
-/// Renders a legend row pairing a colored swatch with its metric name.
-fn legend_item(color: Color, name: &'static str) -> impl floem::IntoView {
-    h_stack((swatch(color), label(move || name.to_string())))
-        .style(move |s| s.items_center().gap(4.0).font_size(13.0))
-}
-
-/// A rolling-window area chart of system CPU% and memory% over time.
-///
-/// The `svg` view re-renders whenever `history` changes (each refresh appends a
-/// sample), so the graph scrolls continuously to the right. Both metrics share
-/// a 0-100% vertical axis; memory is drawn first (below) and CPU on top with
-/// translucent fills so overlapping regions read as distinct bands. A legend on
-/// the right identifies the two series.
-pub fn usage_graph_view(history: RwSignal<Vec<Sample>>) -> impl floem::IntoView {
-    let graph = svg(String::new())
-        .update_value(move || render_usage_svg(&history.get()))
-        .style(move |s| s.size_full());
-
-    let legend = v_stack((legend_item(CPU_COLOR, "CPU"), legend_item(MEM_COLOR, "Mem")))
-        .style(move |s| s.gap(4.0).padding(6.0).items_center());
-
-    container(
-        h_stack((
-            container(graph).style(move |s| {
-                s.size_full()
-                    .background(Color::rgb8(250, 250, 250))
-                    .border(1.0)
-            }),
-            container(legend).style(move |s| {
-                s.border_left(1.0)
-                    .border_color(Color::rgb8(200, 200, 200))
-                    .padding_left(6.0)
-                    .height_full()
-                    .items_center()
-            }),
-        ))
-        .style(move |s| {
-            s.width_full()
-                .height(90.0)
-                .padding(8.0)
-                .gap(6.0)
-                .items_center()
-        }),
-    )
+/// Paints the rolling-window usage chart into `ctx`, spanning `(w, h)`. Memory
+/// is drawn first (below) and CPU on top; both share a 0–100% vertical axis
+/// with translucent fills. An empty history paints a blank, valid chart.
+pub fn paint_usage_chart(ctx: &Context, w: f64, h: f64, samples: &[Sample]) {
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    draw_series(ctx, w, h, samples, |s| s.mem, MEM_RGB);
+    draw_series(ctx, w, h, samples, |s| s.cpu, CPU_RGB);
 }
 
 #[cfg(test)]
@@ -177,57 +123,59 @@ mod tests {
     }
 
     #[test]
-    fn test_sample_x_spans_width() {
-        assert_eq!(sample_x(0, 5), 0.0);
-        assert_eq!(sample_x(4, 5), CHART_W);
-        assert_eq!(sample_x(2, 5), CHART_W / 2.0);
-        assert_eq!(sample_x(9, 5), CHART_W, "indexes past the end clamp");
+    fn test_sample_x_frac_spans_width() {
+        assert_eq!(sample_x_frac(0, 5), 0.0);
+        assert_eq!(sample_x_frac(4, 5), 1.0);
+        assert_eq!(sample_x_frac(2, 5), 0.5);
+        assert_eq!(sample_x_frac(9, 5), 1.0, "indexes past the end clamp");
     }
 
     #[test]
-    fn test_sample_x_single_is_centered() {
-        assert_eq!(sample_x(0, 1), CHART_W / 2.0);
+    fn test_sample_x_frac_single_is_centered() {
+        assert_eq!(sample_x_frac(0, 1), 0.5);
     }
 
     #[test]
-    fn test_sample_y_inverts_and_clamps() {
-        assert_eq!(sample_y(100.0, CHART_H), 0.0);
-        assert_eq!(sample_y(0.0, CHART_H), CHART_H);
-        assert_eq!(sample_y(50.0, CHART_H), CHART_H / 2.0);
-        assert_eq!(sample_y(150.0, CHART_H), 0.0, "clamped to top");
-        assert_eq!(sample_y(-20.0, CHART_H), CHART_H, "clamped to bottom");
+    fn test_sample_y_frac_inverts_and_clamps() {
+        assert_eq!(sample_y_frac(100.0), 0.0);
+        assert_eq!(sample_y_frac(0.0), 1.0);
+        assert_eq!(sample_y_frac(50.0), 0.5);
+        assert_eq!(sample_y_frac(150.0), 0.0, "clamped to top");
+        assert_eq!(sample_y_frac(-20.0), 1.0, "clamped to bottom");
     }
 
     #[test]
-    fn test_render_usage_svg_is_valid_for_various_lengths() {
-        for values in [&[] as &[f64], &[42.0], &[0.0, 100.0], &[10.0, 50.0, 90.0]] {
-            let svg = render_usage_svg(&samples(values));
-            assert!(svg.starts_with("<svg"), "should be well-formed: {svg}");
-            assert!(svg.ends_with("</svg>"));
-            if values.is_empty() {
-                // Still a valid, empty chart.
-                continue;
-            }
-            assert!(svg.contains(CPU_HEX), "CPU series present");
-            assert!(svg.contains(MEM_HEX), "memory series present");
-            assert!(svg.contains("<polyline"), "a line is drawn");
+    fn test_palette_constants_are_distinct() {
+        assert_ne!(
+            CPU_RGB, MEM_RGB,
+            "CPU and mem swatches must be distinguishable"
+        );
+        assert_eq!(FILL_ALPHA, 0.22);
+    }
+
+    #[test]
+    fn test_series_points_land_in_bounds() {
+        // First sample (value 0) and latest (value 100) must stay within the
+        // widget's pixel bounds for a typical paint.
+        let s = samples(&[0.0, 100.0]);
+        let w = 400.0;
+        let h = 90.0;
+        let n = s.len();
+        let first = (sample_x_frac(0, n) * w, sample_y_frac(s[0].cpu) * h);
+        let last = (sample_x_frac(n - 1, n) * w, sample_y_frac(s[n - 1].cpu) * h);
+        for (x, y) in [first, last] {
+            assert!((0.0..=w).contains(&x));
+            assert!((0.0..=h).contains(&y));
         }
     }
 
-    /// A known sample must land at a predictable coordinate (value 100% sits on
-    /// the top edge, 0% on the bottom edge).
     #[test]
-    fn test_render_usage_svg_point_positions() {
-        let svg = render_usage_svg(&samples(&[0.0, 100.0]));
-        // First sample (value 0) maps to the bottom-left; second (value 100)
-        // maps to the top-right. Both colors use the same coordinates.
-        assert!(
-            svg.contains(&format!("{:.2},{:.2}", CHART_W, 0.0)),
-            "100% sample should be at the top-right"
-        );
-        assert!(
-            svg.contains(&format!("{:.2},{:.2}", 0.0, CHART_H)),
-            "0% sample should be at the bottom-left"
-        );
+    fn test_single_sample_is_centered_in_bounds() {
+        let s = samples(&[55.0]);
+        let w = 300.0;
+        let h = 80.0;
+        let (x, y) = (sample_x_frac(0, 1) * w, sample_y_frac(s[0].cpu) * h);
+        assert!((0.0..=w).contains(&x));
+        assert!((0.0..=h).contains(&y));
     }
 }

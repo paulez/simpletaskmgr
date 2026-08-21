@@ -1,4 +1,3 @@
-use floem::prelude::{create_rw_signal, RwSignal, SignalGet, SignalUpdate};
 pub use procfs::process;
 pub use users::{Users, UsersCache};
 
@@ -7,7 +6,7 @@ pub use users::{Users, UsersCache};
 /// `PartialEq` compares the whole struct field-by-field. `cpu_percent` is an
 /// `f64`, so `Eq`/`Hash` are intentionally not implemented (an `f64` that can
 /// be `NaN` has a `PartialEq` that is not reflexive, and no caller of this repo
-/// needs it as a hash key anyway — `dyn_stack` keys rows on the stable `i32`
+/// needs it as a hash key anyway — the list keys rows on the stable `i32`
 /// `pid`, not on the value).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TaskMgrProcess {
@@ -36,44 +35,29 @@ impl TaskMgrProcess {
 
 /// One process row as rendered by the UI.
 ///
-/// `pid` is the row's stable identity (what `dyn_stack` keys rows on), while
-/// `value` is a single signal holding the latest `TaskMgrProcess` snapshot. On
-/// each refresh we keep the same `ProcessItem` for a given `pid` and merely
-/// write a new snapshot into `value`, so an already-rendered row updates its
-/// labels in place instead of being torn down and rebuilt.
-///
-/// A `RwSignal` is `Copy` (an id into the reactive runtime), so cloning a
-/// `ProcessItem` shares the *same* underlying value signal as the original.
-#[derive(Clone, Debug)]
+/// `pid` is the row's stable identity (used to match a row across refreshes);
+/// `value` is the latest `TaskMgrProcess` snapshot for it. On each refresh we
+/// keep the same `ProcessItem` for a given `pid` and replace its `value`, so
+/// the row's fields carry over without the row being rebuilt from scratch.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProcessItem {
     pub pid: i32,
-    /// The row's current data; swapped in place on every refresh.
-    pub value: RwSignal<TaskMgrProcess>,
+    /// The row's current data; replaced on every refresh.
+    pub value: TaskMgrProcess,
 }
 
 impl ProcessItem {
-    /// Creates a new row with a fresh value signal from a `TaskMgrProcess`.
+    /// Creates a new row from a `TaskMgrProcess`.
     pub fn new(p: &TaskMgrProcess) -> Self {
         Self {
             pid: p.pid,
-            value: create_rw_signal(p.clone()),
+            value: p.clone(),
         }
-    }
-
-    /// Writes a new snapshot into this row's existing value signal, so any
-    /// rendered labels that read it update in place (no row rebuild).
-    pub fn copy_from(&self, p: &TaskMgrProcess) {
-        self.value.set(p.clone());
-    }
-
-    /// The row's current snapshot (untracked read — safe outside an effect).
-    pub fn value_untracked(&self) -> TaskMgrProcess {
-        self.value.get_untracked()
     }
 
     /// The current CPU% as a `top`-style string, e.g. `"12.3%"`.
     pub fn cpu_percent_str(&self) -> String {
-        self.value_untracked().cpu_percent_str()
+        self.value.cpu_percent_str()
     }
 }
 
@@ -148,34 +132,18 @@ mod tests {
         let p = proc(7, 12.34);
         let item = ProcessItem::new(&p);
         assert_eq!(item.pid, 7);
-        assert_eq!(item.value_untracked(), p);
+        assert_eq!(item.value, p);
         assert_eq!(item.cpu_percent_str(), "12.3%");
     }
 
-    /// `copy_from` writes a new snapshot into the *same* value signal, so a
-    /// clone (as is handed to a rendered row) reflects the update in place.
+    /// A row is a pure value: cloning it yields an independent, equal copy.
     #[test]
-    fn test_process_item_copy_from_updates_in_place() {
+    fn test_process_item_clone_is_value_copy() {
         let a = proc(7, 1.0);
         let item = ProcessItem::new(&a);
-        assert_eq!(item.cpu_percent_str(), "1.0%");
-
-        let updated = proc(7, 42.0);
-        item.copy_from(&updated);
-        assert_eq!(item.value_untracked(), updated);
-        assert_eq!(item.cpu_percent_str(), "42.0%");
-    }
-
-    /// Cloning an item shares the underlying signal, which is what lets a
-    /// rendered row keep receiving updates after the list is re-sorted.
-    #[test]
-    fn test_process_item_clone_shares_value_signal() {
-        let a = proc(7, 1.0);
-        let item = ProcessItem::new(&a);
-        let rendered = item.clone();
-
-        item.copy_from(&proc(7, 99.0));
-        assert_eq!(rendered.value_untracked().cpu_percent, 99.0);
-        assert_eq!(item.pid, rendered.pid);
+        let cloned = item.clone();
+        assert_eq!(cloned, item);
+        assert_eq!(cloned.value.cpu_percent, 1.0);
+        assert_eq!(cloned.pid, item.pid);
     }
 }

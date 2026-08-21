@@ -1,16 +1,13 @@
 use crate::cpu_tracker::CpuTracker;
 use crate::process::{build_task_mgr_process, ProcessItem, TaskMgrProcess};
 use anyhow::{Context, Result};
-use floem::prelude::{create_rw_signal, RwSignal, SignalGet, SignalUpdate};
-use imbl::Vector;
 use log::{debug, warn};
 use procfs::process;
-use std::cell::RefCell;
 use users::{Users, UsersCache};
 
 pub struct ProcessList {
-    pub processes: RwSignal<Vector<ProcessItem>>,
-    cpu_tracker: RefCell<CpuTracker>,
+    pub processes: Vec<ProcessItem>,
+    cpu_tracker: CpuTracker,
     users_cache: UsersCache,
 }
 
@@ -23,8 +20,8 @@ impl Default for ProcessList {
 impl ProcessList {
     pub fn new() -> Self {
         let users_cache = UsersCache::new();
-        let processes = create_rw_signal(Vector::new());
-        let cpu_tracker = RefCell::new(CpuTracker::new());
+        let processes = Vec::new();
+        let cpu_tracker = CpuTracker::new();
         Self {
             processes,
             cpu_tracker,
@@ -33,60 +30,29 @@ impl ProcessList {
     }
 
     pub fn init() -> Self {
-        let new_list = Self::new();
+        let mut new_list = Self::new();
         new_list.update_process_list();
         new_list
     }
 
-    pub fn update_process_list(&self) {
+    /// Reads `/proc` again, updates the per-process CPU% and the current
+    /// user's visible rows (`self.processes`).
+    pub fn update_process_list(&mut self) {
         match self.refresh_process_list() {
             Ok(processes) => {
-                // Reuse the existing row (and its `value` signal) for any pid that is
-                // still present so an already-rendered row updates in place; build a
-                // fresh row only for a pid that appeared this refresh. Dropped pids
-                // simply fall out of the new vector (their signals are then disposed).
-                //
-                // Read untracked: `update_process_list` may be called from inside a
-                // reactive effect, and reading the list here must not subscribe that
-                // effect to the `processes` signal (which is written just below).
-                let mut existing: std::collections::HashMap<i32, ProcessItem> = self
-                    .processes
-                    .get_untracked()
+                self.processes = processes
                     .into_iter()
-                    .map(|item| (item.pid, item))
+                    .map(|p| ProcessItem::new(&p))
                     .collect();
-                let new_items: Vector<ProcessItem> = processes
-                    .into_iter()
-                    .map(|p| match existing.remove(&p.pid) {
-                        Some(item) => {
-                            item.copy_from(&p);
-                            item
-                        }
-                        None => ProcessItem::new(&p),
-                    })
-                    .collect();
-                // Publish only when the row set actually changed; floem_reactive
-                // runs subscriber effects unconditionally on every set, so
-                // skipping a no-op write avoids needless effect runs.
-                let current_pids: Vec<i32> = self
-                    .processes
-                    .get_untracked()
-                    .iter()
-                    .map(|i| i.pid)
-                    .collect();
-                let new_pids: Vec<i32> = new_items.iter().map(|i| i.pid).collect();
-                if current_pids != new_pids {
-                    self.processes.set(new_items);
-                }
             }
             Err(e) => {
                 log::error!("Failed to update process list: {}", e);
-                self.processes.set(Vector::new());
+                self.processes.clear();
             }
         }
     }
 
-    pub fn refresh_process_list(&self) -> Result<Vector<TaskMgrProcess>> {
+    pub fn refresh_process_list(&mut self) -> Result<Vec<TaskMgrProcess>> {
         debug!("Refreshing process list");
 
         let current_uid = self.users_cache.get_current_uid();
@@ -114,7 +80,7 @@ impl ProcessList {
         debug!("Retrieved {} processes from /proc", all_processes.len());
 
         // Each /proc file is read once per process per refresh.
-        let task_mgr_process_list: Vector<TaskMgrProcess> = all_processes
+        let task_mgr_process_list: Vec<TaskMgrProcess> = all_processes
             .iter()
             .filter_map(|proc| {
                 let stat = match proc.stat() {
@@ -137,7 +103,6 @@ impl ProcessList {
                 };
                 let mut task_mgr_process = build_task_mgr_process(&stat, ruid, username);
                 self.cpu_tracker
-                    .borrow_mut()
                     .update_process_cpu(&mut task_mgr_process, &stat);
                 Some(task_mgr_process)
             })
@@ -147,7 +112,6 @@ impl ProcessList {
         let live_pids: std::collections::HashSet<i32> =
             task_mgr_process_list.iter().map(|p| p.pid).collect();
         self.cpu_tracker
-            .borrow_mut()
             .evict_dead_processes(|pid| live_pids.contains(&pid));
 
         // Capture intermediate count before UID filtering
@@ -158,7 +122,7 @@ impl ProcessList {
         );
 
         // Only the current user's processes are shown (the "show all" toggle is not yet implemented).
-        let task_mgr_process_list_filtered: Vector<TaskMgrProcess> = task_mgr_process_list
+        let task_mgr_process_list_filtered: Vec<TaskMgrProcess> = task_mgr_process_list
             .into_iter()
             .filter(|p| p.ruid == current_uid)
             .collect();
@@ -175,73 +139,24 @@ impl ProcessList {
         Ok(task_mgr_process_list_filtered)
     }
 
-    /// Sorts the process list by the specified column and direction
-    pub fn sort_processes(&self, column: crate::SortColumn, direction: crate::SortDirection) {
-        // Read the list untracked: this is an imperative operation and it must
-        // not subscribe the caller's effect to the `processes` signal. Tracking
-        // here would make the sort effect re-subscribe to the very signal it
-        // writes at the end, so each `set` synchronously re-runs the effect,
-        // which sorts and sets again, recursing until the stack overflows
-        // (floem_reactive runs subscriber effects eagerly on every set, with no
-        // equality check).
-        let mut processes = self.processes.get_untracked();
-        // The current ordering, to detect a no-op sort below.
-        let previous_pids: Vec<i32> = processes.iter().map(|i| i.pid).collect();
-        // Each row's fields live in its `value` signal; read the snapshot
-        // untracked for the comparison (we only reorder, never mutate values).
-        // `f64` uses `total_cmp` so NaN values sort without panicking, unlike
-        // `partial_cmp().unwrap()`.
-        match (column, direction) {
-            (crate::SortColumn::Pid, crate::SortDirection::Ascending) => {
-                processes.sort_by(|a, b| a.pid.cmp(&b.pid));
+    /// Sorts the process list in place by the specified column and direction.
+    ///
+    /// `f64` is compared with `total_cmp` so `NaN` values sort without
+    /// panicking (unlike `partial_cmp().unwrap()`).
+    pub fn sort_processes(&mut self, column: crate::SortColumn, direction: crate::SortDirection) {
+        let by = |a: &ProcessItem, b: &ProcessItem| -> std::cmp::Ordering {
+            match column {
+                crate::SortColumn::Pid => a.pid.cmp(&b.pid),
+                crate::SortColumn::Username => a.value.username.cmp(&b.value.username),
+                crate::SortColumn::CpuPercent => {
+                    a.value.cpu_percent.total_cmp(&b.value.cpu_percent)
+                }
+                crate::SortColumn::Name => a.value.name.cmp(&b.value.name),
             }
-            (crate::SortColumn::Pid, crate::SortDirection::Descending) => {
-                processes.sort_by(|a, b| b.pid.cmp(&a.pid));
-            }
-            (crate::SortColumn::Username, crate::SortDirection::Ascending) => {
-                processes.sort_by(|a, b| {
-                    a.value_untracked()
-                        .username
-                        .cmp(&b.value_untracked().username)
-                });
-            }
-            (crate::SortColumn::Username, crate::SortDirection::Descending) => {
-                processes.sort_by(|a, b| {
-                    b.value_untracked()
-                        .username
-                        .cmp(&a.value_untracked().username)
-                });
-            }
-            (crate::SortColumn::CpuPercent, crate::SortDirection::Ascending) => {
-                processes.sort_by(|a, b| {
-                    a.value_untracked()
-                        .cpu_percent
-                        .total_cmp(&b.value_untracked().cpu_percent)
-                });
-            }
-            (crate::SortColumn::CpuPercent, crate::SortDirection::Descending) => {
-                processes.sort_by(|a, b| {
-                    b.value_untracked()
-                        .cpu_percent
-                        .total_cmp(&a.value_untracked().cpu_percent)
-                });
-            }
-            (crate::SortColumn::Name, crate::SortDirection::Ascending) => {
-                processes.sort_by(|a, b| a.value_untracked().name.cmp(&b.value_untracked().name));
-            }
-            (crate::SortColumn::Name, crate::SortDirection::Descending) => {
-                processes.sort_by(|a, b| b.value_untracked().name.cmp(&a.value_untracked().name));
-            }
-        }
-        // Publish only when the order actually changed (mirrors
-        // `update_process_list`): floem_reactive runs subscriber effects
-        // unconditionally on every `set`, with no equality check, so a no-op
-        // sort would needlessly re-fire the layout effects — including a full
-        // rebuild of the process list every ~1.5s refresh, even though the rows
-        // (keyed by pid) are unchanged.
-        let new_pids: Vec<i32> = processes.iter().map(|i| i.pid).collect();
-        if previous_pids != new_pids {
-            self.processes.set(processes);
+        };
+        match direction {
+            crate::SortDirection::Ascending => self.processes.sort_by(by),
+            crate::SortDirection::Descending => self.processes.sort_by(|a, b| by(b, a)),
         }
     }
 }
@@ -254,7 +169,7 @@ mod tests {
     /// A `f64` NaN must not panic the sort (regression for `partial_cmp().unwrap()`).
     #[test]
     fn test_sort_by_cpu_percent_with_nan_does_not_panic() {
-        let list = ProcessList::new();
+        let mut list = ProcessList::new();
         let items = [(1, f64::NAN), (2, 5.0), (3, -1.0)]
             .into_iter()
             .map(|(pid, cpu)| {
@@ -262,7 +177,7 @@ mod tests {
                 ProcessItem::new(&p)
             })
             .collect();
-        list.processes.set(items);
+        list.processes = items;
 
         list.sort_processes(
             crate::SortColumn::CpuPercent,
@@ -274,56 +189,61 @@ mod tests {
         );
 
         // Sorting must leave the list intact with the same set of PIDs.
-        let mut pids: Vec<i32> = list.processes.get().iter().map(|p| p.pid).collect();
+        let mut pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
         pids.sort_unstable();
         assert_eq!(pids, vec![1, 2, 3]);
     }
 
-    /// Re-sorting while subscribed to the list from a reactive effect must not
-    /// re-subscribe that effect to the list it writes. floem_reactive runs
-    /// subscriber effects eagerly (no equality check) on every set, so if
-    /// `sort_processes` tracked the list it read, each `processes.set` would
-    /// synchronously re-run the effect, which sorted and set again, recursing
-    /// until the stack overflowed (the startup crash).
+    /// Re-sorting after a refresh re-applies the current sort to the new data;
+    /// repeated sorts are stable and never lose or duplicate rows.
     #[test]
-    fn test_sort_processes_in_effect_does_not_recurse() {
-        use floem::prelude::{SignalGet, SignalTrack, SignalUpdate};
-        use floem::reactive::create_effect;
-
+    fn test_repeated_sorts_are_stable_and_reapply() {
         fn make_items(pid: i32) -> ProcessItem {
             let p =
                 TaskMgrProcess::new(format!("name{}", pid), pid, 1, "u".to_string(), pid as f64);
             ProcessItem::new(&p)
         }
 
-        let items: Vector<ProcessItem> = (6..=10).map(make_items).collect();
+        let mut list = ProcessList::new();
+        list.processes = (6..=10).map(make_items).collect();
 
-        let list = std::rc::Rc::new(ProcessList::new());
-        list.processes.set(items.clone());
+        // A refresh replaced the data; sort it descending by CPU (pid == cpu).
+        list.processes = (5..=14).map(make_items).collect();
+        list.sort_processes(
+            crate::SortColumn::CpuPercent,
+            crate::SortDirection::Descending,
+        );
 
-        let sort_column = create_rw_signal(crate::SortColumn::CpuPercent);
-        let sort_direction = create_rw_signal(crate::SortDirection::Descending);
+        // Re-sorting the same column/direction is a no-op in ordering.
+        list.sort_processes(
+            crate::SortColumn::CpuPercent,
+            crate::SortDirection::Descending,
+        );
+        let pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![14, 13, 12, 11, 10, 9, 8, 7, 6, 5]);
 
-        let effect_list = std::rc::Rc::clone(&list);
-        create_effect(move |_| {
-            sort_column.track();
-            sort_direction.track();
-            effect_list.sort_processes(sort_column.get(), sort_direction.get());
-        });
+        // Switching to an ascending sort reorders the same set of rows.
+        list.sort_processes(
+            crate::SortColumn::CpuPercent,
+            crate::SortDirection::Ascending,
+        );
+        let pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+    }
 
-        // A refresh of the process list must not re-trigger the sort effect
-        // (before the fix this recursed until the stack overflowed).
-        list.processes.set(items.clone());
-
-        // The sort effect still reacts to sort changes and applies them.
-        sort_column.set(crate::SortColumn::Pid);
-        sort_column.set(crate::SortColumn::CpuPercent);
-
-        // Then the sort effect still reacts to a sort change and applies it.
-        sort_column.set(crate::SortColumn::Pid);
-        sort_column.set(crate::SortColumn::CpuPercent);
-
-        let pids: Vec<i32> = list.processes.get().iter().map(|p| p.pid).collect();
-        assert_eq!(pids, vec![10, 9, 8, 7, 6]);
+    /// `update_process_list` rebuilds the visible rows and keeps them consistent
+    /// (every row maps to a unique pid) regardless of process churn.
+    #[test]
+    fn test_update_process_list_keeps_rows_unique() {
+        let mut list = ProcessList::new();
+        list.update_process_list();
+        let mut pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
+        pids.sort();
+        pids.dedup();
+        assert_eq!(
+            pids.len(),
+            list.processes.len(),
+            "no duplicate pids after refresh"
+        );
     }
 }

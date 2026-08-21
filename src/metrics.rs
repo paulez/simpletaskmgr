@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use floem::prelude::{create_rw_signal, RwSignal, SignalGet, SignalUpdate};
 use log::warn;
 
 /// One system-wide usage sample.
@@ -119,12 +118,11 @@ fn read_meminfo_percent() -> Option<f64> {
 /// plot them over time.
 ///
 /// Call `push_sample()` once per refresh; it appends one sample and keeps at
-/// most `MAX_HISTORY` of them, dropping the oldest. The current history is
-/// exposed through `history_signal`, which the graph view reads reactively.
+/// most `MAX_HISTORY` of them, dropping the oldest. The UI reads `history()`
+/// each tick and redraws the graph.
 pub struct SystemMetrics {
     history: VecDeque<Sample>,
     cap: usize,
-    pub history_signal: RwSignal<Vec<Sample>>,
     stat_baseline: Option<StatBaseline>,
     start_instant: Instant,
 }
@@ -141,12 +139,9 @@ impl SystemMetrics {
     pub const MAX_HISTORY: usize = 120;
 
     pub fn new() -> Self {
-        let history = VecDeque::new();
-        let history_signal = create_rw_signal(Vec::<Sample>::new());
         Self {
-            history,
+            history: VecDeque::new(),
             cap: Self::MAX_HISTORY,
-            history_signal,
             stat_baseline: None,
             start_instant: Instant::now(),
         }
@@ -154,12 +149,9 @@ impl SystemMetrics {
 
     /// Creates metrics with the given history cap (for tests).
     pub fn with_cap(cap: usize) -> Self {
-        let history = VecDeque::new();
-        let history_signal = create_rw_signal(Vec::<Sample>::new());
         Self {
-            history,
+            history: VecDeque::new(),
             cap,
-            history_signal,
             stat_baseline: None,
             start_instant: Instant::now(),
         }
@@ -185,19 +177,11 @@ impl SystemMetrics {
         while self.history.len() > self.cap {
             self.history.pop_front();
         }
-        self.publish();
     }
 
     /// The last sample, if any.
     pub fn last(&self) -> Option<Sample> {
         self.history.back().copied()
-    }
-
-    fn publish(&self) {
-        let current = self.history.iter().copied().collect();
-        if self.history_signal.get_untracked() != current {
-            self.history_signal.set(current);
-        }
     }
 
     fn sample_cpu(&mut self) -> Option<f64> {
@@ -319,14 +303,14 @@ mod tests {
             m.push_sample();
         }
         assert_eq!(m.history().len(), 3);
-        assert_eq!(m.history_signal.get().len(), 3);
     }
 
     #[test]
-    fn test_push_sample_updates_signal_and_last() {
+    fn test_push_sample_updates_history_and_last() {
         let mut m = SystemMetrics::with_cap(10);
+        assert!(m.last().is_none());
         m.push_sample();
         assert!(m.last().is_some());
-        assert_eq!(m.history_signal.get_untracked().len(), 1);
+        assert_eq!(m.history().len(), 1);
     }
 }

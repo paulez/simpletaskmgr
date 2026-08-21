@@ -5,8 +5,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-floem = "0.2.0"
-imbl = "7.0.1"
+gtk4 = { version = "0.11", features = ["v4_10"] }
 log = "0.4.33"
 procfs = "0.18.0"
 simplelog = "0.12.2"
@@ -14,6 +13,8 @@ users = "0.11.0"
 anyhow = "1.0.104"
 thiserror = "2.0.20"
 libc = "0.2.189"
+cairo-rs = "0.22"
+glib = "0.22"
 
 [lib]
 name = "simpletaskmgr"
