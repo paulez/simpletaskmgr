@@ -532,12 +532,69 @@ mod tests {
         assert!(matches!(s.kill(Signal::Sighup), KillStatus::NoSelection));
     }
 
+    /// A signal to a pid that will not resolve to a live process reports
+    /// `Failed` (the syscall returns ESRCH/EPERM) — never a panic and never a
+    /// false `Sent`.
+    #[test]
+    fn test_kill_unknown_pid_reports_failure() {
+        let mut s = State::new();
+        // A pid far beyond typical allocations that is not going to be live.
+        s.selected_pid = Some(2_147_483_647);
+        let status = s.kill(Signal::Sighup);
+        assert!(
+            matches!(status, KillStatus::Failed(_)),
+            "signalling a dead pid must report Failed, got {status:?}"
+        );
+    }
+
     #[test]
     fn test_find_returns_item() {
         let mut s = State::new();
         s.process_list.processes.push(item(123));
         assert_eq!(s.find(123).unwrap().value.name, "name123");
         assert!(s.find(999).is_none());
+    }
+
+    /// refresh() appends exactly one sample to the rolling metrics history each
+    /// call — this is what keeps the usage graph advancing one tick per refresh.
+    #[test]
+    fn test_refresh_appends_one_metric_sample() {
+        let mut s = State::new();
+        let before = s.metrics.history().len();
+        s.refresh();
+        let after = s.metrics.history().len();
+        assert_eq!(after, before + 1, "one refresh appends exactly one sample");
+    }
+
+    /// refresh() clears the tracked-rows Vec (the UI republishes it on the next
+    /// rebuild) but preserves the sort state and selected pid the caller used.
+    #[test]
+    fn test_refresh_preserves_sort_and_selection() {
+        let mut s = State::new();
+        s.selected_pid = Some(1);
+        s.sort_column = SortColumn::Name;
+        s.sort_direction = SortDirection::Ascending;
+
+        s.refresh();
+
+        // Sort and selection are preserved; refresh only re-derived processes.
+        assert_eq!(s.sort_column, SortColumn::Name);
+        assert_eq!(s.sort_direction, SortDirection::Ascending);
+        assert_eq!(s.selected_pid, Some(1));
+        // The rows Vec is republished by the UI after refresh, so it's cleared.
+        assert!(s.rows.is_empty());
+    }
+
+    /// Clicking a *different* column resets the direction back to the default
+    /// for that column (ASCENDING), matching the header-indicator code.
+    #[test]
+    fn test_on_sort_click_new_column_starts_ascending() {
+        let mut s = State::new();
+        s.sort_column = SortColumn::CpuPercent;
+        s.sort_direction = SortDirection::Descending;
+        s.on_sort_click(SortColumn::Name);
+        assert_eq!(s.sort_column, SortColumn::Name);
+        assert_eq!(s.sort_direction, SortDirection::Ascending);
     }
 
     #[test]
