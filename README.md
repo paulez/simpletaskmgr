@@ -92,11 +92,12 @@ refresh = "normal"
 - `show_all` — `true` shows every process on the system, `false` (default) shows
   only the current user's
 - `refresh` — polling interval: `"fast"` (0.5s), `"normal"` (1.5s, default), or
-  `"slow"` (3s). Applied on the next start.
+  `"slow"` (3s). Applied immediately.
 
 Unknown or corrupt files fall back to the defaults; a missing file is created
 on your first change. Change settings at runtime via the **Settings** popover
-in the toolbar (with a "Reset to defaults" action).
+in the toolbar (with a "Reset to defaults" action); both settings apply
+immediately from the point of the change.
 
 ## License
 

@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4::gio::prelude::*;
@@ -24,6 +24,7 @@ struct State {
     selected_pid: Option<i32>,
     settings: UserSettings,
     save_path: std::path::PathBuf,
+    timer_id: Cell<Option<glib::SourceId>>,
 }
 
 #[derive(Debug)]
@@ -56,7 +57,15 @@ impl State {
             selected_pid: None,
             settings,
             save_path: path,
+            timer_id: Cell::new(None),
         }
+    }
+
+    /// Returns the id of the running refresh timer, if any, and clears the
+    /// slot. `build_window` fills the slot; the timer-callback and
+    /// interval-change paths take it out when they swap sources.
+    pub fn take_timer_id(&self) -> Option<glib::SourceId> {
+        self.timer_id.take()
     }
 
     fn refresh(&mut self) {
@@ -94,20 +103,26 @@ impl State {
         self.process_list.set_show_all(show_all);
     }
 
-    /// Sets the refresh-interval preset and persists it. Takes effect from the
-    /// next app launch (the running timer keeps its current period).
-    fn set_refresh_interval(&mut self, interval: RefreshInterval) {
+    /// Sets the refresh-interval preset and persists it. The caller restarts
+    /// the running timer (see `take_timer_id`) so the new period applies
+    /// immediately. Returns whether the value actually changed.
+    fn set_refresh_interval(&mut self, interval: RefreshInterval) -> bool {
         if self.settings.refresh != interval {
             self.settings.refresh = interval;
             self.save_settings();
+            true
+        } else {
+            false
         }
     }
 
-    /// Resets all settings to defaults, applies them, and persists.
-    fn reset_settings(&mut self) {
+    /// Resets all settings to defaults, applies them, and persists. Returns
+    /// whether the refresh interval changed (so the caller knows it must
+    /// restart the running timer).
+    fn reset_settings(&mut self) -> bool {
         let defaults = UserSettings::default();
         self.set_show_all(defaults.show_all);
-        self.set_refresh_interval(defaults.refresh);
+        self.set_refresh_interval(defaults.refresh)
     }
 
     fn save_settings(&mut self) {
@@ -133,6 +148,30 @@ fn detail_status(status: &KillStatus) -> String {
         KillStatus::NoSelection => "No process selected.".to_string(),
         KillStatus::Failed(m) => m.clone(),
     }
+}
+
+/// (Re)starts the refresh timer at the interval currently held in `state`.
+/// Must be called on the main loop thread.
+fn restart_timer(
+    state: &Rc<RefCell<State>>,
+    rebuild: &Rc<dyn Fn()>,
+    graph_area: &gtk4::DrawingArea,
+) {
+    if let Some(old) = state.borrow().take_timer_id() {
+        old.remove();
+    }
+    let interval = state.borrow().settings.refresh.as_duration();
+    let state_t = state.clone();
+    let rebuild_t = rebuild.clone();
+    let graph_t = graph_area.clone();
+    let state_cb = state_t.clone();
+    let id = glib::timeout_add_local(interval, move || {
+        state_cb.borrow_mut().refresh();
+        rebuild_t();
+        graph_t.queue_draw();
+        glib::ControlFlow::Continue
+    });
+    state_t.borrow_mut().timer_id.set(Some(id));
 }
 
 /// Builds the main window and wires the refresh timer.
@@ -316,11 +355,6 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     refresh_row.append(&refresh_list);
     pop_box.append(&refresh_row);
 
-    let refresh_note = gtk4::Label::new(Some("Applied on next start."));
-    refresh_note.add_css_class("settings-note");
-    refresh_note.set_xalign(0.0);
-    pop_box.append(&refresh_note);
-
     let reset_btn = gtk4::Button::new();
     reset_btn.set_label("Reset to defaults");
     reset_btn.add_css_class("settings-reset");
@@ -446,10 +480,15 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     {
         let state_c = state.clone();
         let rows_c = refresh_rows.clone();
+        let rebuild_c = rebuild.clone();
+        let graph_c = graph_area.clone();
         refresh_list.connect_row_activated(move |_list, row| {
             if let Some(pos) = rows_c.iter().position(|r| *r == *row) {
                 if let Some(interval) = RefreshInterval::ALL.get(pos) {
-                    state_c.borrow_mut().set_refresh_interval(*interval);
+                    let changed = state_c.borrow_mut().set_refresh_interval(*interval);
+                    if changed {
+                        restart_timer(&state_c, &rebuild_c, &graph_c);
+                    }
                 }
             }
         });
@@ -457,11 +496,17 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     {
         let state_r = state.clone();
         let rebuild_r = rebuild.clone();
+        let graph_r = graph_area.clone();
         let check_w = show_all_check.clone();
         let rows_w = refresh_rows.clone();
         let list_w = refresh_list.clone();
         reset_btn.connect_clicked(move |_| {
-            state_r.borrow_mut().reset_settings();
+            // `reset_settings` reports whether the refresh interval changed;
+            // only then is the running timer restarted.
+            let changed = state_r.borrow_mut().reset_settings();
+            if changed {
+                restart_timer(&state_r, &rebuild_r, &graph_r);
+            }
             sync_settings_widgets(&state_r, &check_w, &list_w, &rows_w);
             state_r.borrow_mut().refresh();
             rebuild_r();
@@ -494,18 +539,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     update_header_indicators(&header_buttons, &state.borrow());
 
     // ---- Refresh timer ------------------------------------------------------------
-    {
-        let state_t = state.clone();
-        let rebuild_t = rebuild.clone();
-        let graph_t = graph_area.clone();
-        let interval = state.borrow().settings.refresh.as_duration();
-        glib::timeout_add_local(interval, move || {
-            state_t.borrow_mut().refresh();
-            rebuild_t();
-            graph_t.queue_draw();
-            glib::ControlFlow::Continue
-        });
-    }
+    restart_timer(&state, &rebuild, &graph_area);
 
     window
 }
@@ -822,7 +856,10 @@ mod tests {
     #[test]
     fn test_set_refresh_interval_persists() {
         let mut s = test_state("set_refresh");
-        s.set_refresh_interval(RefreshInterval::Fast);
+        assert!(
+            s.set_refresh_interval(RefreshInterval::Fast),
+            "a different interval must report a change"
+        );
         assert_eq!(s.settings.refresh, RefreshInterval::Fast);
         let reloaded = UserSettings::load(&s.save_path);
         assert_eq!(
@@ -836,9 +873,32 @@ mod tests {
     #[test]
     fn test_set_refresh_interval_noop_when_unchanged() {
         let mut s = test_state("refresh_noop");
-        s.set_refresh_interval(RefreshInterval::default());
+        assert!(
+            !s.set_refresh_interval(RefreshInterval::default()),
+            "setting the current interval must report no change"
+        );
         assert_eq!(s.settings.refresh, RefreshInterval::Normal);
         let _ = std::fs::remove_file(temp_settings_path("refresh_noop"));
+    }
+
+    /// The timer id slot must round-trip: a caller can park a running
+    /// `SourceId` and take it back out when swapping sources. This is the
+    /// plumbing `restart_timer` relies on to avoid leaking a stale polling
+    /// source. We never let the test timer fire (30s) since it would try to
+    /// refresh and repaint widgets that only exist inside `build_window`.
+    #[test]
+    fn test_timer_id_slot_round_trip() {
+        let s = test_state("timer_slot");
+        assert!(s.take_timer_id().is_none(), "no timer at construction");
+        let id = glib::timeout_add_local(std::time::Duration::from_secs(30), || {
+            glib::ControlFlow::Break
+        });
+        s.timer_id.set(Some(id));
+        let taken = s.take_timer_id();
+        assert!(s.take_timer_id().is_none(), "take must clear the slot");
+        let taken = taken.expect("stored id must come back out");
+        taken.remove();
+        let _ = std::fs::remove_file(temp_settings_path("timer_slot"));
     }
 
     #[test]
@@ -846,7 +906,10 @@ mod tests {
         let mut s = test_state("reset");
         s.set_show_all(true);
         s.set_refresh_interval(RefreshInterval::Slow);
-        s.reset_settings();
+        assert!(
+            s.reset_settings(),
+            "reset must report an interval change after the user picked Slow"
+        );
         assert!(!s.settings.show_all);
         assert_eq!(s.settings.refresh, RefreshInterval::Normal);
         assert!(
