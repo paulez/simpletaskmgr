@@ -22,8 +22,25 @@
   padding: 6px 0;
 }
 
-.show-all-toggle {
-  margin: 2px 6px;
+.settings-btn {
+  padding: 3px 12px;
+}
+
+/* ---- Settings popover ----------------------------------------------------- */
+.settings-popover {
+  padding: 10px 12px;
+}
+
+.settings-refresh {
+  min-width: 90px;
+}
+
+.settings-refresh-row {
+  padding: 2px 8px;
+}
+
+.settings-note {
+  padding-left: 4px;
 }
 
 /* ---- List header --------------------------------------------------------- */

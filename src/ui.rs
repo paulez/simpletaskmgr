@@ -4,11 +4,12 @@ use std::rc::Rc;
 use gtk4::gio::prelude::*;
 use gtk4::prelude::*;
 
-use crate::config::Config;
+use crate::config::RefreshInterval;
 use crate::metrics::SystemMetrics;
 use crate::process::ProcessItem;
 use crate::process_list::ProcessList;
 use crate::process_row::ProcessRow;
+use crate::settings::{settings_path, UserSettings};
 use crate::signal::Signal;
 use crate::usage_graph::paint_usage_chart;
 use crate::{SortColumn, SortDirection};
@@ -21,6 +22,8 @@ struct State {
     sort_direction: SortDirection,
     metrics: SystemMetrics,
     selected_pid: Option<i32>,
+    settings: UserSettings,
+    save_path: std::path::PathBuf,
 }
 
 #[derive(Debug)]
@@ -32,7 +35,17 @@ enum KillStatus {
 
 impl State {
     fn new() -> Self {
-        let process_list = ProcessList::init();
+        Self::with_settings_path(settings_path())
+    }
+
+    /// Constructs state that loads and persists settings at `path`.
+    /// Production code uses the conventional location via [`State::new`];
+    /// tests point this at a temporary path so they never touch the real
+    /// configuration file.
+    pub fn with_settings_path(path: std::path::PathBuf) -> Self {
+        let settings = UserSettings::load(&path);
+        let mut process_list = ProcessList::init();
+        process_list.set_show_all(settings.show_all);
         let mut metrics = SystemMetrics::new();
         metrics.push_sample();
         Self {
@@ -41,6 +54,8 @@ impl State {
             sort_direction: SortDirection::Descending,
             metrics,
             selected_pid: None,
+            settings,
+            save_path: path,
         }
     }
 
@@ -67,6 +82,38 @@ impl State {
 
     fn find(&self, pid: i32) -> Option<&ProcessItem> {
         self.process_list.processes.iter().find(|p| p.pid == pid)
+    }
+
+    /// Sets the show-all filter and persists it. Caller is responsible for
+    /// refreshing + republishing so the change takes effect immediately.
+    fn set_show_all(&mut self, show_all: bool) {
+        if self.settings.show_all != show_all {
+            self.settings.show_all = show_all;
+            self.save_settings();
+        }
+        self.process_list.set_show_all(show_all);
+    }
+
+    /// Sets the refresh-interval preset and persists it. Takes effect from the
+    /// next app launch (the running timer keeps its current period).
+    fn set_refresh_interval(&mut self, interval: RefreshInterval) {
+        if self.settings.refresh != interval {
+            self.settings.refresh = interval;
+            self.save_settings();
+        }
+    }
+
+    /// Resets all settings to defaults, applies them, and persists.
+    fn reset_settings(&mut self) {
+        let defaults = UserSettings::default();
+        self.set_show_all(defaults.show_all);
+        self.set_refresh_interval(defaults.refresh);
+    }
+
+    fn save_settings(&mut self) {
+        if let Err(e) = self.settings.save(&self.save_path) {
+            log::error!("Failed to save settings: {e:?}");
+        }
     }
 
     fn kill(&mut self, sig: Signal) -> KillStatus {
@@ -232,14 +279,59 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     root.append(&header);
     root.append(&body);
 
-    // ---- Toolbar: "show all processes" toggle -----------------------------------
+    // ---- Settings button + popover ---------------------------------------------
+    let settings_btn = gtk4::Button::new();
+    settings_btn.set_label("Settings");
+    settings_btn.add_css_class("settings-btn");
+
+    let popover = gtk4::Popover::new();
+    popover.set_has_arrow(true);
+    popover.set_position(gtk4::PositionType::Bottom);
+    let pop_box = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+    pop_box.add_css_class("settings-popover");
+
+    let show_all_check = gtk4::CheckButton::new();
+    show_all_check.set_label(Some("Show all processes"));
+    pop_box.append(&show_all_check);
+
+    let refresh_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let refresh_lbl = gtk4::Label::new(Some("Refresh interval"));
+    refresh_lbl.add_css_class("settings-label");
+    refresh_row.append(&refresh_lbl);
+    let refresh_list = gtk4::ListBox::new();
+    refresh_list.add_css_class("settings-refresh");
+    refresh_list.set_selection_mode(gtk4::SelectionMode::Single);
+    let mut refresh_rows: Vec<gtk4::ListBoxRow> = Vec::new();
+    for interval in RefreshInterval::ALL {
+        let row = gtk4::ListBoxRow::new();
+        let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        let row_lbl = gtk4::Label::new(Some(interval.label()));
+        row_lbl.add_css_class("settings-refresh-row");
+        row_lbl.set_xalign(0.0);
+        row_box.append(&row_lbl);
+        row.set_child(Some(&row_box));
+        refresh_list.append(&row);
+        refresh_rows.push(row);
+    }
+    refresh_row.append(&refresh_list);
+    pop_box.append(&refresh_row);
+
+    let refresh_note = gtk4::Label::new(Some("Applied on next start."));
+    refresh_note.add_css_class("settings-note");
+    refresh_note.set_xalign(0.0);
+    pop_box.append(&refresh_note);
+
+    let reset_btn = gtk4::Button::new();
+    reset_btn.set_label("Reset to defaults");
+    reset_btn.add_css_class("settings-reset");
+    pop_box.append(&reset_btn);
+
+    popover.set_child(Some(&pop_box));
+    settings_btn.set_child(Some(&popover));
+
     let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     toolbar.add_css_class("toolbar");
-    let toggle = gtk4::CheckButton::new();
-    toggle.set_label(Some("Show all processes"));
-    toggle.add_css_class("show-all-toggle");
-    toggle.set_active(false);
-    toolbar.append(&toggle);
+    toolbar.append(&settings_btn);
     root.insert_child_after(&toolbar, Some(&header));
 
     // ---- Header buttons (created after list is available) ----------------------
@@ -330,19 +422,49 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         });
     }
 
-    // ---- "Show all" toggle handler ----------------------------------------------
+    // ---- Settings popover handlers ----------------------------------------------
+    // Initialize the widgets from the loaded settings.
+    let loaded = state.borrow().settings.clone();
+    show_all_check.set_active(loaded.show_all);
+    let initial_idx = RefreshInterval::ALL
+        .iter()
+        .position(|i| *i == loaded.refresh)
+        .unwrap_or(1);
+    refresh_list.select_row(Some(&refresh_rows[initial_idx]));
     {
         let state_t = state.clone();
         let rebuild_t = rebuild.clone();
-        toggle.connect_toggled(move |chk| {
-            state_t
-                .borrow_mut()
-                .process_list
-                .set_show_all(chk.is_active());
+        show_all_check.connect_toggled(move |chk| {
+            let active = chk.is_active();
+            state_t.borrow_mut().set_show_all(active);
             // Refresh now so the filter change takes effect immediately rather
-            // than waiting up to the next 1.5s tick.
+            // than waiting up to the next refresh tick.
             state_t.borrow_mut().refresh();
             rebuild_t();
+        });
+    }
+    {
+        let state_c = state.clone();
+        let rows_c = refresh_rows.clone();
+        refresh_list.connect_row_activated(move |_list, row| {
+            if let Some(pos) = rows_c.iter().position(|r| *r == *row) {
+                if let Some(interval) = RefreshInterval::ALL.get(pos) {
+                    state_c.borrow_mut().set_refresh_interval(*interval);
+                }
+            }
+        });
+    }
+    {
+        let state_r = state.clone();
+        let rebuild_r = rebuild.clone();
+        let check_w = show_all_check.clone();
+        let rows_w = refresh_rows.clone();
+        let list_w = refresh_list.clone();
+        reset_btn.connect_clicked(move |_| {
+            state_r.borrow_mut().reset_settings();
+            sync_settings_widgets(&state_r, &check_w, &list_w, &rows_w);
+            state_r.borrow_mut().refresh();
+            rebuild_r();
         });
     }
 
@@ -376,7 +498,8 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         let state_t = state.clone();
         let rebuild_t = rebuild.clone();
         let graph_t = graph_area.clone();
-        glib::timeout_add_local(Config::refresh_interval(), move || {
+        let interval = state.borrow().settings.refresh.as_duration();
+        glib::timeout_add_local(interval, move || {
             state_t.borrow_mut().refresh();
             rebuild_t();
             graph_t.queue_draw();
@@ -450,6 +573,26 @@ fn update_header_indicators(buttons: &[(SortColumn, gtk4::Button, gtk4::Label)],
     }
 }
 
+fn sync_settings_widgets(
+    state: &Rc<RefCell<State>>,
+    check: &gtk4::CheckButton,
+    list: &gtk4::ListBox,
+    rows: &[gtk4::ListBoxRow],
+) {
+    let s = state.borrow();
+    if check.is_active() != s.settings.show_all {
+        check.set_active(s.settings.show_all);
+    }
+    let idx = RefreshInterval::ALL
+        .iter()
+        .position(|i| *i == s.settings.refresh)
+        .unwrap_or(1);
+    let already = list.selected_row().is_some_and(|r| r == rows[idx]);
+    if !already {
+        list.select_row(Some(&rows[idx]));
+    }
+}
+
 fn load_css() {
     let provider = gtk4::CssProvider::new();
     provider.load_from_data(CSS);
@@ -477,9 +620,25 @@ mod tests {
         ))
     }
 
+    fn temp_settings_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "simpletaskmgr-ui-test-{}-{}-settings.toml",
+            std::process::id(),
+            tag
+        ))
+    }
+
+    /// A `State` whose settings round-trip to a throwaway path, so tests
+    /// never read or write the real `~/.config/simpletaskmgr` file.
+    fn test_state(tag: &str) -> State {
+        let path = temp_settings_path(tag);
+        let _ = std::fs::remove_file(&path);
+        State::with_settings_path(path)
+    }
+
     #[test]
     fn test_state_new_primes_metrics() {
-        let s = State::new();
+        let s = test_state("metrics");
         assert!(!s.metrics.history().is_empty());
         assert_eq!(s.sort_column, SortColumn::CpuPercent);
         assert_eq!(s.sort_direction, SortDirection::Descending);
@@ -488,7 +647,7 @@ mod tests {
 
     #[test]
     fn test_state_on_sort_click_toggles() {
-        let mut s = State::new();
+        let mut s = test_state("sort");
         let d0 = s.sort_direction;
         s.on_sort_click(SortColumn::CpuPercent);
         assert_ne!(s.sort_direction, d0);
@@ -498,7 +657,7 @@ mod tests {
 
     #[test]
     fn test_kill_no_selection() {
-        let mut s = State::new();
+        let mut s = test_state("kill_none");
         assert!(matches!(s.kill(Signal::Sighup), KillStatus::NoSelection));
     }
 
@@ -507,7 +666,7 @@ mod tests {
     /// false `Sent`.
     #[test]
     fn test_kill_unknown_pid_reports_failure() {
-        let mut s = State::new();
+        let mut s = test_state("kill_unknown");
         // A pid far beyond typical allocations that is not going to be live.
         s.selected_pid = Some(2_147_483_647);
         let status = s.kill(Signal::Sighup);
@@ -519,7 +678,7 @@ mod tests {
 
     #[test]
     fn test_find_returns_item() {
-        let mut s = State::new();
+        let mut s = test_state("find");
         s.process_list.processes.push(item(123));
         assert_eq!(s.find(123).unwrap().value.name, "name123");
         assert!(s.find(999).is_none());
@@ -529,7 +688,7 @@ mod tests {
     /// call — this is what keeps the usage graph advancing one tick per refresh.
     #[test]
     fn test_refresh_appends_one_metric_sample() {
-        let mut s = State::new();
+        let mut s = test_state("refresh_sample");
         let before = s.metrics.history().len();
         s.refresh();
         let after = s.metrics.history().len();
@@ -540,7 +699,7 @@ mod tests {
     /// only re-derives the process list and advances the metric history.
     #[test]
     fn test_refresh_preserves_sort_and_selection() {
-        let mut s = State::new();
+        let mut s = test_state("refresh_preserve");
         s.selected_pid = Some(1);
         s.sort_column = SortColumn::Name;
         s.sort_direction = SortDirection::Ascending;
@@ -557,7 +716,7 @@ mod tests {
     /// for that column (ASCENDING), matching the header-indicator code.
     #[test]
     fn test_on_sort_click_new_column_starts_ascending() {
-        let mut s = State::new();
+        let mut s = test_state("sort_column");
         s.sort_column = SortColumn::CpuPercent;
         s.sort_direction = SortDirection::Descending;
         s.on_sort_click(SortColumn::Name);
@@ -567,7 +726,7 @@ mod tests {
 
     #[test]
     fn test_kill_sigkill_on_sleep_child() {
-        let mut s = State::new();
+        let mut s = test_state("kill_kill");
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
@@ -597,7 +756,7 @@ mod tests {
     /// up to 1.5s (the timer interval).
     #[test]
     fn test_refresh_drops_killed_process() {
-        let mut s = State::new();
+        let mut s = test_state("kill_drops");
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
@@ -625,5 +784,80 @@ mod tests {
             s.process_list.processes.iter().all(|p| p.pid != pid),
             "killed process should be dropped on the refresh the button triggers"
         );
+    }
+
+    #[test]
+    fn test_state_initializes_from_saved_settings() {
+        let path = temp_settings_path("load_all");
+        UserSettings {
+            show_all: true,
+            refresh: RefreshInterval::Slow,
+        }
+        .save(&path)
+        .unwrap();
+        let s = State::with_settings_path(path);
+        let _ = std::fs::remove_file(temp_settings_path("load_all"));
+        assert!(s.settings.show_all);
+        assert_eq!(s.settings.refresh, RefreshInterval::Slow);
+        assert!(
+            s.process_list.show_all,
+            "show_all setting must seed the process list on startup"
+        );
+    }
+
+    #[test]
+    fn test_set_show_all_persists() {
+        let mut s = test_state("set_all");
+        s.set_show_all(true);
+        assert!(s.settings.show_all);
+        assert!(s.process_list.show_all);
+        let reloaded = UserSettings::load(&s.save_path);
+        assert!(
+            reloaded.show_all,
+            "changing the toggle must persist immediately"
+        );
+        let _ = std::fs::remove_file(temp_settings_path("set_all"));
+    }
+
+    #[test]
+    fn test_set_refresh_interval_persists() {
+        let mut s = test_state("set_refresh");
+        s.set_refresh_interval(RefreshInterval::Fast);
+        assert_eq!(s.settings.refresh, RefreshInterval::Fast);
+        let reloaded = UserSettings::load(&s.save_path);
+        assert_eq!(
+            reloaded.refresh,
+            RefreshInterval::Fast,
+            "changing the interval must persist immediately"
+        );
+        let _ = std::fs::remove_file(temp_settings_path("set_refresh"));
+    }
+
+    #[test]
+    fn test_set_refresh_interval_noop_when_unchanged() {
+        let mut s = test_state("refresh_noop");
+        s.set_refresh_interval(RefreshInterval::default());
+        assert_eq!(s.settings.refresh, RefreshInterval::Normal);
+        let _ = std::fs::remove_file(temp_settings_path("refresh_noop"));
+    }
+
+    #[test]
+    fn test_reset_settings_restores_defaults_and_persists() {
+        let mut s = test_state("reset");
+        s.set_show_all(true);
+        s.set_refresh_interval(RefreshInterval::Slow);
+        s.reset_settings();
+        assert!(!s.settings.show_all);
+        assert_eq!(s.settings.refresh, RefreshInterval::Normal);
+        assert!(
+            !s.process_list.show_all,
+            "reset must also re-apply the list filter"
+        );
+        let reloaded = UserSettings::load(&s.save_path);
+        assert!(
+            !reloaded.show_all && reloaded.refresh == RefreshInterval::Normal,
+            "reset must persist defaults"
+        );
+        let _ = std::fs::remove_file(temp_settings_path("reset"));
     }
 }

@@ -4,6 +4,7 @@ pub mod metrics;
 pub mod process;
 pub mod process_list;
 pub mod process_row;
+pub mod settings;
 pub mod signal;
 pub mod ui;
 pub mod usage_graph;

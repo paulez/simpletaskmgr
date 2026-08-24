@@ -13,6 +13,7 @@ A lightweight, interactive system process manager built with Rust that displays 
 - **Process Detail View**: Click any process to inspect its PID, name, UID, user, and CPU usage
 - **Signal Management**: Send SIGHUP or SIGKILL to a selected process from its detail view, with success/failure feedback
 - **Resource Usage Graph**: An always-on chart above the process list shows system-wide CPU and memory usage over time (a rolling window of ~3 minutes), updating with each refresh
+- **Persistent Settings**: Your choices (show-all filter, refresh interval) survive restarts. Open the **Settings** popover in the toolbar to change them.
 
 ## Requirements
 
@@ -46,6 +47,9 @@ The project uses the following Rust crates:
 - **cairo-rs** 0.22 - Drawing library for the CPU/memory graph
 - **procfs** 0.18.0 - Linux procfs filesystem bindings
 - **glib** 0.22 - GLib objects & timers (via gtk4)
+- **serde** 1 (with `derive`) - (De)serialization of user settings
+- **toml** 0.8 - TOML encoding of the settings file
+- **dirs** 5 - XDG config directory for settings storage
 
 ## How It Works
 
@@ -73,6 +77,26 @@ Each process entry shows:
 - **User**: Real user ID / username (the user who owns the process)
 - **Name**: Process name
 - **CPU%**: Per-core CPU usage for the last sample
+
+## Settings
+
+Settings are stored in `~/.config/simpletaskmgr/settings.toml` (or
+`$XDG_CONFIG_HOME/simpletaskmgr/settings.toml`). The file is plain TOML and safe
+to edit by hand:
+
+```toml
+show_all = false
+refresh = "normal"
+```
+
+- `show_all` — `true` shows every process on the system, `false` (default) shows
+  only the current user's
+- `refresh` — polling interval: `"fast"` (0.5s), `"normal"` (1.5s, default), or
+  `"slow"` (3s). Applied on the next start.
+
+Unknown or corrupt files fall back to the defaults; a missing file is created
+on your first change. Change settings at runtime via the **Settings** popover
+in the toolbar (with a "Reset to defaults" action).
 
 ## License
 
