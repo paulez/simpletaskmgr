@@ -16,6 +16,20 @@ use crate::{SortColumn, SortDirection};
 
 const CSS: &str = include_str!("ui.css");
 
+/// The labels of the detail pane, kept addressable by name so the pane can
+/// be updated from anywhere without tuple index bookkeeping.
+#[derive(Clone)]
+struct DetailLabels {
+    pid: gtk4::Label,
+    name: gtk4::Label,
+    uid: gtk4::Label,
+    username: gtk4::Label,
+    cpu: gtk4::Label,
+    disk_read: gtk4::Label,
+    disk_write: gtk4::Label,
+    status: gtk4::Label,
+}
+
 struct State {
     process_list: ProcessList,
     sort_column: SortColumn,
@@ -200,7 +214,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         paint_usage_chart(cr, w as f64, h as f64, &samples);
     });
 
-    // ---- List header (4 sortable columns) ------------------------------------
+    // ---- List header (6 sortable columns) ------------------------------------
     let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     header.add_css_class("list-header");
 
@@ -213,7 +227,14 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
         let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
         row_box.add_css_class("process-cell");
-        for class in ["col-pid", "col-user", "col-name", "col-cpu"] {
+        for class in [
+            "col-pid",
+            "col-user",
+            "col-name",
+            "col-cpu",
+            "col-diskread",
+            "col-diskwrite",
+        ] {
             let l = gtk4::Label::new(None);
             l.add_css_class(class);
             l.set_hexpand(true);
@@ -235,6 +256,8 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
             p.username.clone(),
             p.name.clone(),
             p.cpu_percent_str(),
+            p.disk_read_str(),
+            p.disk_write_str(),
         ];
         let box_ = li.child().expect("this row has a child");
         let mut child = box_.first_child();
@@ -275,11 +298,15 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let d_uid = mk_detail("UID: —");
     let d_user = mk_detail("Username: —");
     let d_cpu = mk_detail("CPU%: —");
+    let d_disk_read = mk_detail("Disk read: —");
+    let d_disk_write = mk_detail("Disk write: —");
     detail_box.append(&d_pid);
     detail_box.append(&d_name);
     detail_box.append(&d_uid);
     detail_box.append(&d_user);
     detail_box.append(&d_cpu);
+    detail_box.append(&d_disk_read);
+    detail_box.append(&d_disk_write);
 
     let btn_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     btn_box.add_css_class("detail-buttons");
@@ -374,6 +401,8 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         (SortColumn::Username, "User"),
         (SortColumn::Name, "Name"),
         (SortColumn::CpuPercent, "CPU%"),
+        (SortColumn::DiskRead, "Disk R"),
+        (SortColumn::DiskWrite, "Disk W"),
     ];
     let mut header_buttons: Vec<(SortColumn, gtk4::Button, gtk4::Label)> = Vec::new();
     for (col, label_text) in columns.iter() {
@@ -391,14 +420,16 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let store_r = store.clone();
     let sel_r = sel_holder.clone();
     let state_r = state.clone();
-    let dp_labels = Rc::new((
-        d_pid.clone(),
-        d_name.clone(),
-        d_uid.clone(),
-        d_user.clone(),
-        d_cpu.clone(),
-        d_status.clone(),
-    ));
+    let dp_labels = Rc::new(DetailLabels {
+        pid: d_pid.clone(),
+        name: d_name.clone(),
+        uid: d_uid.clone(),
+        username: d_user.clone(),
+        cpu: d_cpu.clone(),
+        disk_read: d_disk_read.clone(),
+        disk_write: d_disk_write.clone(),
+        status: d_status.clone(),
+    });
     let dp_r = dp_labels.clone();
     let rebuild: Rc<dyn Fn()> = Rc::new(move || {
         // Remember the currently selected pid (if any) so we can restore it
@@ -519,14 +550,14 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         let dp_k = dp_labels.clone();
         b_sighup.connect_clicked(move |_| {
             let status = state_k.borrow_mut().kill(Signal::Sighup);
-            dp_k.5.set_label(&detail_status(&status));
+            dp_k.status.set_label(&detail_status(&status));
         });
         let state_k = state.clone();
         let dp_k = dp_labels.clone();
         let rebuild_k = rebuild.clone();
         b_sigkill.connect_clicked(move |_| {
             let status = state_k.borrow_mut().kill(Signal::Sigkill);
-            dp_k.5.set_label(&detail_status(&status));
+            dp_k.status.set_label(&detail_status(&status));
             // A killed process disappears on the next refresh; force one now
             // so the row is removed immediately rather than waiting up to 1.5s.
             state_k.borrow_mut().refresh();
@@ -544,18 +575,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     window
 }
 
-fn apply_detail(
-    dp: &Rc<(
-        gtk4::Label,
-        gtk4::Label,
-        gtk4::Label,
-        gtk4::Label,
-        gtk4::Label,
-        gtk4::Label,
-    )>,
-    state: &Rc<RefCell<State>>,
-    pid: Option<i32>,
-) {
+fn apply_detail(dp: &Rc<DetailLabels>, state: &Rc<RefCell<State>>, pid: Option<i32>) {
     let item = pid.and_then(|p| {
         let s = state.borrow();
         s.find(p).cloned()
@@ -563,19 +583,34 @@ fn apply_detail(
     match item {
         Some(item) => {
             let p = &item.value;
-            dp.0.set_label(&format!("PID: {}", p.pid));
-            dp.1.set_label(&format!("Name: {}", p.name));
-            dp.2.set_label(&format!("UID: {}", p.ruid));
-            dp.3.set_label(&format!("Username: {}", p.username));
-            dp.4.set_label(&format!("CPU%: {}", p.cpu_percent_str()));
-            dp.5.set_label("");
+            dp.pid.set_label(&format!("PID: {}", p.pid));
+            dp.name.set_label(&format!("Name: {}", p.name));
+            dp.uid.set_label(&format!("UID: {}", p.ruid));
+            dp.username.set_label(&format!("Username: {}", p.username));
+            dp.cpu.set_label(&format!("CPU%: {}", p.cpu_percent_str()));
+            // An empty speed is not yet measured (first sample) or not
+            // readable — show a placeholder rather than a zero.
+            dp.disk_read.set_label(&if p.disk_read_str().is_empty() {
+                "Disk read: —".to_string()
+            } else {
+                format!("Disk read: {}", p.disk_read_str())
+            });
+            dp.disk_write.set_label(&if p.disk_write_str().is_empty() {
+                "Disk write: —".to_string()
+            } else {
+                format!("Disk write: {}", p.disk_write_str())
+            });
+            dp.status.set_label("");
         }
         None => {
-            dp.0.set_label("PID: —");
-            dp.1.set_label("Name: —");
-            dp.2.set_label("UID: —");
-            dp.3.set_label("Username: —");
-            dp.4.set_label("CPU%: —");
+            dp.pid.set_label("PID: —");
+            dp.name.set_label("Name: —");
+            dp.uid.set_label("UID: —");
+            dp.username.set_label("Username: —");
+            dp.cpu.set_label("CPU%: —");
+            dp.disk_read.set_label("Disk read: —");
+            dp.disk_write.set_label("Disk write: —");
+            dp.status.set_label("");
         }
     }
 }
@@ -586,6 +621,8 @@ fn update_header_indicators(buttons: &[(SortColumn, gtk4::Button, gtk4::Label)],
         (SortColumn::Username, "User"),
         (SortColumn::Name, "Name"),
         (SortColumn::CpuPercent, "CPU%"),
+        (SortColumn::DiskRead, "Disk R"),
+        (SortColumn::DiskWrite, "Disk W"),
     ];
     for (col, _b, lbl) in buttons.iter() {
         let title = COLUMN_TITLES

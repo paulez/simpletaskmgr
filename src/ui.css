@@ -78,6 +78,11 @@
   min-width: 70px;
 }
 
+.col-diskread,
+.col-diskwrite {
+  min-width: 80px;
+}
+
 /* ---- Detail pane --------------------------------------------------------- */
 .detail-pane {
   padding: 12px;

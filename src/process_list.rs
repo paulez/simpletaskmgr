@@ -1,4 +1,5 @@
 use crate::cpu_tracker::CpuTracker;
+use crate::io_tracker::IoTracker;
 use crate::process::{build_task_mgr_process, ProcessItem, TaskMgrProcess};
 use anyhow::{Context, Result};
 use log::{debug, warn};
@@ -11,6 +12,7 @@ pub struct ProcessList {
     /// it is limited to the current user's processes.
     pub show_all: bool,
     cpu_tracker: CpuTracker,
+    io_tracker: IoTracker,
     users_cache: UsersCache,
 }
 
@@ -25,10 +27,12 @@ impl ProcessList {
         let users_cache = UsersCache::new();
         let processes = Vec::new();
         let cpu_tracker = CpuTracker::new();
+        let io_tracker = IoTracker::new();
         Self {
             processes,
             show_all: false,
             cpu_tracker,
+            io_tracker,
             users_cache,
         }
     }
@@ -120,6 +124,21 @@ impl ProcessList {
                 let mut task_mgr_process = build_task_mgr_process(&stat, ruid, username);
                 self.cpu_tracker
                     .update_process_cpu(&mut task_mgr_process, &stat);
+                // /proc/[pid]/io is only readable for self-owned processes
+                // (EACCES otherwise), so an unknown rate is expected and shown
+                // as a blank cell.
+                match proc.io() {
+                    Ok(io) => {
+                        self.io_tracker.update_process_io(
+                            &mut task_mgr_process,
+                            io.read_bytes,
+                            io.write_bytes,
+                        );
+                    }
+                    Err(e) => {
+                        debug!("Can't read io for pid {}: {e:?}", proc.pid());
+                    }
+                }
                 Some(task_mgr_process)
             })
             .collect();
@@ -128,6 +147,8 @@ impl ProcessList {
         let live_pids: std::collections::HashSet<i32> =
             task_mgr_process_list.iter().map(|p| p.pid).collect();
         self.cpu_tracker
+            .evict_dead_processes(|pid| live_pids.contains(&pid));
+        self.io_tracker
             .evict_dead_processes(|pid| live_pids.contains(&pid));
 
         // Capture intermediate count before UID filtering
@@ -167,6 +188,18 @@ impl ProcessList {
                     a.value.cpu_percent.total_cmp(&b.value.cpu_percent)
                 }
                 crate::SortColumn::Name => a.value.name.cmp(&b.value.name),
+                // Unknown (`None`) rates sort as 0.0 so rows without I/O data
+                // sink to the bottom of an ascending sort.
+                crate::SortColumn::DiskRead => a
+                    .value
+                    .disk_read_speed
+                    .unwrap_or(0.0)
+                    .total_cmp(&b.value.disk_read_speed.unwrap_or(0.0)),
+                crate::SortColumn::DiskWrite => a
+                    .value
+                    .disk_write_speed
+                    .unwrap_or(0.0)
+                    .total_cmp(&b.value.disk_write_speed.unwrap_or(0.0)),
             }
         };
         match direction {
@@ -302,6 +335,44 @@ mod tests {
 
     fn proc(pid: i32, ruid: u32) -> TaskMgrProcess {
         TaskMgrProcess::new(format!("name{pid}"), pid, ruid, "u".to_string(), 0.0)
+    }
+
+    /// Sorting by a disk speed column tolerates unknown (`None`) rates without
+    /// panicking; `None` sorts as 0.0.
+    #[test]
+    fn test_sort_by_disk_speeds_with_none_does_not_panic() {
+        fn item(pid: i32, read: Option<f64>, write: Option<f64>) -> ProcessItem {
+            let mut p = proc(pid, 1);
+            p.disk_read_speed = read;
+            p.disk_write_speed = write;
+            ProcessItem::new(&p)
+        }
+
+        let mut list = ProcessList::new();
+        list.processes = vec![
+            item(1, None, Some(900.0)),
+            item(2, Some(50.0), None),
+            item(3, Some(10000.0), Some(20.0)),
+        ];
+
+        for col in [
+            crate::SortColumn::DiskRead,
+            crate::SortColumn::DiskWrite,
+            crate::SortColumn::DiskRead,
+            crate::SortColumn::DiskWrite,
+        ] {
+            for dir in [
+                crate::SortDirection::Ascending,
+                crate::SortDirection::Descending,
+            ] {
+                list.sort_processes(col, dir);
+            }
+        }
+
+        // Rows are intact after sorting by a column mixing Some and None.
+        let mut pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
+        pids.sort_unstable();
+        assert_eq!(pids, vec![1, 2, 3]);
     }
 
     /// With `show_all` off, only the current user's rows survive the filter.

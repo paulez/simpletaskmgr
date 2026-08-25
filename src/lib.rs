@@ -1,5 +1,6 @@
 pub mod config;
 pub mod cpu_tracker;
+pub mod io_tracker;
 pub mod metrics;
 pub mod process;
 pub mod process_list;
@@ -16,6 +17,8 @@ pub enum SortColumn {
     Username,
     CpuPercent,
     Name,
+    DiskRead,
+    DiskWrite,
 }
 
 /// Represents the sorting direction

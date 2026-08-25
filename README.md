@@ -5,12 +5,13 @@ A lightweight, interactive system process manager built with Rust that displays 
 ## Features
 
 - **Real-time Process Display**: Shows PID, Real User ID (RUID), and process name for each running process
+- **Disk I/O Activity**: Per-process disk read/write speed (bytes per second) measured between refreshes
 - **Auto-refresh**: The process list automatically updates every 1.5 seconds
-- **Sortable Columns**: Click any header (PID, User, Name, CPU%) to sort the list ascending/descending
+- **Sortable Columns**: Click any header (PID, User, Name, CPU%, Disk R, Disk W) to sort the list ascending/descending
 - **Show All Processes**: Toggle showing every process on the system, or only the current user's (the default)
 - **Modern UI**: Built with GTK 4 for a native, responsive, clean interface
 - **Linux Native**: Direct access to Linux `/proc` filesystem for accurate process information
-- **Process Detail View**: Click any process to inspect its PID, name, UID, user, and CPU usage
+- **Process Detail View**: Click any process to inspect its PID, name, UID, user, CPU usage, and disk read/write speed
 - **Signal Management**: Send SIGHUP or SIGKILL to a selected process from its detail view, with success/failure feedback
 - **Resource Usage Graph**: An always-on chart above the process list shows system-wide CPU and memory usage over time (a rolling window of ~3 minutes), updating with each refresh
 - **Persistent Settings**: Your choices (show-all filter, refresh interval) survive restarts. Open the **Settings** popover in the toolbar to change them.
@@ -66,6 +67,13 @@ saturated, and multi-threaded processes can show more than 100%. A process's fir
 sample shows its average CPU usage since it started, then switches to the
 per-interval rate.
 
+Disk read/write activity is reported per-process as a transfer speed (e.g.
+`1.5 MiB/s`), computed from the delta of the `read_bytes` and `write_bytes`
+counters in `/proc/[pid]/io` between refreshes. A process's first sample shows a
+blank cell, since a speed needs two samples. The kernel only allows this file to be
+read for a process you own (or as root), so other users' processes show blank disk
+columns — this is a Linux restriction, not an error.
+
 System-wide CPU and memory usage are sampled once per refresh and kept in a
 rolling history (the last ~120 samples). CPU% is computed from the delta in the
 aggregate `/proc/stat` `cpu` line; memory% is `(MemTotal − MemAvailable) /
@@ -77,6 +85,8 @@ Each process entry shows:
 - **User**: Real user ID / username (the user who owns the process)
 - **Name**: Process name
 - **CPU%**: Per-core CPU usage for the last sample
+- **Disk R**: Disk read speed since the last refresh (blank when not yet measured or not accessible)
+- **Disk W**: Disk write speed since the last refresh (blank when not yet measured or not accessible)
 
 ## Settings
 
