@@ -1,25 +1,12 @@
-//! Strategies for republishing the process list into the `gio::ListStore`.
+//! Refreshes the process list `gio::ListStore` in place.
 //!
-//! Two strategies are implemented so they can be run side-by-side and
-//! benchmarked against each other with `examples/liststore_bench.rs`.
-//!
-//! * [`Strategy::InPlace`] (default) — diff the old and new pid sequence and
-//!   mutate only the positions whose row changed, reusing the existing
-//!   [`ProcessRow`] `glib::Object` wherever the pid is unchanged. Because the
-//!   store is never emptied in one step, the `GtkAdjustment` is never reset,
-//!   so the scroll position is preserved automatically and the list does not
-//!   flash empty. When the order is stable (e.g. sorted by PID) the number of
-//!   store mutations is near zero; when the order is unstable (e.g. sorted by
-//!   CPU% each refresh) it approaches the cost of `RebuildAll`.
-//!
-//! * [`Strategy::RebuildAll`] — the historical behavior: remove every row and
-//!   re-append the new ones. Simplest and constant-cost, but it destroys and
-//!   rebuilds every `gtk4::ListView` row in one step (selection must be
-//!   re-resolved by pid by the caller). The scroll position of the surrounding
-//!   `ScrolledWindow` is clamped to 0 while the store is briefly empty, so the
-//!   caller is expected to save and restore the `adjustment.value` around this
-//!   call; the still-visible list can flash empty between the empty phase and
-//!   the repaint.
+//! Instead of tearing down and rebuilding the whole store (which empties it
+//! momentarily, clamps the surrounding scroll adjustment, and makes the
+//! `gtk4::ListView` flash empty), [`refresh`] diffs the old and new pid
+//! sequence and mutates only the rows whose pid, position, or data changed,
+//! reusing the existing [`ProcessRow`] `glib::Object` wherever it is
+//! unchanged. The store is never emptied in one step, so the scroll position
+//! stays stable.
 
 use std::collections::{HashMap, HashSet};
 
@@ -28,53 +15,12 @@ use crate::process_row::ProcessRow;
 use gtk4::gio::prelude::*;
 use gtk4::gio::ListStore;
 
-/// A strategy for refreshing the process list `ListStore`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Strategy {
-    /// Replace every row in the store (historical behavior).
-    RebuildAll,
-    /// Reorder / mutate only the rows whose pid changed position or
-    /// appeared / disappeared, reusing existing [`ProcessRow`] objects.
-    #[default]
-    InPlace,
-}
-
-impl Strategy {
-    /// Read the chosen strategy from the `STM_REFRESH_STRATEGY` env var.
-    ///
-    /// `rebuild` selects [`RebuildAll`]; `inplace`, `in-place`, or `in_place`
-    /// (or an unset / unrecognized value) selects [`InPlace`].
-    pub fn from_env_var() -> Self {
-        match std::env::var_os("STM_REFRESH_STRATEGY").as_deref() {
-            Some(v) if v == "rebuild" || v == "rebuild-all" || v == "rebuild_all" => {
-                Self::RebuildAll
-            }
-            _ => Self::InPlace,
-        }
-    }
-
-    /// Apply `items` to `store`, replacing its contents.
-    ///
-    /// Selection is intentionally **not** handled here — the caller keeps
-    /// its existing "restore the previous selection by pid" bookkeeping
-    /// around this call so both paths are compared on equal footing.
-    pub fn apply(&self, store: &ListStore, items: &[ProcessItem]) {
-        match self {
-            Strategy::RebuildAll => rebuild_all(store, items),
-            Strategy::InPlace => in_place(store, items),
-        }
-    }
-}
-
-/// Historical behavior: tear down every row and re-append the new ones.
-fn rebuild_all(store: &ListStore, items: &[ProcessItem]) {
-    store.remove_all();
-    for item in items {
-        store.append(&ProcessRow::from_item(item));
-    }
-}
-
-/// Diff-based update.
+/// Replace the contents of `store` with `items`, mutating it in place so the
+/// `gtk4::ListView` rendering it does not lose its rows (or its scroll
+/// position) one tick at a time.
+///
+/// Selection is intentionally **not** handled here — the caller decides what
+/// to do with it around this call.
 ///
 /// In a left-to-right walk over the target, once position `t` is fixed no
 /// later fix can touch indices < t (moves are `remove(src) + insert(t)` with
@@ -91,7 +37,7 @@ fn rebuild_all(store: &ListStore, items: &[ProcessItem]) {
 ///
 /// `order` mirrors the store contents and is mutated in lock-step with the
 /// store, so row lookups are plain `Vec` scans, not FFI round-trips.
-fn in_place(store: &ListStore, items: &[ProcessItem]) {
+pub fn refresh(store: &ListStore, items: &[ProcessItem]) {
     let old_n = store.n_items();
     let mut order: Vec<i32> = Vec::with_capacity(old_n as usize);
     let mut rows: HashMap<i32, ProcessRow> = HashMap::with_capacity(old_n as usize);
@@ -162,10 +108,9 @@ fn in_place(store: &ListStore, items: &[ProcessItem]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::TaskMgrProcess;
 
     fn item(p: i32) -> ProcessItem {
-        ProcessItem::new(&TaskMgrProcess::new(
+        ProcessItem::new(&crate::process::TaskMgrProcess::new(
             format!("name{p}"),
             p,
             1000,
@@ -196,12 +141,11 @@ mod tests {
             .collect()
     }
 
-    /// A property-style invariant: for a handful of input / target sizes, both
-    /// strategies must land the store in the same end-state, and that end-state
-    /// must equal the target. This is the single correctness check that the
-    /// in-place algorithm relies on.
+    /// A property-style invariant: for a handful of starting lengths and
+    /// target lengths, `refresh` must always land the store exactly at the
+    /// requested target — same pids, same order.
     #[test]
-    fn test_strategies_match_on_small_cases() {
+    fn test_refresh_end_state_small() {
         for start_len in [0, 1, 3, 5, 10] {
             for target_len in [0, 1, 3, 5, 10] {
                 let start: Vec<i32> = (1..=start_len).collect();
@@ -209,25 +153,18 @@ mod tests {
                 let target: Vec<i32> = (start_len - target_len + 2..=start_len + 2).collect();
                 let items: Vec<ProcessItem> = target.iter().map(|p| item(*p)).collect();
 
-                let s_a = seed(&start);
-                Strategy::RebuildAll.apply(&s_a, &items);
-                let s_b = seed(&start);
-                Strategy::InPlace.apply(&s_b, &items);
+                let s = seed(&start);
+                refresh(&s, &items);
 
-                assert_eq!(
-                    pids_of(&s_a),
-                    pids_of(&s_b),
-                    "start={start:?}, target={target:?}"
-                );
-                assert_eq!(pids_of(&s_a), target.to_vec());
+                assert_eq!(pids_of(&s), target, "start={start:?}");
             }
         }
     }
 
-    /// A randomised equivalence test: N random start lists, N random target
-    /// lists, both strategies must produce an identical, correct store.
+    /// A randomised end-state test: N random start lists, N random target
+    /// lists, `refresh` must always produce the exact target store.
     #[test]
-    fn test_strategies_match_on_random_inputs() {
+    fn test_refresh_end_state_random() {
         let mut state: u32 = 0x9E37_79B9;
         let mut next = move || {
             state = state
@@ -251,29 +188,23 @@ mod tests {
             let target: Vec<i32> = (1 + offset..=target_len + offset).collect();
 
             let items: Vec<ProcessItem> = target.iter().map(|p| item(*p)).collect();
-            let expected: Vec<i32> = target.to_vec();
 
-            let s_a = seed(&start);
-            Strategy::RebuildAll.apply(&s_a, &items);
-            let s_b = seed(&start);
-            Strategy::InPlace.apply(&s_b, &items);
+            let s = seed(&start);
+            refresh(&s, &items);
 
             assert_eq!(
-                pids_of(&s_a),
-                pids_of(&s_b),
+                pids_of(&s),
+                target,
                 "start_len={start_len}, target_len={target_len}, offset={offset}"
             );
-            assert_eq!(pids_of(&s_a), expected);
         }
     }
 
-    /// Sanity: the two strategies must be interchangeable — applying one and
-    /// then the other to the same store must converge to the same end-state.
     /// A real refresh changes the *data* inside every row (CPU%, I/O rates)
-    /// even when the order is stable. InPlace must therefore update the
+    /// even when the order is stable. `refresh` must therefore update the
     /// row's data in place — not just preserve it.
     #[test]
-    fn test_in_place_refreshes_row_data() {
+    fn test_refresh_updates_row_data() {
         let s = seed(&[1, 2, 3]);
 
         // Same ordering, different data.
@@ -283,7 +214,7 @@ mod tests {
         it2.value.disk_write_speed = Some(6543.0);
         let new_items = vec![item(1), it2, item(3)];
 
-        Strategy::InPlace.apply(&s, &new_items);
+        refresh(&s, &new_items);
         assert_eq!(pids_of(&s), vec![1, 2, 3], "order must be preserved");
 
         let row2 = s
@@ -295,36 +226,32 @@ mod tests {
         assert_eq!(row2.item().value.disk_read_speed, Some(123456.0));
     }
 
+    /// Applying `refresh` twice in a row must converge to the final target —
+    /// the second refresh operates on the (already fresh) row objects of the
+    /// first.
     #[test]
-    fn test_strategies_compose() {
+    fn test_refresh_twice_converges() {
         let s = seed(&[5, 3, 8, 1, 4]);
         let a: Vec<ProcessItem> = vec![item(2), item(6), item(8), item(3), item(1)];
-        Strategy::RebuildAll.apply(&s, &a);
+        refresh(&s, &a);
         let b: Vec<ProcessItem> = vec![item(7), item(9), item(8), item(3), item(1)];
-        Strategy::InPlace.apply(&s, &b);
+        refresh(&s, &b);
         assert_eq!(pids_of(&s), vec![7, 9, 8, 3, 1]);
     }
 
     #[test]
-    fn test_rebuild_all_replaces() {
+    fn test_refresh_reorder_only() {
         let s = seed(&[1, 2, 3]);
-        Strategy::RebuildAll.apply(&s, [item(4), item(5)].as_slice());
-        assert_eq!(pids_of(&s), vec![4, 5]);
-    }
-
-    #[test]
-    fn test_in_place_reorder_only() {
-        let s = seed(&[1, 2, 3]);
-        Strategy::InPlace.apply(&s, [item(3), item(1), item(2)].as_slice());
+        refresh(&s, [item(3), item(1), item(2)].as_slice());
         assert_eq!(pids_of(&s), vec![3, 1, 2]);
     }
 
     #[test]
-    fn test_in_place_shrink_then_grow() {
+    fn test_refresh_shrink_then_grow() {
         let s = seed(&[1, 2, 3, 4]);
-        Strategy::InPlace.apply(&s, [item(4)].as_slice());
+        refresh(&s, [item(4)].as_slice());
         assert_eq!(pids_of(&s), vec![4]);
-        Strategy::InPlace.apply(&s, [item(4), item(5), item(6)].as_slice());
+        refresh(&s, [item(4), item(5), item(6)].as_slice());
         assert_eq!(pids_of(&s), vec![4, 5, 6]);
     }
 }

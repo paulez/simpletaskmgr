@@ -9,7 +9,7 @@ use crate::metrics::SystemMetrics;
 use crate::process::ProcessItem;
 use crate::process_list::ProcessList;
 use crate::process_row::ProcessRow;
-use crate::refresh_strategy::Strategy;
+use crate::refresh_list;
 use crate::settings::{settings_path, UserSettings};
 use crate::signal::Signal;
 use crate::usage_graph::paint_usage_chart;
@@ -40,10 +40,6 @@ struct State {
     settings: UserSettings,
     save_path: std::path::PathBuf,
     timer_id: Cell<Option<glib::SourceId>>,
-    /// Which strategy republishes the process list into its `ListStore` on
-    /// every refresh. Read from `STM_REFRESH_STRATEGY` (default: `InPlace`;
-    /// set it to `rebuild` to opt into the historical rebuild-everything path).
-    strategy: Strategy,
 }
 
 #[derive(Debug)]
@@ -77,7 +73,6 @@ impl State {
             settings,
             save_path: path,
             timer_id: Cell::new(None),
-            strategy: Strategy::from_env_var(),
         }
     }
 
@@ -439,43 +434,58 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let dp_r = dp_labels.clone();
     let adj_r = list_scroll.vadjustment();
     let rebuild: Rc<dyn Fn()> = Rc::new(move || {
-        // Remember the currently selected pid (if any) so we can restore it
-        // after the store is republished.
-        let prev_sel: Option<i32> = sel_r
+        // Remember the currently selected pid (if any) so the highlight can be
+        // re-pinned to the same process after the refresh, in case GTK
+        // dropped or displaced it while mutating the store.
+        let prev_pid: Option<i32> = sel_r
             .selected_item()
             .as_ref()
             .and_then(|o| o.downcast_ref::<ProcessRow>())
             .map(|r| r.item().pid);
         let items = state_r.borrow().process_list.processes.clone();
-        let strategy = state_r.borrow().strategy;
 
-        // The rebuild-everything path briefly empties the store, which clamps
-        // the scrolled window's adjustment to 0. Save the scroll offset and
-        // restore it *after* GTK re-allocated the rows (so `upper` is up to
-        // date; it is recomputed during the next main-loop iteration) — the
-        // adjustment auto-clamps itself to the valid range.
-        let saved_scroll = matches!(strategy, Strategy::RebuildAll).then(|| adj_r.value());
+        // A refresh changes the store's size, and `GtkAdjustment` clamps
+        // `value` to the valid range whenever `upper`/`page` change at layout
+        // time (which is *after* this synchronous call returns). Save the
+        // current offset, and on the next main-loop tick — once GTK has
+        // re-allocated the rows and applied the clamp — restore it if it
+        // drifted. The adjustment auto-clamps to the valid range anyway.
+        let saved = adj_r.value();
 
-        strategy.apply(&store_r, &items);
+        refresh_list::refresh(&store_r, &items);
 
-        if let Some(saved) = saved_scroll {
-            let adj_idle = adj_r.clone();
-            glib::idle_add_local(move || {
-                adj_idle.set_value(saved);
-                glib::ControlFlow::Break
+        let adj_idle = adj_r.clone();
+        let saved_idle = saved;
+        glib::idle_add_local(move || {
+            if (adj_idle.value() - saved_idle).abs() > 0.5 {
+                adj_idle.set_value(saved_idle);
+            }
+            glib::ControlFlow::Break
+        });
+
+        if let Some(p) = prev_pid {
+            let still_selected = sel_r.selected_item().as_ref().is_some_and(|o| {
+                o.downcast_ref::<ProcessRow>()
+                    .is_some_and(|r| r.item().pid == p)
             });
-        }
-
-        if let Some(p) = prev_sel {
-            for i in 0..store_r.n_items() {
-                if let Some(row) = store_r
-                    .item(i)
-                    .and_then(|o| o.downcast::<ProcessRow>().ok())
-                {
-                    if row.item().pid == p {
-                        sel_r.set_selected(i);
-                        break;
-                    }
+            if !still_selected {
+                if let Some(i) = (0..store_r.n_items()).find(|i| {
+                    store_r
+                        .item(*i)
+                        .and_then(|o| o.downcast::<ProcessRow>().ok())
+                        .is_some_and(|row| row.item().pid == p)
+                }) {
+                    // The row's position changed (or its object was
+                    // replaced) and the highlight dropped — re-pin it. We
+                    // deliberately skip the work when the highlight is still
+                    // on the same pid: re-invoking `set_selected` on every
+                    // refresh would fire the `selected` change and make the
+                    // `ListView` re-scroll the row into view, which is what
+                    // made the list jump around. (If the *position* of the
+                    // selected row changes, we do re-pin it here and accept
+                    // the one-time scroll as the price of keeping the
+                    // highlight glued to the process.)
+                    sel_r.set_selected(i);
                 }
             }
         }
