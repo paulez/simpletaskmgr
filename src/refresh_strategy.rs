@@ -3,21 +3,23 @@
 //! Two strategies are implemented so they can be run side-by-side and
 //! benchmarked against each other with `examples/liststore_bench.rs`.
 //!
-//! * [`Strategy::RebuildAll`] — the historical behavior: remove every row
-//!   and re-append the new ones. Simplest, but it destroys and rebuilds every
-//!   `gtk4::ListView` row (selection must be re-resolved by pid by the caller).
-//!   The scroll position of the surrounding `ScrolledWindow` is clamped to 0
-//!   while the store is briefly empty, so the caller is expected to save and
-//!   restore the `adjustment.value` around this call to keep it stable.
+//! * [`Strategy::InPlace`] (default) — diff the old and new pid sequence and
+//!   mutate only the positions whose row changed, reusing the existing
+//!   [`ProcessRow`] `glib::Object` wherever the pid is unchanged. Because the
+//!   store is never emptied in one step, the `GtkAdjustment` is never reset,
+//!   so the scroll position is preserved automatically and the list does not
+//!   flash empty. When the order is stable (e.g. sorted by PID) the number of
+//!   store mutations is near zero; when the order is unstable (e.g. sorted by
+//!   CPU% each refresh) it approaches the cost of `RebuildAll`.
 //!
-//! * [`Strategy::InPlace`] — diff the old and new pid sequence and mutate
-//!   only the positions whose row changed, reusing the existing [`ProcessRow`]
-//!   `glib::Object` wherever the pid is unchanged. Because the store is never
-//!   emptied in one step, the `GtkAdjustment` is never reset and the scroll
-//!   position is preserved automatically. When the order is stable
-//!   (e.g. sorted by PID) the number of store mutations is near zero; when
-//!   the order is unstable (e.g. sorted by CPU% each refresh) it approaches
-//!   the cost of `RebuildAll`.
+//! * [`Strategy::RebuildAll`] — the historical behavior: remove every row and
+//!   re-append the new ones. Simplest and constant-cost, but it destroys and
+//!   rebuilds every `gtk4::ListView` row in one step (selection must be
+//!   re-resolved by pid by the caller). The scroll position of the surrounding
+//!   `ScrolledWindow` is clamped to 0 while the store is briefly empty, so the
+//!   caller is expected to save and restore the `adjustment.value` around this
+//!   call; the still-visible list can flash empty between the empty phase and
+//!   the repaint.
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,25 +32,24 @@ use gtk4::gio::ListStore;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Strategy {
     /// Replace every row in the store (historical behavior).
-    #[default]
     RebuildAll,
     /// Reorder / mutate only the rows whose pid changed position or
     /// appeared / disappeared, reusing existing [`ProcessRow`] objects.
+    #[default]
     InPlace,
 }
 
 impl Strategy {
     /// Read the chosen strategy from the `STM_REFRESH_STRATEGY` env var.
     ///
-    /// `inplace`, `in-place`, or `in_place` selects [`InPlace`];
-    /// `rebuild` (or an unset value) selects [`RebuildAll`].
-    ///
-    /// An unrecognized value falls back to [`RebuildAll`] so a typo in the
-    /// environment does not silently enable the experimental path.
+    /// `rebuild` selects [`RebuildAll`]; `inplace`, `in-place`, or `in_place`
+    /// (or an unset / unrecognized value) selects [`InPlace`].
     pub fn from_env_var() -> Self {
         match std::env::var_os("STM_REFRESH_STRATEGY").as_deref() {
-            Some(v) if v == "inplace" || v == "in-place" || v == "in_place" => Self::InPlace,
-            _ => Self::RebuildAll,
+            Some(v) if v == "rebuild" || v == "rebuild-all" || v == "rebuild_all" => {
+                Self::RebuildAll
+            }
+            _ => Self::InPlace,
         }
     }
 

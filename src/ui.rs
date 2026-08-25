@@ -41,7 +41,8 @@ struct State {
     save_path: std::path::PathBuf,
     timer_id: Cell<Option<glib::SourceId>>,
     /// Which strategy republishes the process list into its `ListStore` on
-    /// every refresh. Read from `STM_REFRESH_STRATEGY` (default: `RebuildAll`).
+    /// every refresh. Read from `STM_REFRESH_STRATEGY` (default: `InPlace`;
+    /// set it to `rebuild` to opt into the historical rebuild-everything path).
     strategy: Strategy,
 }
 

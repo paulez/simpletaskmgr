@@ -114,11 +114,12 @@ immediately from the point of the change.
 The process list can be refreshed with one of two `ListStore` strategies,
 selected at startup via the `STM_REFRESH_STRATEGY` environment variable:
 
-- `rebuild` (default) — remove every row and append the new set. Fast and
-  predictable when most rows change.
-- `inplace` — rows whose pid, position, and data are all unchanged are kept and
-  reused; everything else is replaced. Cheap when the list is mostly stable,
-  more event churn when most rows change.
+- `inplace` (default) — rows whose pid, position, and data are all unchanged
+  are kept and reused; everything else is replaced. The store is never emptied,
+  so the scroll position stays put and the list does not flash empty.
+- `rebuild` — remove every row and append the new set. Constant-cost, but the
+  list briefly shows no rows while it is cleared and refilled (a visible flicker
+  on every refresh).
 
 Compare them with the built-in benchmark (a display is optional; one is
 recommended for the UI-level section):
