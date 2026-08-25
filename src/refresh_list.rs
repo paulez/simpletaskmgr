@@ -3,10 +3,18 @@
 //! Instead of tearing down and rebuilding the whole store (which empties it
 //! momentarily, clamps the surrounding scroll adjustment, and makes the
 //! `gtk4::ListView` flash empty), [`refresh`] diffs the old and new pid
-//! sequence and mutates only the rows whose pid, position, or data changed,
-//! reusing the existing [`ProcessRow`] `glib::Object` wherever it is
-//! unchanged. The store is never emptied in one step, so the scroll position
-//! stays stable.
+//! sequence and mutates only the rows whose pid, position, or data changed.
+//!
+//! When a row's position changes but its data is identical, [`refresh`]
+//! reinserts the **same** [`ProcessRow`] `glib::Object` into the new slot.
+//! GTK's `GtkListItemManager` pools widgets by model-item pointer, so it
+//! recycles the existing `GtkListItem` widget instead of recreating one —
+//! no blank flash, no label re-layout.
+//!
+//! When data has changed, a fresh [`ProcessRow`] is required because
+//! `GtkListItem::bind_to_model` early-returns when re-bound to the same
+//! model object; a new pointer forces the `bind` signal to fire and the
+//! labels to update.
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,10 +38,12 @@ use gtk4::gio::ListStore;
 ///
 /// Rows whose pid **and data** are unchanged at their current position are
 /// left completely untouched — zero store mutations, zero widget churn for
-/// them. Every other target row is satisfied by a fresh [`ProcessRow`]:
+/// them. A row that only moved (data unchanged) keeps its existing
+/// [`ProcessRow`] object across the reinsert so GTK recycles its widget.
+/// A row whose data changed is satisfied by a fresh [`ProcessRow`]:
 /// `gtk4::ListItem` deliberately skips its `bind` signal when it is rebound
-/// to the *same* model object, so a row whose data changed must be supplied
-/// as a new object for the `ListView` to re-render its labels.
+/// to the *same* model object, so a data change must come with a new
+/// object for the `ListView` to re-render its labels.
 ///
 /// `order` mirrors the store contents and is mutated in lock-step with the
 /// store, so row lookups are plain `Vec` scans, not FFI round-trips.
@@ -81,16 +91,24 @@ pub fn refresh(store: &ListStore, items: &[ProcessItem]) {
             .position(|p| *p == pid)
             .map(|rel| t + rel)
         {
-            // A kept row, at or after position `t`, whose data must refresh:
-            // drop it and put a fresh object in its slot. gtk4 does not
-            // rebind an item that still points at the *same* model object, so
-            // the object itself has to change.
+            let same_object = rows[&pid].has_value(&item.value);
+            let row = if same_object {
+                // A pure move (data identical): reuse the *same* object.
+                // GTK's row manager pools widgets by model-item pointer, so
+                // it recycles the existing row widget here instead of
+                // creating a new one — no blank flash and no rebind.
+                rows.remove(&pid).expect("row for a kept pid")
+            } else {
+                // Data changed: gtk4 does not rebind an item that still
+                // points at the *same* model object, so the object itself
+                // has to change to force the `bind` signal to update.
+                ProcessRow::from_item(item)
+            };
             store.remove(src as u32);
-            let fresh = ProcessRow::from_item(item);
-            store.insert(t as u32, &fresh);
+            store.insert(t as u32, &row);
             order.remove(src);
             order.insert(t, pid);
-            rows.insert(pid, fresh);
+            rows.insert(pid, row);
         } else {
             // A brand-new pid: insert a fresh row here (or at the tail).
             let fresh = ProcessRow::from_item(item);
@@ -224,6 +242,97 @@ mod tests {
             .expect("a ProcessRow");
         assert_eq!(row2.item().value.cpu_percent, 42.0, "row data must refresh");
         assert_eq!(row2.item().value.disk_read_speed, Some(123456.0));
+    }
+
+    /// Moving rows around with identical data must **reuse the existing
+    /// row objects** (pointer equality) so GTK can recycle their widgets
+    /// instead of recreating them — the anti-flicker contract.
+    #[test]
+    fn test_refresh_pure_move_reuses_row_objects() {
+        let pids = [1, 2, 3];
+        let s = seed(&pids);
+        // Capture each pid's pre-refresh row object (by pointer).
+        let orig: HashMap<i32, usize> = pids
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                (
+                    *p,
+                    s.item(i as u32)
+                        .expect("row present")
+                        .downcast::<ProcessRow>()
+                        .expect("a ProcessRow")
+                        .as_ptr() as usize,
+                )
+            })
+            .collect();
+
+        // Reverse the order (a pure move) with unchanged data.
+        let items: Vec<ProcessItem> = [3, 2, 1].iter().map(|p| item(*p)).collect();
+        refresh(&s, &items);
+        assert_eq!(pids_of(&s), vec![3, 2, 1]);
+
+        let after: HashMap<i32, usize> = (0..s.n_items())
+            .map(|i| {
+                let r = s
+                    .item(i)
+                    .expect("row present")
+                    .downcast::<ProcessRow>()
+                    .expect("a ProcessRow");
+                (r.item().pid, r.as_ptr() as usize)
+            })
+            .collect();
+        for (pid, before) in &orig {
+            assert!(
+                after[pid] == *before,
+                "pid {pid} moved with unchanged data must keep its row object"
+            );
+        }
+    }
+
+    /// A row whose data changed must be a **fresh object** (so the `bind`
+    /// signal re-fires), while a row that only moved with unchanged data
+    /// keeps its object.
+    #[test]
+    fn test_refresh_data_change_gets_new_row_object_move_keeps_it() {
+        let s = seed(&[1, 2, 3]);
+        let before = |s: &ListStore, i: u32| {
+            s.item(i)
+                .expect("row present")
+                .downcast::<ProcessRow>()
+                .expect("a ProcessRow")
+                .as_ptr() as usize
+        };
+        let p2_before = before(&s, 1);
+        let p3_before = before(&s, 2);
+
+        // Reorder (2,3 swap) + change pid 2's data; drop pid 1.
+        let mut it2 = item(2);
+        it2.value.cpu_percent = 99.0;
+        let items = vec![it2, item(3)];
+        refresh(&s, &items);
+        assert_eq!(pids_of(&s), vec![2, 3]);
+
+        let p2_after = before(&s, 0);
+        let p3_after = before(&s, 1);
+        let row2 = s
+            .item(0)
+            .expect("row present")
+            .downcast::<ProcessRow>()
+            .expect("a ProcessRow");
+        assert_eq!(
+            row2.item().value.cpu_percent,
+            99.0,
+            "changed data must land"
+        );
+        assert!(
+            p2_after != p2_before,
+            "a data change must come with a fresh row object (rebind)"
+        );
+        assert!(
+            p3_after == p3_before,
+            "a pure move must keep the existing row object (widget reuse)"
+        );
     }
 
     /// Applying `refresh` twice in a row must converge to the final target —
