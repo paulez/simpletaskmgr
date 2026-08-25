@@ -9,6 +9,7 @@ use crate::metrics::SystemMetrics;
 use crate::process::ProcessItem;
 use crate::process_list::ProcessList;
 use crate::process_row::ProcessRow;
+use crate::refresh_strategy::Strategy;
 use crate::settings::{settings_path, UserSettings};
 use crate::signal::Signal;
 use crate::usage_graph::paint_usage_chart;
@@ -39,6 +40,9 @@ struct State {
     settings: UserSettings,
     save_path: std::path::PathBuf,
     timer_id: Cell<Option<glib::SourceId>>,
+    /// Which strategy republishes the process list into its `ListStore` on
+    /// every refresh. Read from `STM_REFRESH_STRATEGY` (default: `RebuildAll`).
+    strategy: Strategy,
 }
 
 #[derive(Debug)]
@@ -72,6 +76,7 @@ impl State {
             settings,
             save_path: path,
             timer_id: Cell::new(None),
+            strategy: Strategy::from_env_var(),
         }
     }
 
@@ -431,6 +436,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         status: d_status.clone(),
     });
     let dp_r = dp_labels.clone();
+    let adj_r = list_scroll.vadjustment();
     let rebuild: Rc<dyn Fn()> = Rc::new(move || {
         // Remember the currently selected pid (if any) so we can restore it
         // after the store is republished.
@@ -440,19 +446,37 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
             .and_then(|o| o.downcast_ref::<ProcessRow>())
             .map(|r| r.item().pid);
         let items = state_r.borrow().process_list.processes.clone();
+        let strategy = state_r.borrow().strategy;
 
-        store_r.remove_all();
-        let mut next_sel_idx: Option<u32> = None;
-        for (i, item) in items.iter().enumerate() {
-            if let Some(p) = prev_sel {
-                if item.pid == p && next_sel_idx.is_none() {
-                    next_sel_idx = Some(i as u32);
+        // The rebuild-everything path briefly empties the store, which clamps
+        // the scrolled window's adjustment to 0. Save the scroll offset and
+        // restore it *after* GTK re-allocated the rows (so `upper` is up to
+        // date; it is recomputed during the next main-loop iteration) — the
+        // adjustment auto-clamps itself to the valid range.
+        let saved_scroll = matches!(strategy, Strategy::RebuildAll).then(|| adj_r.value());
+
+        strategy.apply(&store_r, &items);
+
+        if let Some(saved) = saved_scroll {
+            let adj_idle = adj_r.clone();
+            glib::idle_add_local(move || {
+                adj_idle.set_value(saved);
+                glib::ControlFlow::Break
+            });
+        }
+
+        if let Some(p) = prev_sel {
+            for i in 0..store_r.n_items() {
+                if let Some(row) = store_r
+                    .item(i)
+                    .and_then(|o| o.downcast::<ProcessRow>().ok())
+                {
+                    if row.item().pid == p {
+                        sel_r.set_selected(i);
+                        break;
+                    }
                 }
             }
-            store_r.append(&ProcessRow::from_item(item));
-        }
-        if let Some(idx) = next_sel_idx {
-            sel_r.set_selected(idx);
         }
         apply_detail(&dp_r, &state_r, state_r.borrow().selected_pid);
     });

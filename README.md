@@ -109,6 +109,25 @@ on your first change. Change settings at runtime via the **Settings** popover
 in the toolbar (with a "Reset to defaults" action); both settings apply
 immediately from the point of the change.
 
+### Refresh strategy (advanced)
+
+The process list can be refreshed with one of two `ListStore` strategies,
+selected at startup via the `STM_REFRESH_STRATEGY` environment variable:
+
+- `rebuild` (default) — remove every row and append the new set. Fast and
+  predictable when most rows change.
+- `inplace` — rows whose pid, position, and data are all unchanged are kept and
+  reused; everything else is replaced. Cheap when the list is mostly stable,
+  more event churn when most rows change.
+
+Compare them with the built-in benchmark (a display is optional; one is
+recommended for the UI-level section):
+
+```sh
+xvfb-run -a cargo run --release --example liststore_bench
+BENCH_ROWS=2000 BENCH_ITERS=50 ./target/release/examples/liststore_bench
+```
+
 ## License
 
 This project is open source and available under the same license as the Rust toolchain.

@@ -53,6 +53,12 @@ impl ProcessRow {
     pub fn set_item(&self, item: &ProcessItem) {
         *imp::ProcessRow::from_obj(self).data.borrow_mut() = item.clone();
     }
+
+    /// Whether the row's current data is exactly `value` (a no-clone
+    /// comparison, for refresh bookkeeping).
+    pub fn has_value(&self, value: &crate::process::TaskMgrProcess) -> bool {
+        imp::ProcessRow::from_obj(self).data.borrow().value == *value
+    }
 }
 
 #[cfg(test)]
