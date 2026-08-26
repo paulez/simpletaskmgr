@@ -1,4 +1,5 @@
 use glib::subclass::prelude::*;
+use gtk4::{prelude::*, Box, Label};
 
 use crate::process::ProcessItem;
 
@@ -12,6 +13,7 @@ mod imp {
     #[derive(Default)]
     pub struct ProcessRow {
         pub data: RefCell<ProcessItem>,
+        pub labels: RefCell<Option<Vec<gtk4::Label>>>,
     }
 
     #[glib::object_subclass]
@@ -33,7 +35,28 @@ glib::wrapper! {
     /// Used as the item type of the `gio::ListStore` backing the process
     /// `ListView`, so each row can be selected and read back via
     /// `SingleSelection::selected_item`.
+    ///
+    /// A row object is created **once per process** and then mutated in place
+    /// for its whole life: [`ProcessRow::set_item`] updates the data and
+    /// repaints the row's live cell labels (when on screen) instead of
+    /// replacing the object, so a `gtk4::ListView` refresh that only moves or
+    /// re-numbers a process recycles the existing row widget rather than
+    /// rebuilding it (which is what causes the blank-flash flicker).
     pub struct ProcessRow(ObjectSubclass<imp::ProcessRow>);
+}
+
+/// The cell labels of one row, in UI order (`pid, username, name, cpu,
+/// read, write`), as text for a `ProcessItem`.
+fn displayed(item: &ProcessItem) -> [String; 6] {
+    let p = &item.value;
+    [
+        p.pid.to_string(),
+        p.username.clone(),
+        p.name.clone(),
+        p.cpu_percent_str(),
+        p.disk_read_str(),
+        p.disk_write_str(),
+    ]
 }
 
 impl ProcessRow {
@@ -49,15 +72,50 @@ impl ProcessRow {
         imp::ProcessRow::from_obj(self).data.borrow().clone()
     }
 
-    /// The latest data snapshot for this row, replacing the old one.
-    pub fn set_item(&self, item: &ProcessItem) {
-        *imp::ProcessRow::from_obj(self).data.borrow_mut() = item.clone();
+    /// Whether the row's current data is exactly equal to `item` (a no-clone
+    /// comparison, for refresh bookkeeping).
+    pub fn has_value(&self, item: &crate::process::ProcessItem) -> bool {
+        *imp::ProcessRow::from_obj(self).data.borrow() == *item
     }
 
-    /// Whether the row's current data is exactly `value` (a no-clone
-    /// comparison, for refresh bookkeeping).
-    pub fn has_value(&self, value: &crate::process::TaskMgrProcess) -> bool {
-        imp::ProcessRow::from_obj(self).data.borrow().value == *value
+    /// Replaces this row's data with a fresh copy. If the data actually
+    /// changed and the row's cell labels are currently on screen, they are
+    /// re-texted in place — no object replacement, no row-widget rebuild.
+    pub fn set_item(&self, item: &ProcessItem) {
+        let imp = imp::ProcessRow::from_obj(self);
+        if *imp.data.borrow() == *item {
+            return;
+        }
+        *imp.data.borrow_mut() = item.clone();
+        if let Some(labels) = imp.labels.borrow().as_ref() {
+            for (label, text) in labels.iter().zip(displayed(item)) {
+                label.set_label(&text);
+            }
+        }
+    }
+
+    /// Records the row's on-screen cell labels (in the UI order
+    /// `pid, username, name, cpu, read, write`) and (re)applies the current
+    /// data to them. Called by the factory whenever this row's widget is
+    /// (re)bound, and again if the row is moved while data has also changed.
+    pub fn bind_labels(&self, box_: Box) {
+        let imp = imp::ProcessRow::from_obj(self);
+        let mut labels = Vec::new();
+        let mut cur = box_.first_child();
+        for _ in 0..6 {
+            let next = cur.as_ref().and_then(|w| w.next_sibling());
+            if let Some(widget) = cur {
+                if let Ok(label) = widget.downcast::<Label>() {
+                    labels.push(label);
+                }
+            }
+            cur = next;
+        }
+        let item = imp.data.borrow().clone();
+        for (label, text) in labels.iter().zip(displayed(&item)) {
+            label.set_label(&text);
+        }
+        *imp.labels.borrow_mut() = Some(labels);
     }
 }
 
@@ -83,5 +141,18 @@ mod tests {
         let back = r.item();
         assert_eq!(back.pid, 123);
         assert_eq!(back, i);
+    }
+
+    #[test]
+    fn test_process_row_set_item_updates_in_place() {
+        let r = ProcessRow::from_item(&item(9));
+        assert_eq!(r.item().value.cpu_percent, 1.0);
+        let mut i = item(9);
+        i.value.cpu_percent = 42.5;
+        r.set_item(&i);
+        assert_eq!(r.item().value.cpu_percent, 42.5);
+        // Setting an equal item is a no-op that does not change anything.
+        r.set_item(&i);
+        assert_eq!(r.item(), i);
     }
 }

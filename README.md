@@ -6,7 +6,7 @@ A lightweight, interactive system process manager built with Rust that displays 
 
 - **Real-time Process Display**: Shows PID, Real User ID (RUID), and process name for each running process
 - **Disk I/O Activity**: Per-process disk read/write speed (bytes per second) measured between refreshes
-- **Auto-refresh**: The process list automatically updates every 1.5 seconds
+- **Auto-refresh**: The process list automatically updates every 1.5 seconds, in place and flicker-free (rows are re-used and re-texted, not rebuilt)
 - **Sortable Columns**: Click any header (PID, User, Name, CPU%, Disk R, Disk W) to sort the list ascending/descending
 - **Show All Processes**: Toggle showing every process on the system, or only the current user's (the default)
 - **Modern UI**: Built with GTK 4 for a native, responsive, clean interface
@@ -58,9 +58,17 @@ The application reads process information directly from the Linux `/proc`
 filesystem using the `procfs` crate and displays it in a GTK 4 `ListView`
 backed by a `gio::ListStore` and a `SingleSelection` model. Each row is a
 `glib::Object` subclass (`ProcessRow`, see `src/process_row.rs`) that owns the
-current `ProcessItem` snapshot for one PID. A `glib::timeout_add_local` timer
-re-reads `/proc` every 1.5 seconds and republishes the store (clearing and
-re-adding rows), preserving the row's selection by PID.
+current `ProcessItem` snapshot for one PID.
+
+A `glib::timeout_add_local` timer re-reads `/proc` on each refresh and updates
+the store **in place** (`src/refresh_list.rs`): it diffs the old and new PID
+sequence and only touches the rows that actually changed. Each process keeps
+the same `ProcessRow` object for its whole life — a changed value is re-written
+on that same object (and its on-screen labels re-texted in place) and a moved
+row is re-inserted as the *same* object, so GTK recycles the existing row
+widget instead of rebuilding one. This avoids the blank-flash flicker you'd get
+from tearing the store down and re-adding rows, and it preserves both the
+selection (by PID) and the scroll position across refreshes.
 
 CPU usage is reported in `top`-style per-core percentages: 100% means one core fully
 saturated, and multi-threaded processes can show more than 100%. A process's first

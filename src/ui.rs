@@ -251,26 +251,16 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
             .expect("a row object")
             .downcast::<ProcessRow>()
             .expect("a ProcessRow");
-        let p = &row.item().value;
-        let texts = [
-            p.pid.to_string(),
-            p.username.clone(),
-            p.name.clone(),
-            p.cpu_percent_str(),
-            p.disk_read_str(),
-            p.disk_write_str(),
-        ];
-        let box_ = li.child().expect("this row has a child");
-        let mut child = box_.first_child();
-        for text in texts {
-            let next = child.as_ref().and_then(|w| w.next_sibling());
-            if let Some(widget) = child {
-                if let Ok(label) = widget.downcast::<gtk4::Label>() {
-                    label.set_label(&text);
-                }
-            }
-            child = next;
-        }
+        // Bind this row to the cell labels the widget now exposes and apply
+        // its current data. When the row is later re-texted in place by
+        // `refresh` this is what makes the labels follow (the row remembers
+        // these widgets).
+        let child = li
+            .child()
+            .expect("this row has a child")
+            .downcast::<gtk4::Box>()
+            .expect("this row's child is a box");
+        row.bind_labels(child);
     });
     let list_view = gtk4::ListView::new(Some(selection), Some(factory));
     list_view.add_css_class("process-list");
