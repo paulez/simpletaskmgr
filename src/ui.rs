@@ -17,10 +17,13 @@ use crate::{SortColumn, SortDirection};
 
 const CSS: &str = include_str!("ui.css");
 
-/// The labels of the detail pane, kept addressable by name so the pane can
-/// be updated from anywhere without tuple index bookkeeping.
+/// The widgets of the detail pane, kept addressable by name so the pane can
+/// be updated from anywhere without tuple index bookkeeping. `pane` is the
+/// `ScrolledWindow` carrying the whole pane so it can be hidden to let the
+/// list expand to full width when nothing is selected.
 #[derive(Clone)]
 struct DetailLabels {
+    pane: gtk4::ScrolledWindow,
     pid: gtk4::Label,
     name: gtk4::Label,
     uid: gtk4::Label,
@@ -222,6 +225,14 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // ---- Process list --------------------------------------------------------
     let store = gtk4::gio::ListStore::new::<ProcessRow>();
     let selection = gtk4::SingleSelection::new(Some(store.clone()));
+    // Allow the user to click a selected row to deselect it again (a
+    // `SingleSelection` forbids this by default).
+    selection.set_can_unselect(true);
+    // `GtkSingleSelection` autoselects the first row by default — so a row is
+    // already selected when the list is first populated, and any deselect
+    // immediately re-selects one. Disable it so launching shows no selection
+    // and clicking the highlighted row truly clears it.
+    selection.set_autoselect(false);
     let sel_holder = selection.clone();
     let factory = gtk4::SignalListItemFactory::new();
     factory.connect_setup(move |_f, li| {
@@ -324,6 +335,9 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     detail_scroll.set_child(Some(&detail_box));
     detail_scroll.set_hexpand(true);
     detail_scroll.set_vexpand(true);
+    // Nothing is selected at launch — start with the pane hidden so the
+    // list uses the full width (selection re-shows it via `apply_detail`).
+    detail_scroll.set_visible(false);
 
     // ---- Body row (list | detail) ---------------------------------------------
     let body = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
@@ -412,6 +426,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let sel_r = sel_holder.clone();
     let state_r = state.clone();
     let dp_labels = Rc::new(DetailLabels {
+        pane: detail_scroll.clone(),
         pid: d_pid.clone(),
         name: d_name.clone(),
         uid: d_uid.clone(),
@@ -607,6 +622,7 @@ fn apply_detail(dp: &Rc<DetailLabels>, state: &Rc<RefCell<State>>, pid: Option<i
     });
     match item {
         Some(item) => {
+            dp.pane.set_visible(true);
             let p = &item.value;
             dp.pid.set_label(&format!("PID: {}", p.pid));
             dp.name.set_label(&format!("Name: {}", p.name));
@@ -628,6 +644,9 @@ fn apply_detail(dp: &Rc<DetailLabels>, state: &Rc<RefCell<State>>, pid: Option<i
             dp.status.set_label("");
         }
         None => {
+            // No process selected — hide the detail pane so the list takes
+            // the full width.
+            dp.pane.set_visible(false);
             dp.pid.set_label("PID: —");
             dp.name.set_label("Name: —");
             dp.uid.set_label("UID: —");

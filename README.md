@@ -11,7 +11,8 @@ A lightweight, interactive system process manager built with Rust that displays 
 - **Show All Processes**: Toggle showing every process on the system, or only the current user's (the default)
 - **Modern UI**: Built with GTK 4 for a native, responsive, clean interface
 - **Linux Native**: Direct access to Linux `/proc` filesystem for accurate process information
-- **Process Detail View**: Click any process to inspect its PID, name, UID, user, CPU usage, and disk read/write speed
+- **Process Detail View**: Click any process to inspect its PID, name, UID, user, CPU usage, and disk read/write speed in the right-hand pane; the pane (and its signal buttons) appears only while a process is selected and the process list uses the full width when none is selected
+- **Deselection**: Click the currently selected process again to deselect it; on launch no process is selected
 - **Signal Management**: Send SIGHUP or SIGKILL to a selected process from its detail view, with success/failure feedback
 - **Resource Usage Graph**: An always-on chart above the process list shows system-wide CPU and memory usage over time (a rolling window of ~3 minutes), updating with each refresh
 - **Persistent Settings**: Your choices (show-all filter, refresh interval) survive restarts. Open the **Settings** popover in the toolbar to change them.
