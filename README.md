@@ -83,8 +83,9 @@ Disk read/write activity is reported per-process as a transfer speed (e.g.
 `1.5 MiB/s`), computed from the delta of the `read_bytes` and `write_bytes`
 counters in `/proc/[pid]/io` between refreshes. A process's first sample shows a
 blank cell, since a speed needs two samples. The kernel only allows this file to be
-read for a process you own (or as root), so other users' processes show blank disk
-columns — this is a Linux restriction, not an error.
+read for a process you own (or as root), so the app only reads it for your own
+processes (or for every process when run as root); other users' processes show
+blank disk columns — this is a Linux restriction, not an error.
 
 System-wide CPU and memory usage are sampled once per refresh and kept in a
 rolling history (the last ~120 samples). CPU% is computed from the delta in the

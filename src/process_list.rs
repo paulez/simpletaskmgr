@@ -99,6 +99,9 @@ impl ProcessList {
         }
         debug!("Retrieved {} processes from /proc", all_processes.len());
 
+        let mut io_failed = 0u32;
+        let mut io_last_err: Option<procfs::ProcError> = None;
+
         // Each /proc file is read once per process per refresh.
         let task_mgr_process_list: Vec<TaskMgrProcess> = all_processes
             .iter()
@@ -125,18 +128,22 @@ impl ProcessList {
                 self.cpu_tracker
                     .update_process_cpu(&mut task_mgr_process, &stat);
                 // /proc/[pid]/io is only readable for self-owned processes
-                // (EACCES otherwise), so an unknown rate is expected and shown
-                // as a blank cell.
-                match proc.io() {
-                    Ok(io) => {
-                        self.io_tracker.update_process_io(
-                            &mut task_mgr_process,
-                            io.read_bytes,
-                            io.write_bytes,
-                        );
-                    }
-                    Err(e) => {
-                        debug!("Can't read io for pid {}: {e:?}", proc.pid());
+                // (EACCES otherwise), so skip the read entirely for other
+                // users' processes — the rate column stays blank. As root
+                // (uid 0) the file is readable for every pid.
+                if should_read_io(current_uid, ruid) {
+                    match proc.io() {
+                        Ok(io) => {
+                            self.io_tracker.update_process_io(
+                                &mut task_mgr_process,
+                                io.read_bytes,
+                                io.write_bytes,
+                            );
+                        }
+                        Err(e) => {
+                            io_failed += 1;
+                            io_last_err = Some(e);
+                        }
                     }
                 }
                 Some(task_mgr_process)
@@ -157,6 +164,13 @@ impl ProcessList {
             "After converting to TaskMgrProcess: {} processes",
             processes_before_filter
         );
+
+        if io_failed > 0 {
+            debug!(
+                "Can't read io for {} owned process(es); last error: {io_last_err:?}",
+                io_failed
+            );
+        }
 
         // Show every process when the "show all" toggle is on, otherwise only
         // the current user's.
@@ -209,6 +223,14 @@ impl ProcessList {
     }
 }
 
+/// Whether `/proc/[pid]/io` should be read for a process with owner `ruid`
+/// while running as `current_uid`. The file is only readable for the
+/// process's owner or root, so it is only attempted when the process is
+/// owned by the current user, or when running as root (uid 0).
+fn should_read_io(current_uid: u32, ruid: u32) -> bool {
+    current_uid == 0 || ruid == current_uid
+}
+
 /// Keeps the current user's processes unless `show_all` is set, in which case
 /// every process is kept. Extracted for pure, unit-testable behavior.
 fn filter_by_user(
@@ -230,6 +252,16 @@ fn filter_by_user(
 mod tests {
     use super::*;
     use crate::process::TaskMgrProcess;
+
+    /// Reads should be attempted for owned processes, and for everything when
+    /// running as root; never for other users' processes.
+    #[test]
+    fn test_should_read_io() {
+        assert!(should_read_io(1000, 1000), "owned process");
+        assert!(!should_read_io(1000, 1001), "other user's process");
+        assert!(should_read_io(0, 1000), "root can read any process");
+        assert!(should_read_io(0, 0), "root reading a root process");
+    }
 
     /// A `f64` NaN must not panic the sort (regression for `partial_cmp().unwrap()`).
     #[test]
