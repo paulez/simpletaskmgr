@@ -64,11 +64,15 @@ A `glib::timeout_add_local` timer re-reads `/proc` on each refresh and updates
 the store **in place** (`src/refresh_list.rs`): it diffs the old and new PID
 sequence and only touches the rows that actually changed. Each process keeps
 the same `ProcessRow` object for its whole life — a changed value is re-written
-on that same object (and its on-screen labels re-texted in place) and a moved
-row is re-inserted as the *same* object, so GTK recycles the existing row
-widget instead of rebuilding one. This avoids the blank-flash flicker you'd get
-from tearing the store down and re-adding rows, and it preserves both the
-selection (by PID) and the scroll position across refreshes.
+on that same object (and its on-screen labels re-texted in place), with **no**
+store signal at all. A moved row is repositioned as the *same* object via a
+single `GListStore` splice mutation (one `items-changed` signal that both
+removes and re-adds the rows in the affected window). That single-signal form
+is what makes GTK 4.18's `GtkListItemManager` pair the removal with the
+re-addition and reparent the *existing* row widgets instead of destroying and
+rebuilding them — the two-signal `remove`+`insert` form would tear each row
+widget down (a blank flash). This also preserves the selection (GTK tracks it
+by row identity) and the scroll position across refreshes.
 
 CPU usage is reported in `top`-style per-core percentages: 100% means one core fully
 saturated, and multi-threaded processes can show more than 100%. A process's first

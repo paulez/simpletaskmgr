@@ -6,20 +6,78 @@
 //! sequence and mutates only the rows whose pid, position, or data changed.
 //!
 //! Every process keeps **one** [`ProcessRow`] `glib::Object` for its whole
-//! life. Data changes update that object in place via [`ProcessRow::set_item`]
-//! (re-texting its on-screen labels when it is visible), and moves reinsert
-//! the *same* object into its new slot. Because GTK's `GtkListItemManager`
-//! pools row widgets by model-item pointer, reinserting an existing pointer
-//! recycles the live widget, and because the data object is never replaced,
-//! a refresh that merely re-numbers or reorders processes builds no new row
-//! widgets at all — the blank-flash flicker goes away.
+//! life. A data change writes into that object via
+//! [`ProcessRow::set_item`] (re-texting its on-screen labels when it is
+//! visible) — the object keeps its identity, so *no store signal fires at
+//! all* for a stable-position value update. A position change is applied
+//! with the `splice` primitive (see [`store_splice`]): because GTK 4.18's
+//! `GtkListItemManager` only reuses an existing row widget when the remove
+//! *and* the re-add of an item arrive inside **one** `items-changed` signal
+//! (its `deleted_items` widget cache is created per signal and unparented at
+//! the end of each signal handler), a single splice that removes and re-adds
+//! the same item pointer makes GTK keep the same `GtkListItem` widget —
+//! reparenting it into its new position — instead of destroying it and
+//! allocating a fresh one.
+//!
+//! (A plain `remove` + `insert` move does *not* enjoy that: the two
+//! separate signals mean the widget is unparented — and freed — by the time
+//! the insert runs, so `GtkListItemManager` falls back to allocating a
+//! fresh row. That destroy/recreate pair is exactly the blank flash seen
+//! when the sort order changes.)
 
 use std::collections::{HashMap, HashSet};
+
+use glib::prelude::*;
 
 use crate::process::ProcessItem;
 use crate::process_row::ProcessRow;
 use gtk4::gio::prelude::*;
 use gtk4::gio::ListStore;
+
+type GObjectPtr = *mut glib::gobject_ffi::GObject;
+
+/// Applies one `g_list_store_splice` mutation: removes `n_removals` items at
+/// `position` and inserts the `additions` in their place, emitting a
+/// **single** `items-changed(position, n_removals, n_additions)` signal.
+///
+/// `g_list_store_splice` (glib ≥ 2.50, present in the 4.18 runtime) is
+/// declared by `gio-sys` but not wrapped by the 0.22 `ListStore` bindings,
+/// so we call it through the FFI. The single-signal emission is what lets
+/// GTK 4.18's `GtkListItemManager` reuse a row widget that is removed and
+/// re-added inside the same signal — two separate `remove`/`insert` calls
+/// (two signals) lose the widget (see the module docs).
+///
+/// # Safety
+/// `additions` must outlive the call and hold one `g_object_ref` each;
+/// `n_removals` + `additions.len()` must fit the store.
+fn splice(store: &ListStore, position: u32, n_removals: u32, additions: &[GObjectPtr]) {
+    unsafe {
+        // `additions` is only read by the C function; the `as_mut_ptr`
+        // signature is an artifact of the FFI declaration.
+        gtk4::gio::ffi::g_list_store_splice(
+            store.as_ptr(),
+            position,
+            n_removals,
+            additions.as_ptr() as *mut GObjectPtr,
+            additions.len() as u32,
+        )
+    };
+}
+
+/// Moves the row currently at `src` to `dst` (a *left* move, `src > dst`)
+/// as one `items-changed` signal: the window `dst..=src` is removed and
+/// re-added with the moved row first.
+fn splice_move(store: &ListStore, dst: u32, src: u32) {
+    let block: Vec<GObjectPtr> = (dst..=src)
+        .map(|p| store.item(p).expect("row present in window").as_ptr())
+        .collect();
+    // Desired window: the moved row (last element of `block`) first, then
+    // the original `dst..src` in order — so every slot is re-filled by an
+    // existing item pointer and GTK reuses each slot's widget.
+    let mut additions = block[block.len() - 1..].to_vec();
+    additions.extend_from_slice(&block[..block.len() - 1]);
+    splice(store, dst, block.len() as u32, &additions);
+}
 
 /// Replace the contents of `store` with `items`, mutating it in place so the
 /// `gtk4::ListView` rendering it does not lose its rows (or its scroll
@@ -29,10 +87,11 @@ use gtk4::gio::ListStore;
 /// to do with it around this call.
 ///
 /// In a left-to-right walk over the target, once position `t` is fixed no
-/// later fix can touch indices < t (moves are `remove(src) + insert(t)` with
-/// `src > t`, and size changes only append), so the already-fixed prefix
-/// never changes again. Pids are unique, therefore at step `t` the row that
-/// should sit at `t` can only be at index `t` or somewhere after it.
+/// later fix can touch indices < t (moves are `splice_move`(window `t..=src`)
+/// with `src > t`, and new pids only append into the tail), so the
+/// already-fixed prefix never changes again. Pids are unique, therefore at
+/// step `t` the row that should sit at `t` can only be at index `t` or
+/// somewhere after it.
 ///
 /// Rows whose pid **and data** are unchanged at their current position are
 /// left completely untouched — zero store mutations, zero widget churn for
@@ -58,17 +117,31 @@ pub fn refresh(store: &ListStore, items: &[ProcessItem]) {
 
     let target_pids: HashSet<i32> = items.iter().map(|i| i.pid).collect();
 
-    // Pass 1: drop rows whose pid is not in the target set, in descending
-    // index order so the earlier indices stay valid while we mutate.
+    // Pass 1: drop rows whose pid is not in the target set. Contiguous runs
+    // are removed with a single `splice` (one `items-changed` signal each).
     let mut to_remove: Vec<u32> = Vec::new();
     for (i, pid) in order.iter().enumerate() {
         if !target_pids.contains(pid) {
             to_remove.push(i as u32);
         }
     }
-    to_remove.sort_unstable_by_key(|i| std::cmp::Reverse(*i));
-    for idx in to_remove {
-        store.remove(idx);
+    to_remove.sort_unstable();
+    // Group contiguous runs, then remove the runs back-to-front so the
+    // earlier runs' indices stay valid as the store shrinks.
+    let mut runs: Vec<(u32, u32)> = Vec::new();
+    let mut i = 0usize;
+    while i < to_remove.len() {
+        let mut end = to_remove[i];
+        let mut j = i + 1;
+        while j < to_remove.len() && to_remove[j] == end + 1 {
+            end = to_remove[j];
+            j += 1;
+        }
+        runs.push((to_remove[i], end - to_remove[i] + 1));
+        i = j;
+    }
+    for (pos, len) in runs.iter().rev() {
+        splice(store, *pos, *len, &[]);
     }
     order.retain(|p| target_pids.contains(p));
     rows.retain(|p, _| target_pids.contains(p));
@@ -80,7 +153,8 @@ pub fn refresh(store: &ListStore, items: &[ProcessItem]) {
         if t < order.len() && order[t] == pid {
             // Same pid, same position. If the data differs, re-text the
             // object in place (its on-screen labels repaint via
-            // `set_item`); otherwise there is nothing to do at all.
+            // `set_item`); otherwise there is nothing to do at all. No store
+            // mutation means no `items-changed` signal and no widget churn.
             if !rows[&pid].has_value(item) {
                 rows[&pid].set_item(item);
             }
@@ -93,17 +167,18 @@ pub fn refresh(store: &ListStore, items: &[ProcessItem]) {
             .position(|p| *p == pid)
             .map(|rel| t + rel)
         {
-            // A move: reuse the *same* row object. GTK's row manager pools
-            // widgets by model-item pointer, so reinserting an existing
-            // pointer recycles the live row widget instead of creating a new
-            // one — no blank flash and no re-layout.
+            // A move: reuse the *same* row object. `splice_move` removes and
+            // re-adds the window `t..=src` in **one** `items-changed` signal,
+            // which is what makes GTK 4.18's row manager keep every slot's
+            // existing widget and reparent it — instead of a `remove` +
+            // `insert` pair (two signals) that destroys the widget and
+            // rebuilds a blank one. No blank flash.
             let row = rows.remove(&pid).expect("row for a kept pid");
             if !row.has_value(item) {
                 // Its data changed while it moved: re-text it.
                 row.set_item(item);
             }
-            store.remove(src as u32);
-            store.insert(t as u32, &row);
+            splice_move(store, t as u32, src as u32);
             order.remove(src);
             order.insert(t, pid);
             rows.insert(pid, row);
@@ -214,6 +289,64 @@ mod tests {
                 "start_len={start_len}, target_len={target_len}, offset={offset}"
             );
         }
+    }
+
+    /// The anti-flicker contract, stated in GTK's own terms: a move must
+    /// reach the model as **one** `items-changed` signal in which the
+    /// removed and added counts are equal (so the row manager can pair the
+    /// removal with the re-addition and keep the existing row widgets). Two
+    /// signals (a separate remove and insert) would destroy and recreate
+    /// the widgets — the blank flash.
+    #[test]
+    fn test_refresh_move_is_one_combined_items_changed_signal() {
+        let s = seed(&[1, 2, 3]);
+        let (tx, rx) = std::sync::mpsc::channel::<(u32, u32, u32)>();
+        s.connect_items_changed(move |_store, pos, removed, added| {
+            let _ = tx.send((pos, removed, added));
+        });
+
+        // A pure move: pid 3 goes to the front.
+        refresh(&s, [item(3), item(1), item(2)].as_slice());
+        assert_eq!(pids_of(&s), vec![3, 1, 2]);
+
+        let events: Vec<(u32, u32, u32)> = rx.try_iter().collect();
+        assert_eq!(
+            events.len(),
+            1,
+            "a pure move must be a single items-changed signal; got {events:?}"
+        );
+        let (_, removed, added) = events[0];
+        assert!(
+            removed >= 1 && added >= 1,
+            "the signal must both remove and add within itself"
+        );
+        assert_eq!(
+            removed, added,
+            "removed and added must balance so the row widgets can be reused"
+        );
+    }
+
+    /// A data-only change (same pids, same positions) must produce **no**
+    /// `items-changed` signal at all — the data is written into the existing
+    /// row objects in place.
+    #[test]
+    fn test_refresh_data_change_emits_no_items_changed_signal() {
+        let s = seed(&[1, 2, 3]);
+        let (tx, rx) = std::sync::mpsc::channel::<(u32, u32, u32)>();
+        s.connect_items_changed(move |_store, pos, removed, added| {
+            let _ = tx.send((pos, removed, added));
+        });
+
+        let mut it2 = item(2);
+        it2.value.cpu_percent = 99.0;
+        refresh(&s, [item(1), it2, item(3)].as_slice());
+        assert_eq!(pids_of(&s), vec![1, 2, 3]);
+
+        let events: Vec<(u32, u32, u32)> = rx.try_iter().collect();
+        assert!(
+            events.is_empty(),
+            "a data-only refresh must not mutate the store; got {events:?}"
+        );
     }
 
     /// A real refresh changes the *data* inside every row (CPU%, I/O rates)
