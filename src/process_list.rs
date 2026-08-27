@@ -189,32 +189,44 @@ impl ProcessList {
         Ok(task_mgr_process_list_filtered)
     }
 
+    /// Compares two rows' values by the given column, ascending.
+    ///
+    /// `f64` is compared with `total_cmp` so `NaN` values sort without
+    /// panicking (unlike `partial_cmp().unwrap()`). Shared by
+    /// [`sort_processes`] and the `ColumnView` sorters, which must agree
+    /// exactly on row ordering.
+    pub fn compare_values(
+        a: &ProcessItem,
+        b: &ProcessItem,
+        column: crate::SortColumn,
+    ) -> std::cmp::Ordering {
+        match column {
+            crate::SortColumn::Pid => a.pid.cmp(&b.pid),
+            crate::SortColumn::Username => a.value.username.cmp(&b.value.username),
+            crate::SortColumn::CpuPercent => a.value.cpu_percent.total_cmp(&b.value.cpu_percent),
+            crate::SortColumn::Name => a.value.name.cmp(&b.value.name),
+            // Unknown (`None`) rates sort as 0.0 so rows without I/O data
+            // sink to the bottom of an ascending sort.
+            crate::SortColumn::DiskRead => a
+                .value
+                .disk_read_speed
+                .unwrap_or(0.0)
+                .total_cmp(&b.value.disk_read_speed.unwrap_or(0.0)),
+            crate::SortColumn::DiskWrite => a
+                .value
+                .disk_write_speed
+                .unwrap_or(0.0)
+                .total_cmp(&b.value.disk_write_speed.unwrap_or(0.0)),
+        }
+    }
+
     /// Sorts the process list in place by the specified column and direction.
     ///
     /// `f64` is compared with `total_cmp` so `NaN` values sort without
     /// panicking (unlike `partial_cmp().unwrap()`).
     pub fn sort_processes(&mut self, column: crate::SortColumn, direction: crate::SortDirection) {
         let by = |a: &ProcessItem, b: &ProcessItem| -> std::cmp::Ordering {
-            match column {
-                crate::SortColumn::Pid => a.pid.cmp(&b.pid),
-                crate::SortColumn::Username => a.value.username.cmp(&b.value.username),
-                crate::SortColumn::CpuPercent => {
-                    a.value.cpu_percent.total_cmp(&b.value.cpu_percent)
-                }
-                crate::SortColumn::Name => a.value.name.cmp(&b.value.name),
-                // Unknown (`None`) rates sort as 0.0 so rows without I/O data
-                // sink to the bottom of an ascending sort.
-                crate::SortColumn::DiskRead => a
-                    .value
-                    .disk_read_speed
-                    .unwrap_or(0.0)
-                    .total_cmp(&b.value.disk_read_speed.unwrap_or(0.0)),
-                crate::SortColumn::DiskWrite => a
-                    .value
-                    .disk_write_speed
-                    .unwrap_or(0.0)
-                    .total_cmp(&b.value.disk_write_speed.unwrap_or(0.0)),
-            }
+            Self::compare_values(a, b, column)
         };
         match direction {
             crate::SortDirection::Ascending => self.processes.sort_by(by),
@@ -363,6 +375,50 @@ mod tests {
 
         let pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
         assert_eq!(pids, vec![2, 3, 1]);
+    }
+
+    /// `compare_values` is the exact comparator the `ColumnView` sorters run
+    /// (and `sort_processes` delegates to): it must be consistent with the
+    /// sort order and NaN-safe.
+    #[test]
+    fn test_compare_values_matches_sort_order_and_is_nan_safe() {
+        fn item(pid: i32, cpu: f64) -> ProcessItem {
+            let p = TaskMgrProcess::new(format!("n{pid}"), pid, 1, "u".to_string(), cpu);
+            ProcessItem::new(&p)
+        }
+
+        let nan = item(1, f64::NAN);
+        let lo = item(2, -5.0);
+        let hi = item(3, 42.0);
+
+        let ascending = [lo.clone(), nan.clone(), hi.clone()];
+        let mut sorted = ascending;
+        sorted.sort_by(|a, b| ProcessList::compare_values(a, b, crate::SortColumn::CpuPercent));
+        // `total_cmp` orders finite values first and NaN last.
+        let pids: Vec<i32> = sorted.iter().map(|i| i.pid).collect();
+        assert_eq!(
+            pids,
+            vec![2, 3, 1],
+            "NaN must not panic and must order total_cmp"
+        );
+
+        // Equal values compare equal regardless of direction.
+        let a = item(9, 1.5);
+        let b = item(10, 1.5);
+        assert_eq!(
+            ProcessList::compare_values(&a, &b, crate::SortColumn::CpuPercent),
+            std::cmp::Ordering::Equal
+        );
+
+        // `None` disk rates sort as 0.0.
+        let mut none_r = item(20, 0.0);
+        none_r.value.disk_read_speed = None;
+        let mut some_r = item(21, 0.0);
+        some_r.value.disk_read_speed = Some(10.0);
+        assert_eq!(
+            ProcessList::compare_values(&none_r, &some_r, crate::SortColumn::DiskRead),
+            std::cmp::Ordering::Less
+        );
     }
 
     fn proc(pid: i32, ruid: u32) -> TaskMgrProcess {

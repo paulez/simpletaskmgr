@@ -21,7 +21,7 @@ A lightweight, interactive system process manager built with Rust that displays 
 
 - Rust 1.75 or later
 - Linux operating system (uses procfs to read from `/proc`)
-- GTK 4.10 or later (development headers required: `libgtk-4-dev`, `libglib2.0-dev`, `libpango1.0-dev`, `libcairo2-dev` on Debian/Ubuntu)
+- GTK 4.18 or later (development headers required: `libgtk-4-dev`, `libglib2.0-dev`, `libpango1.0-dev`, `libcairo2-dev` on Debian/Ubuntu)
 
 ## Building
 
@@ -45,7 +45,7 @@ cargo run
 
 The project uses the following Rust crates:
 
-- **gtk4** 0.11 (GTK 4 bindings) - GUI framework, target feature "v4_10"
+- **gtk4** 0.11 (GTK 4 bindings) - GUI framework, target feature "v4_18"
 - **cairo-rs** 0.22 - Drawing library for the CPU/memory graph
 - **procfs** 0.18.0 - Linux procfs filesystem bindings
 - **glib** 0.22 - GLib objects & timers (via gtk4)
@@ -56,24 +56,26 @@ The project uses the following Rust crates:
 ## How It Works
 
 The application reads process information directly from the Linux `/proc`
-filesystem using the `procfs` crate and displays it in a GTK 4 `ListView`
+filesystem using the `procfs` crate and displays it in a GTK 4 `ColumnView`
 backed by a `gio::ListStore` and a `SingleSelection` model. Each row is a
 `glib::Object` subclass (`ProcessRow`, see `src/process_row.rs`) that owns the
-current `ProcessItem` snapshot for one PID.
+current `ProcessItem` snapshot for one PID; each column's cell is a plain
+`Label` property-bound to one of the row's read-only string properties
+(`pid`, `username`, `name`, `cpu`, `disk-read`, `disk-write`).
 
 A `glib::timeout_add_local` timer re-reads `/proc` on each refresh and updates
 the store **in place** (`src/refresh_list.rs`): it diffs the old and new PID
 sequence and only touches the rows that actually changed. Each process keeps
 the same `ProcessRow` object for its whole life — a changed value is re-written
-on that same object (and its on-screen labels re-texted in place), with **no**
-store signal at all. A moved row is repositioned as the *same* object via a
-single `GListStore` splice mutation (one `items-changed` signal that both
-removes and re-adds the rows in the affected window). That single-signal form
-is what makes GTK 4.18's `GtkListItemManager` pair the removal with the
-re-addition and reparent the *existing* row widgets instead of destroying and
-rebuilding them — the two-signal `remove`+`insert` form would tear each row
-widget down (a blank flash). This also preserves the selection (GTK tracks it
-by row identity) and the scroll position across refreshes.
+on that same object, which only re-emits the changed properties, so the
+bound cell labels update via `g_object_notify` with no store signal at all. A
+moved row is repositioned as the *same* object via a single `GListStore`
+splice mutation (one `items-changed` signal that both removes and re-adds the
+rows in the affected window). That single-signal form is what makes GTK 4.18's
+`GtkListItemManager` pair the removal with the re-addition and reparent the
+*existing* row widgets instead of destroying and rebuilding them (a blank
+flash). This also preserves the selection (GTK tracks it by row identity) and
+the scroll position across refreshes.
 
 CPU usage is reported in `top`-style per-core percentages: 100% means one core fully
 saturated, and multi-threaded processes can show more than 100%. A process's first

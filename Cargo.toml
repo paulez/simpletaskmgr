@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-gtk4 = { version = "0.11", features = ["v4_10"] }
+gtk4 = { version = "0.11", features = ["v4_18"] }
 log = "0.4.33"
 procfs = "0.18.0"
 simplelog = "0.12.2"

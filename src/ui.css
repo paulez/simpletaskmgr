@@ -58,31 +58,6 @@
   border-radius: 6px;
 }
 
-.process-cell {
-  padding: 6px 10px;
-}
-
-.col-pid {
-  min-width: 70px;
-}
-
-.col-user {
-  min-width: 90px;
-}
-
-.col-name {
-  min-width: 160px;
-}
-
-.col-cpu {
-  min-width: 70px;
-}
-
-.col-diskread,
-.col-diskwrite {
-  min-width: 80px;
-}
-
 /* ---- Detail pane --------------------------------------------------------- */
 .detail-pane {
   padding: 12px;

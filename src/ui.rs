@@ -222,7 +222,21 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     header.add_css_class("list-header");
 
-    // ---- Process list --------------------------------------------------------
+    // ---- Process list (GtkColumnView) -----------------------------------------
+    // The model chain is `ListStore<ProcessRow> -> SingleSelection ->
+    // ColumnView`. One `ColumnViewColumn` per field; each column's cell is a
+    // single `Label` whose `label` property is bound straight to the matching
+    // `ProcessRow` string property — re-texting a cell on refresh is a pure
+    // `g_object_notify`, no label bookkeeping.
+    //
+    // Fixed column widths (numeric fields) + the Name column expanding keeps
+    // the row geometry owned by `ColumnView`, which is what makes the header
+    // row (built below) line up with the rows: same CSS widths on both.
+    //
+    // Sorting is data-level (`ProcessList::sort_processes`) driven from the
+    // header buttons; the store is spliced in place so the view never
+    // destroys a row object — the anti-flicker contract from
+    // `refresh_list.rs`.
     let store = gtk4::gio::ListStore::new::<ProcessRow>();
     let selection = gtk4::SingleSelection::new(Some(store.clone()));
     // Allow the user to click a selected row to deselect it again (a
@@ -234,50 +248,78 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // and clicking the highlighted row truly clears it.
     selection.set_autoselect(false);
     let sel_holder = selection.clone();
-    let factory = gtk4::SignalListItemFactory::new();
-    factory.connect_setup(move |_f, li| {
-        let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
-        let row_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-        row_box.add_css_class("process-cell");
-        for class in [
-            "col-pid",
-            "col-user",
-            "col-name",
-            "col-cpu",
-            "col-diskread",
-            "col-diskwrite",
-        ] {
-            let l = gtk4::Label::new(None);
-            l.add_css_class(class);
-            l.set_hexpand(true);
-            l.set_xalign(0.0);
-            row_box.append(&l);
+
+    // Column widths in px (numeric columns fixed; the Name column expands).
+    // The header buttons (built below) keep the same column order/titles, so
+    // the two rows line up: fixed widths here mirror the header's CSS
+    // min-widths and the Name column's `hexpand` mirrors the Name button's.
+    const COLS: [(&str, i32, bool); 6] = [
+        ("PID", 70, false),
+        ("User", 90, false),
+        ("Name", -1, true),
+        ("CPU%", 70, false),
+        ("Disk R", 80, false),
+        ("Disk W", 80, false),
+    ];
+
+    // Row factory (shared): one `Label` per item, bound to the row's
+    // `ProcessRow` property for that column (`prop_name`).
+    fn make_cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
+        let f = gtk4::SignalListItemFactory::new();
+        f.connect_setup(move |_f, li| {
+            let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
+            let label = gtk4::Label::new(None);
+            label.set_xalign(0.0);
+            li.set_child(Some(&label));
+        });
+        f.connect_bind(move |_f, li| {
+            let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
+            let label = li
+                .child()
+                .expect("this row has a child")
+                .downcast::<gtk4::Label>()
+                .expect("this row's child is a label");
+            let row = li
+                .item()
+                .expect("a row object")
+                .downcast::<ProcessRow>()
+                .expect("a ProcessRow");
+            // `g_object_bind_property` auto-drops the binding when either the
+            // row object or this cell widget is destroyed. `sync_create`
+            // copies the current value into the label immediately (the
+            // factory may run its `setup`/`bind` in either order, so we do
+            // not rely on the `notify` order).
+            row.bind_property(prop_name, &label, "label")
+                .sync_create()
+                .build();
+        });
+        f
+    }
+
+    let column_view = gtk4::ColumnView::new(Some(selection));
+    column_view.add_css_class("process-list");
+    for (title, width, expand) in COLS.iter() {
+        let prop = match *title {
+            "PID" => "pid",
+            "User" => "username",
+            "Name" => "name",
+            "CPU%" => "cpu",
+            "Disk R" => "disk-read",
+            "Disk W" => "disk-write",
+            _ => unreachable!(),
+        };
+        let col = gtk4::ColumnViewColumn::new(Some(title), Some(make_cell_factory(prop)));
+        if *expand {
+            col.set_expand(true);
+        } else if *width > 0 {
+            col.set_fixed_width(*width);
         }
-        li.set_child(Some(&row_box));
-    });
-    factory.connect_bind(move |_f, li| {
-        let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
-        let row = li
-            .item()
-            .expect("a row object")
-            .downcast::<ProcessRow>()
-            .expect("a ProcessRow");
-        // Bind this row to the cell labels the widget now exposes and apply
-        // its current data. When the row is later re-texted in place by
-        // `refresh` this is what makes the labels follow (the row remembers
-        // these widgets).
-        let child = li
-            .child()
-            .expect("this row has a child")
-            .downcast::<gtk4::Box>()
-            .expect("this row's child is a box");
-        row.bind_labels(child);
-    });
-    let list_view = gtk4::ListView::new(Some(selection), Some(factory));
-    list_view.add_css_class("process-list");
+        column_view.append_column(&col);
+    }
+
     let list_scroll = gtk4::ScrolledWindow::new();
     list_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
-    list_scroll.set_child(Some(&list_view));
+    list_scroll.set_child(Some(&column_view));
     list_scroll.set_hexpand(true);
     list_scroll.set_vexpand(true);
 
@@ -485,7 +527,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
                     // deliberately skip the work when the highlight is still
                     // on the same pid: re-invoking `set_selected` on every
                     // refresh would fire the `selected` change and make the
-                    // `ListView` re-scroll the row into view, which is what
+                    // `ColumnView` re-scroll the row into view, which is what
                     // made the list jump around. (If the *position* of the
                     // selected row changes, we do re-pin it here and accept
                     // the one-time scroll as the price of keeping the
@@ -710,7 +752,8 @@ fn sync_settings_widgets(
 
 fn load_css() {
     let provider = gtk4::CssProvider::new();
-    provider.load_from_data(CSS);
+    let data = glib::Bytes::from_static(CSS.as_bytes());
+    provider.load_from_bytes(&data);
     if let Some(display) = gtk4::gdk::Display::default() {
         gtk4::style_context_add_provider_for_display(
             &display,

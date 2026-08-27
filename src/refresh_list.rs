@@ -2,14 +2,14 @@
 //!
 //! Instead of tearing down and rebuilding the whole store (which empties it
 //! momentarily, clamps the surrounding scroll adjustment, and makes the
-//! `gtk4::ListView` flash empty), [`refresh`] diffs the old and new pid
+//! `gtk4::ColumnView` flash empty), [`refresh`] diffs the old and new pid
 //! sequence and mutates only the rows whose pid, position, or data changed.
 //!
 //! Every process keeps **one** [`ProcessRow`] `glib::Object` for its whole
 //! life. A data change writes into that object via
-//! [`ProcessRow::set_item`] (re-texting its on-screen labels when it is
-//! visible) — the object keeps its identity, so *no store signal fires at
-//! all* for a stable-position value update. A position change is applied
+//! [`ProcessRow::set_item`] (re-emitting the changed properties, so the
+//! property-bound cell labels follow) — the object keeps its identity, so
+//! *no store signal fires at all* for a stable-position value update. A position change is applied
 //! with the `splice` primitive (see [`store_splice`]): because GTK 4.18's
 //! `GtkListItemManager` only reuses an existing row widget when the remove
 //! *and* the re-add of an item arrive inside **one** `items-changed` signal
@@ -80,7 +80,7 @@ fn splice_move(store: &ListStore, dst: u32, src: u32) {
 }
 
 /// Replace the contents of `store` with `items`, mutating it in place so the
-/// `gtk4::ListView` rendering it does not lose its rows (or its scroll
+/// `gtk4::ColumnView` rendering it does not lose its rows (or its scroll
 /// position) one tick at a time.
 ///
 /// Selection is intentionally **not** handled here — the caller decides what
