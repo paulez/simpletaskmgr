@@ -112,14 +112,7 @@ mod tests {
     use super::*;
 
     fn samples(values: &[f64]) -> Vec<Sample> {
-        values
-            .iter()
-            .map(|v| Sample {
-                t: 0.0,
-                cpu: *v,
-                mem: *v,
-            })
-            .collect()
+        values.iter().map(|v| Sample { cpu: *v, mem: *v }).collect()
     }
 
     #[test]

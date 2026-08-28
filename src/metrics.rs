@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::time::Instant;
 
 use log::warn;
 
@@ -8,9 +7,6 @@ use log::warn;
 /// `cpu` and `mem` are percentages (0–100), the same units the graph plots.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sample {
-    /// Seconds since `SystemMetrics` was created; only used by tests and
-    /// potential future features. The graph maps samples purely by index.
-    pub t: f64,
     /// System CPU utilization percent (0–100) for the interval since the
     /// previous sample.
     pub cpu: f64,
@@ -124,7 +120,6 @@ pub struct SystemMetrics {
     history: VecDeque<Sample>,
     cap: usize,
     stat_baseline: Option<StatBaseline>,
-    start_instant: Instant,
 }
 
 impl Default for SystemMetrics {
@@ -143,7 +138,6 @@ impl SystemMetrics {
             history: VecDeque::new(),
             cap: Self::MAX_HISTORY,
             stat_baseline: None,
-            start_instant: Instant::now(),
         }
     }
 
@@ -153,7 +147,6 @@ impl SystemMetrics {
             history: VecDeque::new(),
             cap,
             stat_baseline: None,
-            start_instant: Instant::now(),
         }
     }
 
@@ -170,18 +163,12 @@ impl SystemMetrics {
     /// value (or 0.0 for the first sample) is carried forward so the graph
     /// doesn't dip to zero spuriously.
     pub fn push_sample(&mut self) {
-        let t = self.start_instant.elapsed().as_secs_f64();
         let cpu = self.sample_cpu().unwrap_or(0.0);
         let mem = self.sample_mem().unwrap_or(0.0);
-        self.history.push_back(Sample { t, cpu, mem });
+        self.history.push_back(Sample { cpu, mem });
         while self.history.len() > self.cap {
             self.history.pop_front();
         }
-    }
-
-    /// The last sample, if any.
-    pub fn last(&self) -> Option<Sample> {
-        self.history.back().copied()
     }
 
     fn sample_cpu(&mut self) -> Option<f64> {
@@ -308,9 +295,8 @@ mod tests {
     #[test]
     fn test_push_sample_updates_history_and_last() {
         let mut m = SystemMetrics::with_cap(10);
-        assert!(m.last().is_none());
+        assert!(m.history().is_empty());
         m.push_sample();
-        assert!(m.last().is_some());
         assert_eq!(m.history().len(), 1);
     }
 }
