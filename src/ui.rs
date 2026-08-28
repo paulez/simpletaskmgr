@@ -34,6 +34,40 @@ struct DetailLabels {
     status: gtk4::Label,
 }
 
+/// The widgets the `Settings` popover exposes so its change handlers and the
+/// reset path can address them without name lookup.
+struct SettingsWidgets {
+    button: gtk4::Button,
+    check: gtk4::CheckButton,
+    list: gtk4::ListBox,
+    rows: Vec<gtk4::ListBoxRow>,
+    reset: gtk4::Button,
+}
+
+/// The `ColumnView`-backed process list and the model chain in front of it,
+/// kept addressable so the refresh/timer paths can drive the store and ask the
+/// view to re-sort. `store` holds the concrete `ListStore<ProcessRow>` — both
+/// `refresh_list::refresh` and the `SortListModel`/`SingleSelection` models
+/// built on top of it.
+struct ListView {
+    store: gtk4::gio::ListStore,
+    column_view: gtk4::ColumnView,
+    sort_model: gtk4::SortListModel,
+    selection: gtk4::SingleSelection,
+    cpu_column: gtk4::ColumnViewColumn,
+    list_scroll: gtk4::ScrolledWindow,
+}
+
+/// The widgets of the detail pane (the value labels, the signal buttons, and
+/// the pane's `ScrolledWindow`), so the selection/signal/refresh paths can
+/// update it without holding a list of widget clones.
+struct DetailPane {
+    scroll: gtk4::ScrolledWindow,
+    labels: DetailLabels,
+    sighup: gtk4::Button,
+    sigkill: gtk4::Button,
+}
+
 struct State {
     process_list: ProcessList,
     metrics: SystemMetrics,
@@ -172,21 +206,9 @@ fn restart_timer(
     state_t.borrow_mut().timer_id.set(Some(id));
 }
 
-/// Builds the main window and wires the refresh timer.
-/// Call from the `activate` handler (main loop thread only).
-pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
-    let state = Rc::new(RefCell::new(State::new()));
-
-    let window = gtk4::ApplicationWindow::new(app);
-    window.set_title(Some("Simple Task Manager"));
-    window.set_default_size(940, 600);
-    window.add_css_class("app-root");
-
-    load_css();
-
-    let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    window.set_child(Some(&root));
-
+/// Builds the usage-graph `DrawingArea` and wires its draw function to paint
+/// the current `SystemMetrics` history.
+fn build_graph_area(state: &Rc<RefCell<State>>) -> gtk4::DrawingArea {
     // ---- Graph ---------------------------------------------------------------
     let graph_area = gtk4::DrawingArea::new();
     graph_area.set_content_height(110);
@@ -197,25 +219,74 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         let samples = st_graph.borrow().metrics.history();
         paint_usage_chart(cr, w as f64, h as f64, &samples);
     });
+    graph_area
+}
 
-    // ---- Process list (GtkColumnView) -----------------------------------------
-    // The model chain is `ListStore<ProcessRow> -> SortListModel ->
-    // SingleSelection -> ColumnView`. One `ColumnViewColumn` per field; each
-    // column's cell is a single `Label` whose `label` property is bound
-    // straight to the matching `ProcessRow` string property — re-texting a
-    // cell on refresh is a pure `g_object_notify`, no label bookkeeping.
-    //
-    // The header row is the one `GtkColumnView` draws natively: it is
-    // interactive because every column carries a `Sorter` and the view's
-    // `SortListModel` carries the view's own `ColumnViewSorter`. Clicking a
-    // header cell re-sorts exactly that column (and toggles direction on a
-    // second click) entirely inside GTK — no app-side sort state, no custom
-    // header widgets.
-    //
-    // The store is spliced in place by `refresh_list::refresh` (the
-    // anti-flicker contract), and the `SortListModel` re-sorts it with a
-    // single remove+re-add `items-changed` signal on a header click — GTK
-    // keeps every row object (and its widgets) alive across both.
+/// One shared `SignalListItemFactory` for a text column: a single `Label`
+/// whose `label` is property-bound to the row's `ProcessRow` string property
+/// (`prop_name`). Re-texting a cell on refresh is a pure `g_object_notify`.
+fn make_cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
+    let f = gtk4::SignalListItemFactory::new();
+    f.connect_setup(move |_f, li| {
+        let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
+        let label = gtk4::Label::new(None);
+        label.set_xalign(0.0);
+        li.set_child(Some(&label));
+    });
+    f.connect_bind(move |_f, li| {
+        let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
+        let label = li
+            .child()
+            .expect("this row has a child")
+            .downcast::<gtk4::Label>()
+            .expect("this row's child is a label");
+        let row = li
+            .item()
+            .expect("a row object")
+            .downcast::<ProcessRow>()
+            .expect("a ProcessRow");
+        // `g_object_bind_property` auto-drops the binding when either the
+        // row object or this cell widget is destroyed. `sync_create`
+        // copies the current value into the label immediately (the
+        // factory may run its `setup`/`bind` in either order, so we do
+        // not rely on the `notify` order).
+        row.bind_property(prop_name, &label, "label")
+            .sync_create()
+            .build();
+    });
+    f
+}
+
+/// Per-column `Sorter` that drives the native header: a header click asks the
+/// view to sort by that column, and the `SortListModel` re-orders the rows.
+/// All columns share one comparator source of truth —
+/// `ProcessList::compare_values` — so the header ordering can never disagree
+/// with the data.
+fn make_column_sorter(sort_col: SortColumn) -> gtk4::CustomSorter {
+    gtk4::CustomSorter::new(move |a: &glib::Object, b: &glib::Object| {
+        let ra = a.downcast_ref::<ProcessRow>().expect("a ProcessRow");
+        let rb = b.downcast_ref::<ProcessRow>().expect("a ProcessRow");
+        let ia = ra.item();
+        let ib = rb.item();
+        ProcessList::compare_values(&ia, &ib, sort_col).into()
+    })
+}
+
+/// Builds the `ColumnView`-backed process list and its model chain:
+/// `ListStore<ProcessRow> -> SortListModel -> SingleSelection -> ColumnView`.
+///
+/// The header row is the one `GtkColumnView` draws natively: it is
+/// interactive because every column carries a `Sorter` and the view's
+/// `SortListModel` carries the view's own `ColumnViewSorter`. Clicking a
+/// header cell re-sorts exactly that column (and toggles direction on a
+/// second click) entirely inside GTK — no app-side sort state, no custom
+/// header widgets.
+///
+/// The store is spliced in place by `refresh_list::refresh` (the
+/// anti-flicker contract), and the `SortListModel` re-sorts it with a
+/// single remove+re-add `items-changed` signal on a header click — GTK
+/// keeps every row object (and its widgets) alive across both.
+fn build_process_list() -> ListView {
     let store = gtk4::gio::ListStore::new::<ProcessRow>();
     let column_view = gtk4::ColumnView::builder().build();
     // `gtk_column_view_sort_by_column` sorts through this model, and the
@@ -230,56 +301,6 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // already selected when the list is first populated. Disable it so
     // launching shows no selection and the list takes the full width.
     selection.set_autoselect(false);
-    let sel_holder = selection.clone();
-
-    // Row factory (shared): one `Label` per item, bound to the row's
-    // `ProcessRow` property for that column (`prop_name`).
-    fn make_cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
-        let f = gtk4::SignalListItemFactory::new();
-        f.connect_setup(move |_f, li| {
-            let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
-            let label = gtk4::Label::new(None);
-            label.set_xalign(0.0);
-            li.set_child(Some(&label));
-        });
-        f.connect_bind(move |_f, li| {
-            let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
-            let label = li
-                .child()
-                .expect("this row has a child")
-                .downcast::<gtk4::Label>()
-                .expect("this row's child is a label");
-            let row = li
-                .item()
-                .expect("a row object")
-                .downcast::<ProcessRow>()
-                .expect("a ProcessRow");
-            // `g_object_bind_property` auto-drops the binding when either the
-            // row object or this cell widget is destroyed. `sync_create`
-            // copies the current value into the label immediately (the
-            // factory may run its `setup`/`bind` in either order, so we do
-            // not rely on the `notify` order).
-            row.bind_property(prop_name, &label, "label")
-                .sync_create()
-                .build();
-        });
-        f
-    }
-
-    // A `Sorter` per column drives the native header: a header click asks
-    // the view to sort by that column, and the `SortListModel` above
-    // re-orders the rows with its (multi-)sorter. All six columns share one
-    // comparator source of truth — `ProcessList::compare_values` — so the
-    // header ordering can never disagree with the data.
-    fn make_column_sorter(sort_col: crate::SortColumn) -> gtk4::CustomSorter {
-        gtk4::CustomSorter::new(move |a: &glib::Object, b: &glib::Object| {
-            let ra = a.downcast_ref::<ProcessRow>().expect("a ProcessRow");
-            let rb = b.downcast_ref::<ProcessRow>().expect("a ProcessRow");
-            let ia = ra.item();
-            let ib = rb.item();
-            ProcessList::compare_values(&ia, &ib, sort_col).into()
-        })
-    }
 
     // (title, property of `ProcessRow`, fixed width in px, expand?, sort
     // column) — column widths keep the numeric columns compact and let the
@@ -305,7 +326,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         column_view.append_column(&col);
         columns.push(col);
     }
-    // The CPU% column, kept so the initial sort (below) can address it.
+    // The CPU% column, kept so the initial sort can address it.
     let cpu_column = columns[3].clone();
     column_view.set_model(Some(&selection));
     column_view.add_css_class("process-list");
@@ -316,7 +337,21 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     list_scroll.set_hexpand(true);
     list_scroll.set_vexpand(true);
 
-    // ---- Detail pane ---------------------------------------------------------
+    ListView {
+        store,
+        column_view,
+        sort_model,
+        selection,
+        cpu_column,
+        list_scroll,
+    }
+}
+
+/// Builds the process detail pane: the value labels, the SIGHUP/SIGKILL
+/// buttons, and the pane's `ScrolledWindow`. The pane starts hidden so the
+/// list takes the full width at launch (selection re-shows it via
+/// `apply_detail`).
+fn build_detail_pane() -> DetailPane {
     let detail_box = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
     detail_box.add_css_class("detail-pane");
 
@@ -374,17 +409,29 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // list uses the full width (selection re-shows it via `apply_detail`).
     detail_scroll.set_visible(false);
 
-    // ---- Body row (list | detail) ---------------------------------------------
-    let body = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-    body.add_css_class("body");
-    body.append(&list_scroll);
-    body.append(&detail_scroll);
+    let labels = DetailLabels {
+        pane: detail_scroll.clone(),
+        pid: d_pid,
+        name: d_name,
+        uid: d_uid,
+        username: d_user,
+        cpu: d_cpu,
+        disk_read: d_disk_read,
+        disk_write: d_disk_write,
+        status: d_status,
+    };
 
-    // ---- Assemble root ---------------------------------------------------------
-    root.append(&graph_area);
-    root.append(&body);
+    DetailPane {
+        scroll: detail_scroll,
+        labels,
+        sighup: b_sighup,
+        sigkill: b_sigkill,
+    }
+}
 
-    // ---- Settings button + popover ---------------------------------------------
+/// Builds the `Settings` button and its popover (show-all toggle, refresh
+/// interval list, and reset button).
+fn build_settings_popover() -> SettingsWidgets {
     let settings_btn = gtk4::Button::new();
     settings_btn.set_label("Settings");
     settings_btn.add_css_class("settings-btn");
@@ -429,34 +476,38 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     popover.set_child(Some(&pop_box));
     settings_btn.set_child(Some(&popover));
 
-    let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-    toolbar.add_css_class("toolbar");
-    toolbar.append(&settings_btn);
-    root.insert_child_after(&toolbar, Some(&graph_area));
+    SettingsWidgets {
+        button: settings_btn,
+        check: show_all_check,
+        list: refresh_list,
+        rows: refresh_rows,
+        reset: reset_btn,
+    }
+}
 
-    // ---- Shared closure: republish the store from state ------------------------
-    let store_r = store.clone();
-    let sel_r = sel_holder.clone();
-    let sort_r = sort_model.clone();
+/// Builds the shared "republish the store from `state`" closure: it updates
+/// the row values in place, kicks the `SortListModel` to re-sort, restores the
+/// scroll offset, re-pins the selection, and refreshes the detail pane.
+fn make_rebuild(
+    state: Rc<RefCell<State>>,
+    list: &ListView,
+    dp: &Rc<DetailLabels>,
+    adj: gtk4::Adjustment,
+) -> Rc<dyn Fn()> {
+    let store_r = list.store.clone();
+    let sel_r = list.selection.clone();
+    let sort_r = list.sort_model.clone();
     let state_r = state.clone();
     // The view's own sorter, captured so the refresh path can ask the
     // `SortListModel` to re-run it after an in-place value update (see the
     // `changed` call below).
-    let view_sorter_r = column_view.sorter().expect("ColumnView exposes a sorter");
-    let dp_labels = Rc::new(DetailLabels {
-        pane: detail_scroll.clone(),
-        pid: d_pid.clone(),
-        name: d_name.clone(),
-        uid: d_uid.clone(),
-        username: d_user.clone(),
-        cpu: d_cpu.clone(),
-        disk_read: d_disk_read.clone(),
-        disk_write: d_disk_write.clone(),
-        status: d_status.clone(),
-    });
-    let dp_r = dp_labels.clone();
-    let adj_r = list_scroll.vadjustment();
-    let rebuild: Rc<dyn Fn()> = Rc::new(move || {
+    let view_sorter_r = list
+        .column_view
+        .sorter()
+        .expect("ColumnView exposes a sorter");
+    let dp_r = dp.clone();
+    let adj_r = adj.clone();
+    Rc::new(move || {
         // Remember the currently selected pid (if any) so the highlight can be
         // re-pinned to the same process after the refresh, in case GTK
         // dropped or displaced it while mutating the store.
@@ -528,13 +579,56 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
             }
         }
         apply_detail(&dp_r, &state_r, state_r.borrow().selected_pid);
-    });
+    })
+}
+
+/// Builds the main window and wires the refresh timer.
+/// Call from the `activate` handler (main loop thread only).
+pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
+    let state = Rc::new(RefCell::new(State::new()));
+
+    let window = gtk4::ApplicationWindow::new(app);
+    window.set_title(Some("Simple Task Manager"));
+    window.set_default_size(940, 600);
+    window.add_css_class("app-root");
+
+    load_css();
+
+    let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    window.set_child(Some(&root));
+
+    let graph_area = build_graph_area(&state);
+    let list = build_process_list();
+    let detail = build_detail_pane();
+    let settings = build_settings_popover();
+
+    // ---- Body row (list | detail) ---------------------------------------------
+    let body = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    body.add_css_class("body");
+    body.append(&list.list_scroll);
+    body.append(&detail.scroll);
+
+    // ---- Assemble root ---------------------------------------------------------
+    root.append(&graph_area);
+
+    // ---- Settings button + popover ---------------------------------------------
+    let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    toolbar.add_css_class("toolbar");
+    toolbar.append(&settings.button);
+    root.insert_child_after(&toolbar, Some(&graph_area));
+
+    root.append(&body);
+
+    // ---- Shared closure: republish the store from state ------------------------
+    let dp_labels = Rc::new(detail.labels);
+    let adj = list.list_scroll.vadjustment();
+    let rebuild = make_rebuild(state.clone(), &list, &dp_labels, adj);
 
     // ---- Row selection handler -------------------------------------------------
     {
         let state_s = state.clone();
         let dp_s = dp_labels.clone();
-        let sel_n = sel_holder.clone();
+        let sel_n = list.selection.clone();
         let sel_inner = sel_n.clone();
         sel_n.connect_selected_notify(move |_| {
             let pid = sel_inner
@@ -550,16 +644,16 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // ---- Settings popover handlers ----------------------------------------------
     // Initialize the widgets from the loaded settings.
     let loaded = state.borrow().settings.clone();
-    show_all_check.set_active(loaded.show_all);
+    settings.check.set_active(loaded.show_all);
     let initial_idx = RefreshInterval::ALL
         .iter()
         .position(|i| *i == loaded.refresh)
         .unwrap_or(1);
-    refresh_list.select_row(Some(&refresh_rows[initial_idx]));
+    settings.list.select_row(Some(&settings.rows[initial_idx]));
     {
         let state_t = state.clone();
         let rebuild_t = rebuild.clone();
-        show_all_check.connect_toggled(move |chk| {
+        settings.check.connect_toggled(move |chk| {
             let active = chk.is_active();
             state_t.borrow_mut().set_show_all(active);
             // Refresh now so the filter change takes effect immediately rather
@@ -570,10 +664,10 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     }
     {
         let state_c = state.clone();
-        let rows_c = refresh_rows.clone();
+        let rows_c = settings.rows.clone();
         let rebuild_c = rebuild.clone();
         let graph_c = graph_area.clone();
-        refresh_list.connect_row_activated(move |_list, row| {
+        settings.list.connect_row_activated(move |_list, row| {
             if let Some(pos) = rows_c.iter().position(|r| *r == *row) {
                 if let Some(interval) = RefreshInterval::ALL.get(pos) {
                     let changed = state_c.borrow_mut().set_refresh_interval(*interval);
@@ -588,10 +682,10 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         let state_r = state.clone();
         let rebuild_r = rebuild.clone();
         let graph_r = graph_area.clone();
-        let check_w = show_all_check.clone();
-        let rows_w = refresh_rows.clone();
-        let list_w = refresh_list.clone();
-        reset_btn.connect_clicked(move |_| {
+        let check_w = settings.check.clone();
+        let rows_w = settings.rows.clone();
+        let list_w = settings.list.clone();
+        settings.reset.connect_clicked(move |_| {
             // `reset_settings` reports whether the refresh interval changed;
             // only then is the running timer restarted.
             let changed = state_r.borrow_mut().reset_settings();
@@ -608,14 +702,14 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     {
         let state_k = state.clone();
         let dp_k = dp_labels.clone();
-        b_sighup.connect_clicked(move |_| {
+        detail.sighup.connect_clicked(move |_| {
             let status = state_k.borrow_mut().kill(Signal::Sighup);
             dp_k.status.set_label(&detail_status(&status));
         });
         let state_k = state.clone();
         let dp_k = dp_labels.clone();
         let rebuild_k = rebuild.clone();
-        b_sigkill.connect_clicked(move |_| {
+        detail.sigkill.connect_clicked(move |_| {
             let status = state_k.borrow_mut().kill(Signal::Sigkill);
             dp_k.status.set_label(&detail_status(&status));
             // A killed process disappears on the next refresh; force one now
@@ -631,13 +725,14 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // matching the previous "highest first" launch state. `sort_by_column`
     // is a no-op on an empty model, so run it after the data exists.
     rebuild();
-    column_view.sort_by_column(Some(&cpu_column), gtk4::SortType::Descending);
+    list.column_view
+        .sort_by_column(Some(&list.cpu_column), gtk4::SortType::Descending);
     // GTK4's layout pass re-scrolls the list as the initial sort reorders
     // rows, leaving it parked in the middle at launch. A raw
     // `adjustment.set_value(0)` gets clobbered by that layout commit, so
     // route through GTK's own `scroll_to` at the deterministic "just got
     // mapped" point — after layout has resolved — instead of fighting it.
-    let cv = column_view.clone();
+    let cv = list.column_view.clone();
     let win = window.clone();
     win.connect_map(move |_| {
         cv.scroll_to(
