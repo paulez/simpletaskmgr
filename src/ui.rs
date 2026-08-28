@@ -29,6 +29,7 @@ struct DetailLabels {
     uid: gtk4::Label,
     username: gtk4::Label,
     cpu: gtk4::Label,
+    mem: gtk4::Label,
     disk_read: gtk4::Label,
     disk_write: gtk4::Label,
     status: gtk4::Label,
@@ -306,11 +307,12 @@ fn build_process_list() -> ListView {
     // column) — column widths keep the numeric columns compact and let the
     // Name column absorb the remaining width. Every column is user-resizable
     // by dragging its header.
-    const COLS: [(&str, &str, i32, bool, SortColumn); 6] = [
+    const COLS: [(&str, &str, i32, bool, SortColumn); 7] = [
         ("PID", "pid", 70, false, SortColumn::Pid),
         ("User", "username", 90, false, SortColumn::Username),
         ("Name", "name", -1, true, SortColumn::Name),
         ("CPU%", "cpu", 70, false, SortColumn::CpuPercent),
+        ("MEM%", "mem", 70, false, SortColumn::MemPercent),
         ("Disk R", "disk-read", 80, false, SortColumn::DiskRead),
         ("Disk W", "disk-write", 80, false, SortColumn::DiskWrite),
     ];
@@ -372,6 +374,7 @@ fn build_detail_pane() -> DetailPane {
     let d_uid = mk_detail("UID: —");
     let d_user = mk_detail("Username: —");
     let d_cpu = mk_detail("CPU%: —");
+    let d_mem = mk_detail("MEM%: —");
     let d_disk_read = mk_detail("Disk read: —");
     let d_disk_write = mk_detail("Disk write: —");
     detail_box.append(&d_pid);
@@ -379,6 +382,7 @@ fn build_detail_pane() -> DetailPane {
     detail_box.append(&d_uid);
     detail_box.append(&d_user);
     detail_box.append(&d_cpu);
+    detail_box.append(&d_mem);
     detail_box.append(&d_disk_read);
     detail_box.append(&d_disk_write);
 
@@ -418,6 +422,7 @@ fn build_detail_pane() -> DetailPane {
         uid: d_uid,
         username: d_user,
         cpu: d_cpu,
+        mem: d_mem,
         disk_read: d_disk_read,
         disk_write: d_disk_write,
         status: d_status,
@@ -765,6 +770,11 @@ fn apply_detail(dp: &Rc<DetailLabels>, state: &Rc<RefCell<State>>, pid: Option<i
             dp.uid.set_label(&format!("UID: {}", p.ruid));
             dp.username.set_label(&format!("Username: {}", p.username));
             dp.cpu.set_label(&format!("CPU%: {}", p.cpu_percent_str()));
+            dp.mem.set_label(&if p.mem_percent_str().is_empty() {
+                "MEM%: —".to_string()
+            } else {
+                format!("MEM%: {}", p.mem_percent_str())
+            });
             // An empty speed is not yet measured (first sample) or not
             // readable — show a placeholder rather than a zero.
             dp.disk_read.set_label(&if p.disk_read_str().is_empty() {
@@ -788,6 +798,7 @@ fn apply_detail(dp: &Rc<DetailLabels>, state: &Rc<RefCell<State>>, pid: Option<i
             dp.uid.set_label("UID: —");
             dp.username.set_label("Username: —");
             dp.cpu.set_label("CPU%: —");
+            dp.mem.set_label("MEM%: —");
             dp.disk_read.set_label("Disk read: —");
             dp.disk_write.set_label("Disk write: —");
             dp.status.set_label("");

@@ -17,6 +17,7 @@ pub enum SortColumn {
     Pid,
     Username,
     CpuPercent,
+    MemPercent,
     Name,
     DiskRead,
     DiskWrite,

@@ -74,6 +74,9 @@ impl ProcessList {
         let current_uid = self.users_cache.get_current_uid();
         debug!("Current UID: {}", current_uid);
 
+        // Read once per refresh and reuse for every row's MEM%.
+        let mem_total_kb = read_mem_total_kb();
+
         let all_processes_iter = process::all_processes().context("Can't read /proc filesystem")?;
         let mut all_processes = Vec::new();
         let mut failed = 0u32;
@@ -123,6 +126,14 @@ impl ProcessList {
                 let mut task_mgr_process = build_task_mgr_process(&stat, ruid, username);
                 self.cpu_tracker
                     .update_process_cpu(&mut task_mgr_process, &stat);
+                // MEM% = VmRSS / MemTotal * 100 (top-style). The VmRSS line is
+                // absent for some kernel threads, so a missing `status` just
+                // leaves the cell blank instead of failing the whole refresh.
+                if let (Some(total), Some(status)) = (mem_total_kb, proc.status().ok()) {
+                    if let Some(rss_kb) = status.vmrss {
+                        task_mgr_process.mem_percent = Some(mem_percent_of(rss_kb, total));
+                    }
+                }
                 // /proc/[pid]/io is only readable for self-owned processes
                 // (EACCES otherwise), so skip the read entirely for other
                 // users' processes — the rate column stays blank. As root
@@ -200,6 +211,11 @@ impl ProcessList {
             crate::SortColumn::Pid => a.pid.cmp(&b.pid),
             crate::SortColumn::Username => a.value.username.cmp(&b.value.username),
             crate::SortColumn::CpuPercent => a.value.cpu_percent.total_cmp(&b.value.cpu_percent),
+            crate::SortColumn::MemPercent => a
+                .value
+                .mem_percent
+                .unwrap_or(0.0)
+                .total_cmp(&b.value.mem_percent.unwrap_or(0.0)),
             crate::SortColumn::Name => a.value.name.cmp(&b.value.name),
             // Unknown (`None`) rates sort as 0.0 so rows without I/O data
             // sink to the bottom of an ascending sort.
@@ -215,6 +231,40 @@ impl ProcessList {
                 .total_cmp(&b.value.disk_write_speed.unwrap_or(0.0)),
         }
     }
+}
+
+/// Reads `MemTotal` from `/proc/meminfo`, in KiB. Returns `None` (and logs a
+/// warning) if the file is unreadable or lacks the field; every row then shows
+/// a blank MEM% cell.
+fn read_mem_total_kb() -> Option<u64> {
+    match std::fs::read_to_string("/proc/meminfo") {
+        Ok(text) => {
+            for line in text.lines() {
+                let mut parts = line.split_whitespace();
+                if parts.next() == Some("MemTotal:") {
+                    if let Some(value) = parts.next() {
+                        return value.parse::<u64>().ok();
+                    }
+                }
+            }
+            warn!("MemTotal: not found in /proc/meminfo");
+            None
+        }
+        Err(e) => {
+            warn!("Can't read /proc/meminfo: {e:?}");
+            None
+        }
+    }
+}
+
+/// `rss_kb` as a percentage of `total_kb`, top-style (`VmRSS / MemTotal * 100`).
+///
+/// Pure: no I/O. Only called with a non-zero `total_kb` — the caller checks
+/// before dividing, since the MEM% cell stays blank when `MemTotal` is 0 or
+/// unknown.
+fn mem_percent_of(rss_kb: u64, total_kb: u64) -> f64 {
+    debug_assert!(total_kb > 0, "mem_percent_of called with zero MemTotal");
+    rss_kb as f64 / total_kb as f64 * 100.0
 }
 
 /// Whether `/proc/[pid]/io` should be read for a process with owner `ruid`
@@ -436,6 +486,66 @@ mod tests {
             ProcessList::compare_values(&some_read, &both_none, crate::SortColumn::DiskRead),
             std::cmp::Ordering::Greater,
             "50.0 > None (0.0) on disk-read"
+        );
+    }
+
+    /// The MEM% ratio is top-style: RSS over total RAM, times 100.
+    #[test]
+    fn test_mem_percent_of_scales_rss_by_total() {
+        assert_eq!(mem_percent_of(100_000, 20_000_000), 0.5);
+        assert_eq!(mem_percent_of(5_000_000, 10_000_000), 50.0);
+        assert_eq!(mem_percent_of(1, 1000), 0.1);
+        // Sub-percent values keep their precision so the UI can show "0.3%".
+        assert!((mem_percent_of(30_000, 10_000_000) - 0.3).abs() < 1e-12);
+    }
+
+    /// `read_mem_total_kb` parses the real file's `MemTotal` line when present;
+    /// it is expected to succeed on any Linux host. On a host without it (or
+    /// reading a container with restricted meminfo) the row simply shows no
+    /// MEM% — both outcomes are acceptable here, but the value, when present,
+    /// must be positive.
+    #[test]
+    fn test_read_mem_total_kb_is_positive_when_available() {
+        let maybe = read_mem_total_kb();
+        if let Some(kb) = maybe {
+            assert!(kb > 0, "a real MemTotal can't be zero");
+        }
+    }
+
+    /// Comparing two rows by MEM% is NaN-safe and `None`-tolerant, mirroring
+    /// the disk-speed comparator.
+    #[test]
+    fn test_compare_mem_percent_with_none_and_nan() {
+        fn item(pid: i32, mem: Option<f64>) -> ProcessItem {
+            let mut p = TaskMgrProcess::new(format!("n{pid}"), pid, 1, "u".to_string(), 0.0);
+            p.mem_percent = mem;
+            ProcessItem::new(&p)
+        }
+
+        let unknown = item(1, None);
+        let low = item(2, Some(0.5));
+        let high = item(3, Some(12.25));
+        let nan = item(4, Some(f64::NAN));
+
+        // `None` (0.0) sorts below any known value.
+        assert_eq!(
+            ProcessList::compare_values(&unknown, &high, crate::SortColumn::MemPercent),
+            std::cmp::Ordering::Less,
+        );
+        assert_eq!(
+            ProcessList::compare_values(&low, &high, crate::SortColumn::MemPercent),
+            std::cmp::Ordering::Less,
+        );
+        // Equal values compare equal, and NaN compares `Greater` under
+        // `total_cmp` (never panics).
+        let a = item(5, Some(0.5));
+        assert_eq!(
+            ProcessList::compare_values(&low, &a, crate::SortColumn::MemPercent),
+            std::cmp::Ordering::Equal,
+        );
+        assert_eq!(
+            ProcessList::compare_values(&unknown, &nan, crate::SortColumn::MemPercent),
+            std::cmp::Ordering::Less,
         );
     }
 

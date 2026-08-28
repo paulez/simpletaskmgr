@@ -52,6 +52,10 @@ mod imp {
                     .nick("CPU")
                     .blurb("The CPU usage, as text")
                     .build(),
+                glib::ParamSpecString::builder("mem")
+                    .nick("Memory")
+                    .blurb("The memory usage, as text")
+                    .build(),
                 glib::ParamSpecString::builder("disk-read")
                     .nick("Disk read")
                     .blurb("The disk read rate, as text")
@@ -81,6 +85,7 @@ mod imp {
                 "username" => glib::Value::from(item.value.username.clone()),
                 "name" => glib::Value::from(item.value.name.clone()),
                 "cpu" => glib::Value::from(item.value.cpu_percent_str()),
+                "mem" => glib::Value::from(item.value.mem_percent_str()),
                 "disk-read" => glib::Value::from(item.value.disk_read_str()),
                 "disk-write" => glib::Value::from(item.value.disk_write_str()),
                 _ => unreachable!("unhandled property {}", pspec.name()),
@@ -156,6 +161,17 @@ impl ProcessRow {
         if o.cpu_percent.total_cmp(&p.cpu_percent) != std::cmp::Ordering::Equal {
             self.notify("cpu");
         }
+        // `Option<f64>` needs an explicit `None` arm — two `None`s must not
+        // fire a notify — and `total_cmp` keeps the `Some` comparison
+        // NaN-safe like `cpu`.
+        let mem_changed = match (o.mem_percent, p.mem_percent) {
+            (None, None) => false,
+            (Some(a), Some(b)) => a.total_cmp(&b) != std::cmp::Ordering::Equal,
+            (Some(_), None) | (None, Some(_)) => true,
+        };
+        if mem_changed {
+            self.notify("mem");
+        }
         if o.disk_read_speed != p.disk_read_speed {
             self.notify("disk-read");
         }
@@ -206,6 +222,8 @@ mod tests {
         assert_eq!(r.property::<String>("username"), "paul".to_string());
         assert_eq!(r.property::<String>("name"), "name7".to_string());
         assert_eq!(r.property::<String>("cpu"), "1.0%".to_string());
+        // `mem_percent` is `None` in the fixture, so the cell is blank.
+        assert_eq!(r.property::<String>("mem"), String::new());
         assert_eq!(r.property::<String>("disk-read"), "120.0 KiB/s".to_string());
         assert_eq!(r.property::<String>("disk-write"), String::new());
     }
@@ -232,5 +250,46 @@ mod tests {
         r.set_item(&other);
         let idle: Vec<String> = rx.try_iter().collect();
         assert!(idle.is_empty(), "an unrelated change must not notify cpu");
+    }
+
+    /// `mem` fires only when the displayed MEM% actually changes: a known
+    /// value updates the cell, an unrelated change stays quiet, and two
+    /// `None`s (or the same `Some(x)`) never fire — mirroring the CPU%
+    /// behavior for a known-value cell.
+    #[test]
+    fn test_set_item_notifies_mem_only_when_displayed_value_changes() {
+        let r = ProcessRow::from_item(&item(5));
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        r.connect_notify_local(Some("mem"), move |row, _| {
+            let _ = tx.send(row.property::<String>("mem"));
+        });
+
+        // None -> Some(1.5) displays "1.5%" and fires once.
+        let mut known = item(5);
+        known.value.mem_percent = Some(1.5);
+        r.set_item(&known);
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec!["1.5%".to_string()]);
+
+        // Same value again: no notification.
+        r.set_item(&known);
+        assert!(rx.try_iter().collect::<Vec<String>>().is_empty());
+
+        // Unrelated field changes: still quiet.
+        let mut other = known.clone();
+        other.value.username = "root".to_string();
+        r.set_item(&other);
+        assert!(
+            rx.try_iter().collect::<Vec<String>>().is_empty(),
+            "an unrelated change must not notify mem"
+        );
+
+        // Some -> None flips the cell back to blank and fires once.
+        let blank = item(5);
+        r.set_item(&blank);
+        assert_eq!(
+            rx.try_iter().collect::<Vec<_>>(),
+            vec![String::new()],
+            "Some -> None must re-fire mem with the blank cell"
+        );
     }
 }

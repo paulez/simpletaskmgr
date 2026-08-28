@@ -7,7 +7,7 @@ A lightweight, interactive system process manager built with Rust that displays 
 - **Real-time Process Display**: Shows PID, Real User ID (RUID), and process name for each running process
 - **Disk I/O Activity**: Per-process disk read/write speed (bytes per second) measured between refreshes
 - **Auto-refresh**: The process list automatically updates every 1.5 seconds, in place and flicker-free (rows are re-used and re-texted, not rebuilt)
-- **Sortable Columns**: Click any header (PID, User, Name, CPU%, Disk R, Disk W) to sort the list ascending/descending
+- **Sortable Columns**: Click any header (PID, User, Name, CPU%, MEM%, Disk R, Disk W) to sort the list ascending/descending
 - **Show All Processes**: Toggle showing every process on the system, or only the current user's (the default)
 - **Modern UI**: Built with GTK 4 for a native, responsive, clean interface
 - **Linux Native**: Direct access to Linux `/proc` filesystem for accurate process information
@@ -102,6 +102,7 @@ Each process entry shows:
 - **User**: Real user ID / username (the user who owns the process)
 - **Name**: Process name
 - **CPU%**: Per-core CPU usage for the last sample
+- **MEM%**: Share of system memory used by the process (`VmRSS` from `/proc/[pid]/status` divided by `MemTotal` from `/proc/meminfo`, like `top`'s RES/MEM%); blank when the process's `VmRSS` or the system's `MemTotal` couldn't be read
 - **Disk R**: Disk read speed since the last refresh (blank when not yet measured or not accessible)
 - **Disk W**: Disk write speed since the last refresh (blank when not yet measured or not accessible)
 

@@ -12,6 +12,9 @@ pub struct TaskMgrProcess {
     pub ruid: u32,
     pub username: String,
     pub cpu_percent: f64, // top-style per-core CPU%, may exceed 100 for multi-threaded
+    /// Share of system memory in percent (`VmRSS / MemTotal * 100`), or
+    /// `None` when the RSS can't be read (e.g. another user's kernel thread).
+    pub mem_percent: Option<f64>,
     /// Disk read speed in bytes/second, or `None` when no rate is known yet
     /// (first sample of a newly tracked process, or no permission to read
     /// `/proc/[pid]/io`).
@@ -28,6 +31,7 @@ impl TaskMgrProcess {
             ruid,
             username,
             cpu_percent,
+            mem_percent: None,
             disk_read_speed: None,
             disk_write_speed: None,
         }
@@ -35,6 +39,13 @@ impl TaskMgrProcess {
 
     pub fn cpu_percent_str(&self) -> String {
         format!("{:.1}%", self.cpu_percent)
+    }
+
+    /// The memory percent formatted like `"1.5%"`, or `""` when unknown.
+    pub fn mem_percent_str(&self) -> String {
+        self.mem_percent
+            .map(|p| format!("{p:.1}%"))
+            .unwrap_or_default()
     }
 
     /// The disk read speed formatted like `"12.3 KiB/s"`, or `""` when unknown.
@@ -105,6 +116,11 @@ impl ProcessItem {
     pub fn cpu_percent_str(&self) -> String {
         self.value.cpu_percent_str()
     }
+
+    /// The current MEM% as a string, e.g. `"1.5%"`, or `""` when unknown.
+    pub fn mem_percent_str(&self) -> String {
+        self.value.mem_percent_str()
+    }
 }
 
 /// Builds a `TaskMgrProcess` from an already-read `stat` and the resolved UID.
@@ -122,6 +138,7 @@ pub(crate) fn build_task_mgr_process(
         ruid,
         username,
         cpu_percent: 0.0,
+        mem_percent: None,
         disk_read_speed: None,
         disk_write_speed: None,
     }
@@ -172,6 +189,30 @@ mod tests {
     fn test_task_mgr_process_cpu_percent_str() {
         assert_eq!(proc(1, 0.0).cpu_percent_str(), "0.0%");
         assert_eq!(proc(1, 12.34).cpu_percent_str(), "12.3%");
+    }
+
+    /// `mem_percent` starts unknown until a refresh has measured it, and a
+    /// known value formats like CPU% while `None` formats to an empty cell.
+    #[test]
+    fn test_mem_percent_defaults_to_unknown_and_formats() {
+        let p = proc(1, 0.0);
+        assert!(p.mem_percent.is_none());
+        assert_eq!(p.mem_percent_str(), "");
+
+        let mut known = proc(1, 0.0);
+        known.mem_percent = Some(1.25);
+        assert_eq!(known.mem_percent_str(), "1.2%");
+        known.mem_percent = Some(42.96);
+        assert_eq!(known.mem_percent_str(), "43.0%");
+    }
+
+    /// `ProcessItem` mirrors `mem_percent_str` from the current snapshot.
+    #[test]
+    fn test_process_item_mem_percent_str() {
+        let mut p = proc(7, 12.34);
+        p.mem_percent = Some(3.5);
+        let item = ProcessItem::new(&p);
+        assert_eq!(item.mem_percent_str(), "3.5%");
     }
 
     #[test]
