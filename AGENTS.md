@@ -52,6 +52,7 @@ Work in small, focused changes. Follow this gate before committing:
 5. **Commit** with a clear message (no `Co-Authored-By` or AI attribution)
 
 **Commit rules:**
+- Always commit when completing an approved plan, once the validation gate above passes
 - Never commit failing tests or clippy warnings
 - Do not push unless explicitly asked
 - Use `rustc --explain <error number>` for build errors
