@@ -632,6 +632,21 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // is a no-op on an empty model, so run it after the data exists.
     rebuild();
     column_view.sort_by_column(Some(&cpu_column), gtk4::SortType::Descending);
+    // GTK4's layout pass re-scrolls the list as the initial sort reorders
+    // rows, leaving it parked in the middle at launch. A raw
+    // `adjustment.set_value(0)` gets clobbered by that layout commit, so
+    // route through GTK's own `scroll_to` at the deterministic "just got
+    // mapped" point — after layout has resolved — instead of fighting it.
+    let cv = column_view.clone();
+    let win = window.clone();
+    win.connect_map(move |_| {
+        cv.scroll_to(
+            0,
+            Option::<&gtk4::ColumnViewColumn>::None,
+            gtk4::ListScrollFlags::NONE,
+            None,
+        );
+    });
 
     // ---- Refresh timer ------------------------------------------------------------
     restart_timer(&state, &rebuild, &graph_area);
