@@ -39,20 +39,6 @@
   padding: 2px 8px;
 }
 
-/* ---- List header --------------------------------------------------------- */
-.list-header {
-  padding: 6px 0;
-}
-
-.list-header-cell {
-  font-weight: bold;
-  margin: 0 1px;
-}
-
-.list-header-title {
-  margin: 4px 8px;
-}
-
 /* ---- Process list -------------------------------------------------------- */
 .process-list {
   border-radius: 6px;

@@ -46,12 +46,8 @@ impl ProcessList {
     pub fn init() -> Self {
         let mut new_list = Self::new();
         new_list.update_process_list();
-        // Default to the same sort the UI starts with (CPU%, descending) so
-        // the first paint matches the header's active indication.
-        new_list.sort_processes(
-            crate::SortColumn::CpuPercent,
-            crate::SortDirection::Descending,
-        );
+        // Display order is owned by GTK's `SortListModel`; the initial
+        // CPU%-descending sort is applied by `ui` after the first paint.
         new_list
     }
 
@@ -192,9 +188,9 @@ impl ProcessList {
     /// Compares two rows' values by the given column, ascending.
     ///
     /// `f64` is compared with `total_cmp` so `NaN` values sort without
-    /// panicking (unlike `partial_cmp().unwrap()`). Shared by
-    /// [`sort_processes`] and the `ColumnView` sorters, which must agree
-    /// exactly on row ordering.
+    /// panicking (unlike `partial_cmp().unwrap()`). This is the single
+    /// source of truth for row ordering: every native `GtkColumnView`
+    /// header sorter wraps it via `CustomSorter`.
     pub fn compare_values(
         a: &ProcessItem,
         b: &ProcessItem,
@@ -217,20 +213,6 @@ impl ProcessList {
                 .disk_write_speed
                 .unwrap_or(0.0)
                 .total_cmp(&b.value.disk_write_speed.unwrap_or(0.0)),
-        }
-    }
-
-    /// Sorts the process list in place by the specified column and direction.
-    ///
-    /// `f64` is compared with `total_cmp` so `NaN` values sort without
-    /// panicking (unlike `partial_cmp().unwrap()`).
-    pub fn sort_processes(&mut self, column: crate::SortColumn, direction: crate::SortDirection) {
-        let by = |a: &ProcessItem, b: &ProcessItem| -> std::cmp::Ordering {
-            Self::compare_values(a, b, column)
-        };
-        match direction {
-            crate::SortDirection::Ascending => self.processes.sort_by(by),
-            crate::SortDirection::Descending => self.processes.sort_by(|a, b| by(b, a)),
         }
     }
 }
@@ -275,69 +257,60 @@ mod tests {
         assert!(should_read_io(0, 0), "root reading a root process");
     }
 
-    /// A `f64` NaN must not panic the sort (regression for `partial_cmp().unwrap()`).
+    /// A `f64` NaN must not panic the comparator (regression for
+    /// `partial_cmp().unwrap()`): it must still order, never panic, and the
+    /// resulting sort must be total.
     #[test]
-    fn test_sort_by_cpu_percent_with_nan_does_not_panic() {
-        let mut list = ProcessList::new();
-        let items = [(1, f64::NAN), (2, 5.0), (3, -1.0)]
-            .into_iter()
-            .map(|(pid, cpu)| {
-                let p = TaskMgrProcess::new(format!("name{}", pid), pid, 1, "u".to_string(), cpu);
-                ProcessItem::new(&p)
-            })
-            .collect();
-        list.processes = items;
-
-        list.sort_processes(
-            crate::SortColumn::CpuPercent,
-            crate::SortDirection::Ascending,
-        );
-        list.sort_processes(
-            crate::SortColumn::CpuPercent,
-            crate::SortDirection::Descending,
-        );
-
-        // Sorting must leave the list intact with the same set of PIDs.
-        let mut pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
-        pids.sort_unstable();
-        assert_eq!(pids, vec![1, 2, 3]);
-    }
-
-    /// Re-sorting after a refresh re-applies the current sort to the new data;
-    /// repeated sorts are stable and never lose or duplicate rows.
-    #[test]
-    fn test_repeated_sorts_are_stable_and_reapply() {
-        fn make_items(pid: i32) -> ProcessItem {
-            let p =
-                TaskMgrProcess::new(format!("name{}", pid), pid, 1, "u".to_string(), pid as f64);
+    fn test_compare_cpu_nan_does_not_panic_and_is_total_order() {
+        fn item(pid: i32, cpu: f64) -> ProcessItem {
+            let p = TaskMgrProcess::new(format!("name{pid}"), pid, 1, "u".to_string(), cpu);
             ProcessItem::new(&p)
         }
 
-        let mut list = ProcessList::new();
-        list.processes = (6..=10).map(make_items).collect();
+        let items = vec![item(1, f64::NAN), item(2, 5.0), item(3, -1.0)];
+        let mut ascending = items.clone();
+        ascending.sort_by(|a, b| ProcessList::compare_values(a, b, crate::SortColumn::CpuPercent));
 
-        // A refresh replaced the data; sort it descending by CPU (pid == cpu).
-        list.processes = (5..=14).map(make_items).collect();
-        list.sort_processes(
-            crate::SortColumn::CpuPercent,
-            crate::SortDirection::Descending,
+        // `total_cmp` orders the finite values and pushes NaN to the end.
+        let pids: Vec<i32> = ascending.iter().map(|i| i.pid).collect();
+        assert_eq!(pids, vec![3, 2, 1], "NaN sorts last; no panic; total order");
+    }
+
+    /// `compare_values` is a *total, antisymmetric, consistent* ordering for
+    /// any column — the property a stable sort (whether Rust's or GTK's
+    /// `SortListModel`) relies on to never lose or duplicate rows.
+    #[test]
+    fn test_compare_values_is_total_and_antisymmetric() {
+        fn item(pid: i32) -> ProcessItem {
+            let p = TaskMgrProcess::new(format!("name{pid}"), pid, 1, "u".to_string(), pid as f64);
+            ProcessItem::new(&p)
+        }
+
+        let a = item(5);
+        let b = item(9);
+        let c = item(5); // same pid as `a` but a distinct object
+
+        // Antisymmetry: compare(a,b) == reverse of compare(b,a).
+        let ab = ProcessList::compare_values(&a, &b, crate::SortColumn::Pid);
+        let ba = ProcessList::compare_values(&b, &a, crate::SortColumn::Pid);
+        assert_eq!(ab, std::cmp::Ordering::Less);
+        assert_eq!(ba, std::cmp::Ordering::Greater);
+
+        // Consistency: equal values compare equal no matter the order.
+        assert_eq!(
+            ProcessList::compare_values(&a, &c, crate::SortColumn::Pid),
+            std::cmp::Ordering::Equal
+        );
+        assert_eq!(
+            ProcessList::compare_values(&c, &a, crate::SortColumn::Pid),
+            std::cmp::Ordering::Equal
         );
 
-        // Re-sorting the same column/direction is a no-op in ordering.
-        list.sort_processes(
-            crate::SortColumn::CpuPercent,
-            crate::SortDirection::Descending,
-        );
-        let pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
-        assert_eq!(pids, vec![14, 13, 12, 11, 10, 9, 8, 7, 6, 5]);
-
-        // Switching to an ascending sort reorders the same set of rows.
-        list.sort_processes(
-            crate::SortColumn::CpuPercent,
-            crate::SortDirection::Ascending,
-        );
-        let pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
-        assert_eq!(pids, vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+        // Transitivity across three distinct values.
+        let d = item(7);
+        assert!(ProcessList::compare_values(&a, &d, crate::SortColumn::Pid).is_lt());
+        assert!(ProcessList::compare_values(&d, &b, crate::SortColumn::Pid).is_lt());
+        assert!(ProcessList::compare_values(&a, &b, crate::SortColumn::Pid).is_lt());
     }
 
     /// `update_process_list` rebuilds the visible rows and keeps them consistent
@@ -356,30 +329,28 @@ mod tests {
         );
     }
 
-    /// `init` seeds the list with the default sort from the UI: CPU%
-    /// descending, so the first paint is already ordered (not `Pid` order).
+    /// `init` no longer sorts (display order is owned by GTK's `SortListModel`,
+    /// applied by `ui` after the first paint). All it must guarantee is that
+    /// it populates the current-user rows from `/proc`, uniquely.
     #[test]
-    fn test_init_sorts_by_cpu_descending() {
-        let item = |pid: i32, cpu: f64| {
-            let p = TaskMgrProcess::new(format!("name{pid}"), pid, 1, "u".to_string(), cpu);
-            ProcessItem::new(&p)
-        };
-
-        let mut list = ProcessList::new();
-        list.processes = vec![item(1, 0.5), item(2, 9.25), item(3, 1.75)];
-        // Re-apply exactly what `init` does after `update_process_list`.
-        list.sort_processes(
-            crate::SortColumn::CpuPercent,
-            crate::SortDirection::Descending,
+    fn test_init_populates_unique_rows() {
+        let list = ProcessList::init();
+        let mut pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
+        pids.sort_unstable();
+        pids.dedup();
+        assert_eq!(
+            pids.len(),
+            list.processes.len(),
+            "init must not duplicate a pid"
         );
-
-        let pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
-        assert_eq!(pids, vec![2, 3, 1]);
+        assert!(
+            !list.processes.is_empty(),
+            "init must see at least the current process"
+        );
     }
 
-    /// `compare_values` is the exact comparator the `ColumnView` sorters run
-    /// (and `sort_processes` delegates to): it must be consistent with the
-    /// sort order and NaN-safe.
+    /// `compare_values` is the exact comparator the `ColumnView` sorters run:
+    /// it must be consistent with the sort order and NaN-safe.
     #[test]
     fn test_compare_values_matches_sort_order_and_is_nan_safe() {
         fn item(pid: i32, cpu: f64) -> ProcessItem {
@@ -425,10 +396,10 @@ mod tests {
         TaskMgrProcess::new(format!("name{pid}"), pid, ruid, "u".to_string(), 0.0)
     }
 
-    /// Sorting by a disk speed column tolerates unknown (`None`) rates without
-    /// panicking; `None` sorts as 0.0.
+    /// Comparing by a disk speed column tolerates unknown (`None`) rates
+    /// without panicking; `None` sorts as 0.0.
     #[test]
-    fn test_sort_by_disk_speeds_with_none_does_not_panic() {
+    fn test_compare_disk_speeds_with_none_does_not_panic() {
         fn item(pid: i32, read: Option<f64>, write: Option<f64>) -> ProcessItem {
             let mut p = proc(pid, 1);
             p.disk_read_speed = read;
@@ -436,31 +407,36 @@ mod tests {
             ProcessItem::new(&p)
         }
 
-        let mut list = ProcessList::new();
-        list.processes = vec![
-            item(1, None, Some(900.0)),
-            item(2, Some(50.0), None),
-            item(3, Some(10000.0), Some(20.0)),
-        ];
+        let none = item(1, None, Some(900.0));
+        let some_read = item(2, Some(50.0), None);
+        let some_write = item(3, None, Some(20.0));
 
-        for col in [
-            crate::SortColumn::DiskRead,
-            crate::SortColumn::DiskWrite,
-            crate::SortColumn::DiskRead,
-            crate::SortColumn::DiskWrite,
-        ] {
-            for dir in [
-                crate::SortDirection::Ascending,
-                crate::SortDirection::Descending,
-            ] {
-                list.sort_processes(col, dir);
-            }
-        }
+        // `None` behaves as 0.0, so it sorts below any positive rate and
+        // above nothing on either column — never a panic.
+        assert_eq!(
+            ProcessList::compare_values(&none, &some_read, crate::SortColumn::DiskRead),
+            std::cmp::Ordering::Less,
+            "None (0.0) < 50.0 on disk-read"
+        );
+        assert_eq!(
+            ProcessList::compare_values(&none, &some_write, crate::SortColumn::DiskWrite),
+            std::cmp::Ordering::Greater,
+            "900.0 > None (0.0) on disk-write"
+        );
 
-        // Rows are intact after sorting by a column mixing Some and None.
-        let mut pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
-        pids.sort_unstable();
-        assert_eq!(pids, vec![1, 2, 3]);
+        // `None` on both sides compares equal (both are 0.0) — still defined,
+        // not a panic; a real rate still beats it.
+        let both_none = item(4, None, None);
+        assert_eq!(
+            ProcessList::compare_values(&none, &both_none, crate::SortColumn::DiskRead),
+            std::cmp::Ordering::Equal,
+            "None vs None on disk-read is 0.0 == 0.0"
+        );
+        assert_eq!(
+            ProcessList::compare_values(&some_read, &both_none, crate::SortColumn::DiskRead),
+            std::cmp::Ordering::Greater,
+            "50.0 > None (0.0) on disk-read"
+        );
     }
 
     /// With `show_all` off, only the current user's rows survive the filter.

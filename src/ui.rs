@@ -13,7 +13,7 @@ use crate::refresh_list;
 use crate::settings::{settings_path, UserSettings};
 use crate::signal::Signal;
 use crate::usage_graph::paint_usage_chart;
-use crate::{SortColumn, SortDirection};
+use crate::SortColumn;
 
 const CSS: &str = include_str!("ui.css");
 
@@ -36,8 +36,6 @@ struct DetailLabels {
 
 struct State {
     process_list: ProcessList,
-    sort_column: SortColumn,
-    sort_direction: SortDirection,
     metrics: SystemMetrics,
     selected_pid: Option<i32>,
     settings: UserSettings,
@@ -69,8 +67,6 @@ impl State {
         metrics.push_sample();
         Self {
             process_list,
-            sort_column: SortColumn::CpuPercent,
-            sort_direction: SortDirection::Descending,
             metrics,
             selected_pid: None,
             settings,
@@ -87,24 +83,8 @@ impl State {
     }
 
     fn refresh(&mut self) {
-        let (col, dir) = (self.sort_column, self.sort_direction);
         self.process_list.update_process_list();
-        self.process_list.sort_processes(col, dir);
         self.metrics.push_sample();
-    }
-
-    fn on_sort_click(&mut self, col: SortColumn) {
-        let next = if self.sort_column == col {
-            match self.sort_direction {
-                SortDirection::Ascending => SortDirection::Descending,
-                SortDirection::Descending => SortDirection::Ascending,
-            }
-        } else {
-            SortDirection::Ascending
-        };
-        self.sort_column = col;
-        self.sort_direction = next;
-        self.process_list.sort_processes(col, next);
     }
 
     fn find(&self, pid: i32) -> Option<&ProcessItem> {
@@ -218,29 +198,38 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         paint_usage_chart(cr, w as f64, h as f64, &samples);
     });
 
-    // ---- List header (6 sortable columns) ------------------------------------
-    let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-    header.add_css_class("list-header");
-
     // ---- Process list (GtkColumnView) -----------------------------------------
-    // The model chain is `ListStore<ProcessRow> -> SingleSelection ->
-    // ColumnView`. One `ColumnViewColumn` per field; each column's cell is a
-    // single `Label` whose `label` property is bound straight to the matching
-    // `ProcessRow` string property — re-texting a cell on refresh is a pure
-    // `g_object_notify`, no label bookkeeping.
+    // The model chain is `ListStore<ProcessRow> -> SortListModel ->
+    // SingleSelection -> ColumnView`. One `ColumnViewColumn` per field; each
+    // column's cell is a single `Label` whose `label` property is bound
+    // straight to the matching `ProcessRow` string property — re-texting a
+    // cell on refresh is a pure `g_object_notify`, no label bookkeeping.
     //
-    // Fixed column widths (numeric fields) + the Name column expanding keeps
-    // the row geometry owned by `ColumnView`, which is what makes the header
-    // row (built below) line up with the rows: same CSS widths on both.
+    // The header row is the one `GtkColumnView` draws natively: it is
+    // interactive because every column carries a `Sorter` and the view's
+    // `SortListModel` carries the view's own `ColumnViewSorter`. Clicking a
+    // header cell re-sorts exactly that column (and toggles direction on a
+    // second click) entirely inside GTK — no app-side sort state, no custom
+    // header widgets.
     //
-    // Sorting is data-level (`ProcessList::sort_processes`) driven from the
-    // header buttons; the store is spliced in place so the view never
-    // destroys a row object — the anti-flicker contract from
-    // `refresh_list.rs`.
+    // The store is spliced in place by `refresh_list::refresh` (the
+    // anti-flicker contract), and the `SortListModel` re-sorts it with a
+    // single remove+re-add `items-changed` signal on a header click — GTK
+    // keeps every row object (and its widgets) alive across both.
     let store = gtk4::gio::ListStore::new::<ProcessRow>();
-    let selection = gtk4::SingleSelection::new(Some(store.clone()));
-    // Allow the user to click a selected row to deselect it again (a
-    // `SingleSelection` forbids this by default).
+    let column_view = gtk4::ColumnView::builder().build();
+    // `gtk_column_view_sort_by_column` sorts through this model, and the
+    // header only becomes clickable once the view reports a sorter: the
+    // `ColumnViewSorter` GTK hands out when the view is attached to a model.
+    let sort_model = gtk4::SortListModel::new(
+        Some(store.clone()),
+        Some(column_view.sorter().expect("ColumnView exposes a sorter")),
+    );
+    let selection = gtk4::SingleSelection::new(Some(sort_model.clone()));
+    // A plain single-click always (re)selects; only a *modified* click (the
+    // space key, held with Ctrl) or our `activate` handler below can clear
+    // the highlight. A `SingleSelection` forbids unselecting by default, so
+    // lift that first.
     selection.set_can_unselect(true);
     // `GtkSingleSelection` autoselects the first row by default — so a row is
     // already selected when the list is first populated, and any deselect
@@ -248,19 +237,6 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // and clicking the highlighted row truly clears it.
     selection.set_autoselect(false);
     let sel_holder = selection.clone();
-
-    // Column widths in px (numeric columns fixed; the Name column expands).
-    // The header buttons (built below) keep the same column order/titles, so
-    // the two rows line up: fixed widths here mirror the header's CSS
-    // min-widths and the Name column's `hexpand` mirrors the Name button's.
-    const COLS: [(&str, i32, bool); 6] = [
-        ("PID", 70, false),
-        ("User", 90, false),
-        ("Name", -1, true),
-        ("CPU%", 70, false),
-        ("Disk R", 80, false),
-        ("Disk W", 80, false),
-    ];
 
     // Row factory (shared): one `Label` per item, bound to the row's
     // `ProcessRow` property for that column (`prop_name`).
@@ -271,6 +247,14 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
             let label = gtk4::Label::new(None);
             label.set_xalign(0.0);
             li.set_child(Some(&label));
+            // GTK's plain row click handler always (re)selects — it never
+            // deselects. Making the row *activatable* (see `GtkListItem` docs)
+            // flips that: a single click emits the row's *activate* action
+            // instead of a select, so the `connect_activate` handler below
+            // can route an already-selected row to `unselect` (the "click the
+            // highlighted row again to clear it" behavior) while still
+            // selecting new rows.
+            li.set_activatable(true);
         });
         f.connect_bind(move |_f, li| {
             let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
@@ -296,26 +280,56 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         f
     }
 
-    let column_view = gtk4::ColumnView::new(Some(selection));
-    column_view.add_css_class("process-list");
-    for (title, width, expand) in COLS.iter() {
-        let prop = match *title {
-            "PID" => "pid",
-            "User" => "username",
-            "Name" => "name",
-            "CPU%" => "cpu",
-            "Disk R" => "disk-read",
-            "Disk W" => "disk-write",
-            _ => unreachable!(),
-        };
+    // A `Sorter` per column drives the native header: a header click asks
+    // the view to sort by that column, and the `SortListModel` above
+    // re-orders the rows with its (multi-)sorter. All six columns share one
+    // comparator source of truth — `ProcessList::compare_values` — so the
+    // header ordering can never disagree with the data.
+    fn make_column_sorter(sort_col: crate::SortColumn) -> gtk4::CustomSorter {
+        gtk4::CustomSorter::new(move |a: &glib::Object, b: &glib::Object| {
+            let ra = a.downcast_ref::<ProcessRow>().expect("a ProcessRow");
+            let rb = b.downcast_ref::<ProcessRow>().expect("a ProcessRow");
+            let ia = ra.item();
+            let ib = rb.item();
+            ProcessList::compare_values(&ia, &ib, sort_col).into()
+        })
+    }
+
+    // (title, property of `ProcessRow`, fixed width in px, expand?, sort
+    // column) — column widths keep the numeric columns compact and let the
+    // Name column absorb the remaining width.
+    const COLS: [(&str, &str, i32, bool, SortColumn); 6] = [
+        ("PID", "pid", 70, false, SortColumn::Pid),
+        ("User", "username", 90, false, SortColumn::Username),
+        ("Name", "name", -1, true, SortColumn::Name),
+        ("CPU%", "cpu", 70, false, SortColumn::CpuPercent),
+        ("Disk R", "disk-read", 80, false, SortColumn::DiskRead),
+        ("Disk W", "disk-write", 80, false, SortColumn::DiskWrite),
+    ];
+
+    let mut columns: Vec<gtk4::ColumnViewColumn> = Vec::new();
+    for (title, prop, width, expand, sort_col) in COLS.iter() {
         let col = gtk4::ColumnViewColumn::new(Some(title), Some(make_cell_factory(prop)));
         if *expand {
             col.set_expand(true);
         } else if *width > 0 {
             col.set_fixed_width(*width);
         }
+        col.set_sorter(Some(&make_column_sorter(*sort_col)));
         column_view.append_column(&col);
+        columns.push(col);
     }
+    // The CPU% column, kept so the initial sort (below) can address it.
+    let cpu_column = columns[3].clone();
+    column_view.set_model(Some(&selection));
+    column_view.add_css_class("process-list");
+    // Rows are `activatable` (see the cell factory). With
+    // single-click-activate on, a *single* click emits the view's `activate`
+    // action for the clicked row (GTK performs no selection itself in that
+    // path), and the handler below decides select vs. deselect based on the
+    // row's current state — which is exactly the "click the highlighted row
+    // to deselect it" request.
+    column_view.set_single_click_activate(true);
 
     let list_scroll = gtk4::ScrolledWindow::new();
     list_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
@@ -389,7 +403,6 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
 
     // ---- Assemble root ---------------------------------------------------------
     root.append(&graph_area);
-    root.append(&header);
     root.append(&body);
 
     // ---- Settings button + popover ---------------------------------------------
@@ -440,33 +453,19 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     toolbar.add_css_class("toolbar");
     toolbar.append(&settings_btn);
-    root.insert_child_after(&toolbar, Some(&header));
-
-    // ---- Header buttons (created after list is available) ----------------------
-    let columns: &[(SortColumn, &str)] = &[
-        (SortColumn::Pid, "PID"),
-        (SortColumn::Username, "User"),
-        (SortColumn::Name, "Name"),
-        (SortColumn::CpuPercent, "CPU%"),
-        (SortColumn::DiskRead, "Disk R"),
-        (SortColumn::DiskWrite, "Disk W"),
-    ];
-    let mut header_buttons: Vec<(SortColumn, gtk4::Button, gtk4::Label)> = Vec::new();
-    for (col, label_text) in columns.iter() {
-        let b = gtk4::Button::new();
-        b.add_css_class("list-header-cell");
-        b.set_hexpand(true);
-        let lbl = gtk4::Label::new(Some(label_text));
-        lbl.add_css_class("list-header-title");
-        b.set_child(Some(&lbl));
-        header.append(&b);
-        header_buttons.push((*col, b, lbl));
-    }
+    root.insert_child_after(&toolbar, Some(&graph_area));
 
     // ---- Shared closure: republish the store from state ------------------------
     let store_r = store.clone();
     let sel_r = sel_holder.clone();
+    let sort_r = sort_model.clone();
     let state_r = state.clone();
+    // The view's own sorter, captured so the refresh path can ask the
+    // `SortListModel` to re-run it after an in-place value update (see the
+    // `changed` call below).
+    let view_sorter_r = column_view
+        .sorter()
+        .expect("ColumnView exposes a sorter");
     let dp_labels = Rc::new(DetailLabels {
         pane: detail_scroll.clone(),
         pid: d_pid.clone(),
@@ -501,6 +500,19 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
 
         refresh_list::refresh(&store_r, &items);
 
+        // `refresh` updated the row *values* in place — it deliberately emits
+        // no `items-changed` for a stable-position value update (that is the
+        // anti-flicker contract). But `GtkSortListModel` only re-sorts when
+        // the store fires `items-changed` or its sorter emits `changed`; it
+        // *never* watches item properties. Without this kick the list would
+        // freeze at the order captured during the last membership change and
+        // drift away from the CPU% the labels are showing. Firing `changed`
+        // makes the `SortListModel` re-run our comparator; `gtk_column_view_
+        // sorter_set_column` does exactly this on every header click, so this
+        // reuses the same, proven path. If no column is sorted yet the
+        // sorter reports order NONE and the `changed` signal is a no-op.
+        view_sorter_r.changed(gtk4::SorterChange::Different);
+
         let adj_idle = adj_r.clone();
         let saved_idle = saved;
         glib::idle_add_local(move || {
@@ -516,8 +528,10 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
                     .is_some_and(|r| r.item().pid == p)
             });
             if !still_selected {
-                if let Some(i) = (0..store_r.n_items()).find(|i| {
-                    store_r
+                // The selection wraps the *sorted* model, so resolve the
+                // position in the `SortListModel`'s space, not the store's.
+                if let Some(i) = (0..sort_r.n_items()).find(|i| {
+                    sort_r
                         .item(*i)
                         .and_then(|o| o.downcast::<ProcessRow>().ok())
                         .is_some_and(|row| row.item().pid == p)
@@ -556,16 +570,27 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         });
     }
 
-    // ---- Header button handlers -------------------------------------------------
-    for (col, b, _lbl) in header_buttons.iter() {
-        let col = *col;
-        let state_h = state.clone();
-        let rebuild_h = rebuild.clone();
-        let header_all = header_buttons.clone();
-        b.connect_clicked(move |_| {
-            state_h.borrow_mut().on_sort_click(col);
-            rebuild_h();
-            update_header_indicators(&header_all, &state_h.borrow());
+    // ---- Click a row to select/deselect it ------------------------------------
+    // A plain click in `GtkListBase` always (re)selects — clicking an
+    // already-selected row is a no-op for `SingleSelection` — so GTK alone
+    // cannot "click the highlighted row to clear it". With the rows marked
+    // `activatable`, a single click emits the view's `activate` action
+    // (GTK does *not* also select it in that case), so we get to decide
+    // ourselves: if the row is already the selected one, treat the click as
+    // a deselect intent and clear it (a `SingleSelection` forbids unselecting
+    // by default — we lifted that with `set_can_unselect` above). The
+    // `selected`/`selected-item` notify that follows is what the handler
+    // above turns into a hidden detail pane.
+    {
+        let sel_act = sel_holder.clone();
+        column_view.connect_activate(move |_view, pos| {
+            let selected = sel_act.is_selected(pos);
+            log::info!("row activate at {pos}, selected={selected}");
+            if selected {
+                sel_act.unselect_item(pos);
+            } else {
+                sel_act.set_selected(pos);
+            }
         });
     }
 
@@ -648,8 +673,12 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     }
 
     // ---- Initial paint -----------------------------------------------------------
+    // Populate the store first (which also sorts it via the SortListModel
+    // once a sort is active), then apply the default sort — CPU% descending,
+    // matching the previous "highest first" launch state. `sort_by_column`
+    // is a no-op on an empty model, so run it after the data exists.
     rebuild();
-    update_header_indicators(&header_buttons, &state.borrow());
+    column_view.sort_by_column(Some(&cpu_column), gtk4::SortType::Descending);
 
     // ---- Refresh timer ------------------------------------------------------------
     restart_timer(&state, &rebuild, &graph_area);
@@ -698,35 +727,6 @@ fn apply_detail(dp: &Rc<DetailLabels>, state: &Rc<RefCell<State>>, pid: Option<i
             dp.disk_write.set_label("Disk write: —");
             dp.status.set_label("");
         }
-    }
-}
-
-fn update_header_indicators(buttons: &[(SortColumn, gtk4::Button, gtk4::Label)], state: &State) {
-    const COLUMN_TITLES: &[(SortColumn, &str)] = &[
-        (SortColumn::Pid, "PID"),
-        (SortColumn::Username, "User"),
-        (SortColumn::Name, "Name"),
-        (SortColumn::CpuPercent, "CPU%"),
-        (SortColumn::DiskRead, "Disk R"),
-        (SortColumn::DiskWrite, "Disk W"),
-    ];
-    for (col, _b, lbl) in buttons.iter() {
-        let title = COLUMN_TITLES
-            .iter()
-            .find(|(c, _)| c == col)
-            .map(|(_, t)| *t)
-            .unwrap_or("Col");
-        let arrow = match (*col == state.sort_column, state.sort_direction) {
-            (true, SortDirection::Ascending) => "  ↑",
-            (true, SortDirection::Descending) => "  ↓",
-            (false, _) => "",
-        };
-        if *col == state.sort_column {
-            _b.add_css_class("sort-active");
-        } else {
-            _b.remove_css_class("sort-active");
-        }
-        lbl.set_label(&format!("{title}{arrow}"));
     }
 }
 
@@ -798,19 +798,7 @@ mod tests {
     fn test_state_new_primes_metrics() {
         let s = test_state("metrics");
         assert!(!s.metrics.history().is_empty());
-        assert_eq!(s.sort_column, SortColumn::CpuPercent);
-        assert_eq!(s.sort_direction, SortDirection::Descending);
         assert!(s.selected_pid.is_none());
-    }
-
-    #[test]
-    fn test_state_on_sort_click_toggles() {
-        let mut s = test_state("sort");
-        let d0 = s.sort_direction;
-        s.on_sort_click(SortColumn::CpuPercent);
-        assert_ne!(s.sort_direction, d0);
-        s.on_sort_click(SortColumn::CpuPercent);
-        assert_eq!(s.sort_direction, d0);
     }
 
     #[test]
@@ -853,33 +841,18 @@ mod tests {
         assert_eq!(after, before + 1, "one refresh appends exactly one sample");
     }
 
-    /// refresh() preserves the sort state and selected pid the caller used; it
-    /// only re-derives the process list and advances the metric history.
+    /// refresh() preserves the selected pid the caller used; it only
+    /// re-derives the process list and advances the metric history. (Sort
+    /// state is no longer tracked in `State` — GTK's `SortListModel` owns it,
+    /// and the `CompareValues` comparator backs it.)
     #[test]
-    fn test_refresh_preserves_sort_and_selection() {
+    fn test_refresh_preserves_selection() {
         let mut s = test_state("refresh_preserve");
         s.selected_pid = Some(1);
-        s.sort_column = SortColumn::Name;
-        s.sort_direction = SortDirection::Ascending;
 
         s.refresh();
 
-        // Sort and selection are preserved; refresh only re-derived processes.
-        assert_eq!(s.sort_column, SortColumn::Name);
-        assert_eq!(s.sort_direction, SortDirection::Ascending);
         assert_eq!(s.selected_pid, Some(1));
-    }
-
-    /// Clicking a *different* column resets the direction back to the default
-    /// for that column (ASCENDING), matching the header-indicator code.
-    #[test]
-    fn test_on_sort_click_new_column_starts_ascending() {
-        let mut s = test_state("sort_column");
-        s.sort_column = SortColumn::CpuPercent;
-        s.sort_direction = SortDirection::Descending;
-        s.on_sort_click(SortColumn::Name);
-        assert_eq!(s.sort_column, SortColumn::Name);
-        assert_eq!(s.sort_direction, SortDirection::Ascending);
     }
 
     #[test]
