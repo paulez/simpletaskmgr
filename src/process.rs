@@ -132,7 +132,7 @@ mod tests {
     use super::*;
 
     fn proc(pid: i32, cpu: f64) -> TaskMgrProcess {
-        TaskMgrProcess::new(format!("name{}", pid), pid, 1000, "paul".to_string(), cpu)
+        crate::testutil::test_process(pid, cpu)
     }
 
     #[test]

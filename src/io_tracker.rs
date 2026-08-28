@@ -121,7 +121,7 @@ mod tests {
     use super::*;
 
     fn proc(pid: i32) -> TaskMgrProcess {
-        TaskMgrProcess::new(format!("name{pid}"), pid, 1000, "paul".to_string(), 0.0)
+        crate::testutil::test_process(pid, 0.0)
     }
 
     fn baseline(read: u64, write: u64, ts: f64) -> IoBaseline {

@@ -201,13 +201,7 @@ mod tests {
     use super::*;
 
     fn item(p: i32) -> ProcessItem {
-        ProcessItem::new(&crate::process::TaskMgrProcess::new(
-            format!("name{p}"),
-            p,
-            1000,
-            "paul".to_string(),
-            1.0,
-        ))
+        crate::testutil::test_item(p)
     }
 
     /// Seed a fresh `ListStore` with `ProcessRow`s for the given pids in order.

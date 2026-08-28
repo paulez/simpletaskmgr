@@ -734,16 +734,9 @@ fn load_css() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::TaskMgrProcess;
 
     fn item(pid: i32) -> ProcessItem {
-        ProcessItem::new(&TaskMgrProcess::new(
-            format!("name{pid}"),
-            pid,
-            1000,
-            "paul".to_string(),
-            1.0,
-        ))
+        crate::testutil::test_item(pid)
     }
 
     fn temp_settings_path(tag: &str) -> std::path::PathBuf {

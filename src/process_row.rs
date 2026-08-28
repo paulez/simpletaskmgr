@@ -170,13 +170,7 @@ mod tests {
     use super::*;
 
     fn item(pid: i32) -> ProcessItem {
-        ProcessItem::new(&crate::process::TaskMgrProcess::new(
-            format!("name{pid}"),
-            pid,
-            1000,
-            "paul".to_string(),
-            1.0,
-        ))
+        crate::testutil::test_item(pid)
     }
 
     #[test]

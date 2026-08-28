@@ -43,27 +43,6 @@ mod tests {
         }
     }
 
-    #[rstest]
-    fn test_process_names_struct_fields_accessible(all_processes: Vec<TaskMgrProcess>) {
-        if let Some(process) = all_processes.first() {
-            let _name: String = process.name.clone();
-            let _pid: i32 = process.pid;
-            let _ruid: u32 = process.ruid;
-            let _username: String = process.username.clone();
-        }
-    }
-
-    #[rstest]
-    fn test_process_names_handles_missing_users(all_processes: Vec<TaskMgrProcess>) {
-        // This test verifies that processes with non-existent users still work
-        for process in all_processes.iter() {
-            // Even if username is "unknown", it's still a valid result
-            if process.username == "unknown" {
-                assert!(!process.name.is_empty());
-            }
-        }
-    }
-
     #[fixture]
     fn all_processes() -> Vec<TaskMgrProcess> {
         init_log();

@@ -21,3 +21,6 @@ pub enum SortColumn {
     DiskRead,
     DiskWrite,
 }
+
+#[cfg(test)]
+mod testutil;
