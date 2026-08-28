@@ -24,7 +24,6 @@
     - Detail values update in place on each refresh while the process is selected
     - The detail pane is only visible while a process is selected; when none is selected the process list expands to the full width
     - No process is selected on launch
-    - Click the currently selected process to deselect it
 
     5. **Process Signal Management**
     - Send SIGHUP and SIGKILL signals to a selected process from its detail view

@@ -226,15 +226,9 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         Some(column_view.sorter().expect("ColumnView exposes a sorter")),
     );
     let selection = gtk4::SingleSelection::new(Some(sort_model.clone()));
-    // A plain single-click always (re)selects; only a *modified* click (the
-    // space key, held with Ctrl) or our `activate` handler below can clear
-    // the highlight. A `SingleSelection` forbids unselecting by default, so
-    // lift that first.
-    selection.set_can_unselect(true);
     // `GtkSingleSelection` autoselects the first row by default — so a row is
-    // already selected when the list is first populated, and any deselect
-    // immediately re-selects one. Disable it so launching shows no selection
-    // and clicking the highlighted row truly clears it.
+    // already selected when the list is first populated. Disable it so
+    // launching shows no selection and the list takes the full width.
     selection.set_autoselect(false);
     let sel_holder = selection.clone();
 
@@ -550,30 +544,6 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
                 .map(|r| r.item().pid);
             state_s.borrow_mut().selected_pid = pid;
             apply_detail(&dp_s, &state_s, pid);
-        });
-    }
-
-    // ---- Click a row to select/deselect it ------------------------------------
-    // A plain click in `GtkListBase` always (re)selects — clicking an
-    // already-selected row is a no-op for `SingleSelection` — so GTK alone
-    // cannot "click the highlighted row to clear it". With the rows marked
-    // `activatable`, a single click emits the view's `activate` action
-    // (GTK does *not* also select it in that case), so we get to decide
-    // ourselves: if the row is already the selected one, treat the click as
-    // a deselect intent and clear it (a `SingleSelection` forbids unselecting
-    // by default — we lifted that with `set_can_unselect` above). The
-    // `selected`/`selected-item` notify that follows is what the handler
-    // above turns into a hidden detail pane.
-    {
-        let sel_act = sel_holder.clone();
-        column_view.connect_activate(move |_view, pos| {
-            let selected = sel_act.is_selected(pos);
-            log::info!("row activate at {pos}, selected={selected}");
-            if selected {
-                sel_act.unselect_item(pos);
-            } else {
-                sel_act.set_selected(pos);
-            }
         });
     }
 
