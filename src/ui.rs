@@ -247,14 +247,6 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
             let label = gtk4::Label::new(None);
             label.set_xalign(0.0);
             li.set_child(Some(&label));
-            // GTK's plain row click handler always (re)selects — it never
-            // deselects. Making the row *activatable* (see `GtkListItem` docs)
-            // flips that: a single click emits the row's *activate* action
-            // instead of a select, so the `connect_activate` handler below
-            // can route an already-selected row to `unselect` (the "click the
-            // highlighted row again to clear it" behavior) while still
-            // selecting new rows.
-            li.set_activatable(true);
         });
         f.connect_bind(move |_f, li| {
             let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
@@ -323,13 +315,6 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let cpu_column = columns[3].clone();
     column_view.set_model(Some(&selection));
     column_view.add_css_class("process-list");
-    // Rows are `activatable` (see the cell factory). With
-    // single-click-activate on, a *single* click emits the view's `activate`
-    // action for the clicked row (GTK performs no selection itself in that
-    // path), and the handler below decides select vs. deselect based on the
-    // row's current state — which is exactly the "click the highlighted row
-    // to deselect it" request.
-    column_view.set_single_click_activate(true);
 
     let list_scroll = gtk4::ScrolledWindow::new();
     list_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
@@ -463,9 +448,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // The view's own sorter, captured so the refresh path can ask the
     // `SortListModel` to re-run it after an in-place value update (see the
     // `changed` call below).
-    let view_sorter_r = column_view
-        .sorter()
-        .expect("ColumnView exposes a sorter");
+    let view_sorter_r = column_view.sorter().expect("ColumnView exposes a sorter");
     let dp_labels = Rc::new(DetailLabels {
         pane: detail_scroll.clone(),
         pid: d_pid.clone(),
