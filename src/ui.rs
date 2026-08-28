@@ -218,7 +218,8 @@ fn build_graph_area(state: &Rc<RefCell<State>>) -> gtk4::DrawingArea {
     let st_graph = state.clone();
     graph_area.set_draw_func(move |_da, cr: &gtk4::cairo::Context, w: i32, h: i32| {
         let samples = st_graph.borrow().metrics.history();
-        paint_usage_chart(cr, w as f64, h as f64, &samples);
+        let capacity = SystemMetrics::MAX_HISTORY;
+        paint_usage_chart(cr, w as f64, h as f64, &samples, capacity);
     });
     graph_area
 }

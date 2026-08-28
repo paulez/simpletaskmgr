@@ -15,17 +15,24 @@ pub const LINE_WIDTH: f64 = 1.5;
 /// Radius of the "latest sample" marker dot (in pixels).
 pub const DOT_RADIUS: f64 = 1.5;
 
-/// Maps the i-th of `len` samples to a normalized x position (0..=1) across the
-/// full width. A single sample is centered so it isn't pinned to the left edge;
-/// two or more span edge to edge. Indexes past the end clamp to the last
-/// position.
-pub fn sample_x_frac(i: usize, len: usize) -> f64 {
-    if len <= 1 {
-        return 0.5;
+/// Maps the i-th of `n` samples (index 0 = oldest) to a pixel x coordinate on
+/// the right-anchored rolling window of width `w`.
+///
+/// The latest sample (index `n - 1`) always lands on the right edge (`w`);
+/// each older sample sits one fixed slot to its left, where
+/// `slot = w / (capacity - 1)`. With `capacity == n` a full history spans the
+/// entire width; a partial history occupies only the right-hand portion, so
+/// the trace grows from right to left until it is full and then scrolls left.
+/// Positions past the left edge clamp to 0. Indexes past `n - 1` clamp to the
+/// latest position.
+pub fn sample_x(i: usize, n: usize, capacity: usize, w: f64) -> f64 {
+    if n == 0 {
+        return 0.0;
     }
-    let i = i.min(len - 1) as f64;
-    let denominator = (len - 1) as f64;
-    i / denominator
+    let cap = capacity.max(2);
+    let slot = w / (cap - 1) as f64;
+    let steps_back = (n - 1 - i.min(n - 1)) as f64;
+    (w - steps_back * slot).max(0.0)
 }
 
 /// Maps a 0–100 percent value to a normalized y position (0..=1) where 100 is
@@ -37,13 +44,15 @@ pub fn sample_y_frac(value: f64) -> f64 {
 }
 
 /// Draws one series (area fill + line + latest-sample dot) into `ctx`, laid out
-/// across the widget's pixel size `(w, h)`. `value_of` picks the sampled value
-/// for either the CPU or memory field.
+/// across the widget's pixel size `(w, h)` on the right-anchored `capacity`-slot
+/// window. `value_of` picks the sampled value for either the CPU or memory
+/// field.
 fn draw_series(
     ctx: &Context,
     w: f64,
     h: f64,
     samples: &[Sample],
+    capacity: usize,
     value_of: impl Fn(&Sample) -> f64,
     rgb: (u8, u8, u8),
 ) {
@@ -57,15 +66,20 @@ fn draw_series(
     );
     let to_px = |i: usize| {
         (
-            sample_x_frac(i, samples.len()) * w,
+            sample_x(i, samples.len(), capacity, w),
             sample_y_frac(value_of(&samples[i])) * h,
         )
     };
 
-    // 1) Area fill (low alpha): bottom-left, samples in order, bottom-right.
     let n = samples.len();
+
+    // 1) Area fill (low alpha): the bottom of the first sample's column, the
+    //    samples in order, then the bottom-right corner. Filling starts under
+    //    the first (oldest) sample, so the unfilled left portion of the window
+    //    stays blank until the history grows to full capacity.
+    let (x0, y0) = to_px(0);
     ctx.new_path();
-    ctx.move_to(0.0, h);
+    ctx.move_to(x0, h);
     for i in 0..n {
         let (x, y) = to_px(i);
         ctx.line_to(x, y);
@@ -77,7 +91,6 @@ fn draw_series(
 
     // 2) Series outline.
     ctx.new_path();
-    let (x0, y0) = to_px(0);
     ctx.move_to(x0, y0);
     for i in 1..n {
         let (x, y) = to_px(i);
@@ -96,15 +109,17 @@ fn draw_series(
     let _ = ctx.fill();
 }
 
-/// Paints the rolling-window usage chart into `ctx`, spanning `(w, h)`. Memory
-/// is drawn first (below) and CPU on top; both share a 0–100% vertical axis
-/// with translucent fills. An empty history paints a blank, valid chart.
-pub fn paint_usage_chart(ctx: &Context, w: f64, h: f64, samples: &[Sample]) {
+/// Paints the rolling-window usage chart into `ctx`, spanning `(w, h)`.
+/// `capacity` is the sample count a full window holds (history cap); fewer
+/// samples occupy only the right-hand portion of the width. Memory is drawn
+/// first (below) and CPU on top; both share a 0–100% vertical axis with
+/// translucent fills. An empty history paints a blank, valid chart.
+pub fn paint_usage_chart(ctx: &Context, w: f64, h: f64, samples: &[Sample], capacity: usize) {
     if w <= 0.0 || h <= 0.0 {
         return;
     }
-    draw_series(ctx, w, h, samples, |s| s.mem, MEM_RGB);
-    draw_series(ctx, w, h, samples, |s| s.cpu, CPU_RGB);
+    draw_series(ctx, w, h, samples, capacity, |s| s.mem, MEM_RGB);
+    draw_series(ctx, w, h, samples, capacity, |s| s.cpu, CPU_RGB);
 }
 
 #[cfg(test)]
@@ -116,16 +131,69 @@ mod tests {
     }
 
     #[test]
-    fn test_sample_x_frac_spans_width() {
-        assert_eq!(sample_x_frac(0, 5), 0.0);
-        assert_eq!(sample_x_frac(4, 5), 1.0);
-        assert_eq!(sample_x_frac(2, 5), 0.5);
-        assert_eq!(sample_x_frac(9, 5), 1.0, "indexes past the end clamp");
+    fn test_sample_x_latest_pins_to_right_edge() {
+        let w = 400.0;
+        assert_eq!(sample_x(4, 5, 120, w), w);
+        assert_eq!(
+            sample_x(0, 1, 120, w),
+            w,
+            "a lone sample sits on the right edge"
+        );
+        assert_eq!(
+            sample_x(9, 5, 120, w),
+            w,
+            "indexes past the end clamp to the latest position"
+        );
     }
 
     #[test]
-    fn test_sample_x_frac_single_is_centered() {
-        assert_eq!(sample_x_frac(0, 1), 0.5);
+    fn test_sample_x_steps_left_one_slot_older() {
+        let w = 480.0;
+        let cap = 10;
+        let slot = w / (cap - 1) as f64;
+        let n = 3;
+        assert_eq!(
+            sample_x(n - 1, n, cap, w),
+            w,
+            "latest sits on the right edge"
+        );
+        assert_eq!(
+            sample_x(n - 2, n, cap, w),
+            w - slot,
+            "one older steps back one slot"
+        );
+        assert_eq!(
+            sample_x(n - 3, n, cap, w),
+            w - 2.0 * slot,
+            "two older step back two slots"
+        );
+    }
+
+    #[test]
+    fn test_sample_x_full_window_reaches_left_edge() {
+        let w = 400.0;
+        let cap = 120;
+        assert_eq!(
+            sample_x(0, cap, cap, w),
+            0.0,
+            "a full history touches the left edge"
+        );
+        // One sample short of a full window leaves exactly one slot (w/(cap-1))
+        // of blank space on the left. Tolerance comparison: the function
+        // computes `w - (n-1) * (w/(cap-1))`, which rounds a few uops apart
+        // from `w * (cap-n)/(cap-1)`.
+        let expected = w * (cap - (cap - 1)) as f64 / (cap - 1) as f64;
+        assert!(
+            (sample_x(0, cap - 1, cap, w) - expected).abs() < 1e-9,
+            "one sample short of a full window leaves one slot blank on the left"
+        );
+    }
+
+    #[test]
+    fn test_sample_x_clamps_at_left_edge() {
+        let w = 400.0;
+        let x = sample_x(0, 200, 5, w);
+        assert!((0.0..=w).contains(&x), "over-capacity histories clamp at 0");
     }
 
     #[test]
@@ -148,27 +216,25 @@ mod tests {
 
     #[test]
     fn test_series_points_land_in_bounds() {
-        // First sample (value 0) and latest (value 100) must stay within the
-        // widget's pixel bounds for a typical paint.
-        let s = samples(&[0.0, 100.0]);
+        // Every sample of a short history must stay within the widget's pixel
+        // bounds: right-anchored, stepping left by one slot each.
+        let s = samples(&[0.0, 25.0, 50.0, 75.0, 100.0]);
         let w = 400.0;
         let h = 90.0;
         let n = s.len();
-        let first = (sample_x_frac(0, n) * w, sample_y_frac(s[0].cpu) * h);
-        let last = (sample_x_frac(n - 1, n) * w, sample_y_frac(s[n - 1].cpu) * h);
-        for (x, y) in [first, last] {
+        for (i, smp) in s.iter().enumerate() {
+            let (x, y) = (sample_x(i, n, 120, w), sample_y_frac(smp.cpu) * h);
             assert!((0.0..=w).contains(&x));
             assert!((0.0..=h).contains(&y));
         }
     }
 
     #[test]
-    fn test_single_sample_is_centered_in_bounds() {
-        let s = samples(&[55.0]);
+    fn test_single_sample_is_right_anchored_in_bounds() {
         let w = 300.0;
         let h = 80.0;
-        let (x, y) = (sample_x_frac(0, 1) * w, sample_y_frac(s[0].cpu) * h);
-        assert!((0.0..=w).contains(&x));
+        let (x, y) = (sample_x(0, 1, 120, w), sample_y_frac(55.0) * h);
+        assert_eq!(x, w, "the lone 'now' sample sits on the right edge");
         assert!((0.0..=h).contains(&y));
     }
 }

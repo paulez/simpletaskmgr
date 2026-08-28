@@ -15,7 +15,7 @@ A lightweight, interactive system process manager built with Rust that displays 
 - **Clean Start**: On launch no process is selected, so the list takes the full width and the detail pane is hidden until you pick one
 - **Highest CPU First**: On launch the list is sorted by CPU% (highest first) and scrolled to the top, so the most active processes are visible immediately
 - **Signal Management**: Send SIGHUP or SIGKILL to a selected process from its detail view, with success/failure feedback
-- **Resource Usage Graph**: An always-on chart above the process list shows system-wide CPU and memory usage over time (a rolling window of ~3 minutes), updating with each refresh
+- **Resource Usage Graph**: An always-on chart above the process list shows system-wide CPU and memory usage over time (a rolling window of ~3 minutes), updating with each refresh. The newest sample is pinned to the right edge and each sample occupies a fixed time slot: the trace grows from right to left until the history is full (~120 samples at the default 1.5s refresh), then scrolls left
 - **Persistent Settings**: Your choices (show-all filter, refresh interval) survive restarts. Open the **Settings** popover in the toolbar to change them.
 
 ## Requirements
@@ -95,7 +95,11 @@ System-wide CPU and memory usage are sampled once per refresh and kept in a
 rolling history (the last ~120 samples). CPU% is computed from the delta in the
 aggregate `/proc/stat` `cpu` line; memory% is `(MemTotal − MemAvailable) /
 MemTotal` from `/proc/meminfo`. The resource graph renders both as area charts on
-a shared 0-100% axis, drawn with cairo into a `DrawingArea`.
+a shared 0-100% axis, drawn with cairo into a `DrawingArea`. The window is
+right-anchored and fixed-slot: the newest sample sits at the right edge, each
+older sample one slot to the left, and the left side stays blank until the
+history fills the full width — then new samples scroll the trace left, exactly
+like a scrolling system monitor.
 
 Each process entry shows:
 - **PID**: Process identifier
