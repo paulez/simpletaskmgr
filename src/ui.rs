@@ -280,7 +280,7 @@ fn make_column_sorter(sort_col: SortColumn) -> gtk4::CustomSorter {
 /// `SortListModel` carries the view's own `ColumnViewSorter`. Clicking a
 /// header cell re-sorts exactly that column (and toggles direction on a
 /// second click) entirely inside GTK — no app-side sort state, no custom
-/// header widgets.
+/// header widgets. Columns are resizable via header drag.
 ///
 /// The store is spliced in place by `refresh_list::refresh` (the
 /// anti-flicker contract), and the `SortListModel` re-sorts it with a
@@ -304,7 +304,8 @@ fn build_process_list() -> ListView {
 
     // (title, property of `ProcessRow`, fixed width in px, expand?, sort
     // column) — column widths keep the numeric columns compact and let the
-    // Name column absorb the remaining width.
+    // Name column absorb the remaining width. Every column is user-resizable
+    // by dragging its header.
     const COLS: [(&str, &str, i32, bool, SortColumn); 6] = [
         ("PID", "pid", 70, false, SortColumn::Pid),
         ("User", "username", 90, false, SortColumn::Username),
@@ -322,6 +323,7 @@ fn build_process_list() -> ListView {
         } else if *width > 0 {
             col.set_fixed_width(*width);
         }
+        col.set_resizable(true);
         col.set_sorter(Some(&make_column_sorter(*sort_col)));
         column_view.append_column(&col);
         columns.push(col);
