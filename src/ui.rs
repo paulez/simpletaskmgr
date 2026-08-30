@@ -334,6 +334,61 @@ fn build_process_list() -> ListView {
     // The CPU% column, kept so the initial sort can address it.
     let cpu_column = columns[3].clone();
     column_view.set_model(Some(&selection));
+
+    // GTK starts every *freshly activated* column ascending (the header-click
+    // path sets `inverted = FALSE` for a new column). For a process list that
+    // is backwards on the numeric columns: the interesting value (most CPU,
+    // most RAM, fastest I/O) belongs at the top. Flip a first-time-activated
+    // numeric column to descending, while leaving PID/User/Name ascending and
+    // keeping the second-click toggle. We watch the view sorter's `changed`
+    // and re-issue `sort_by_column` (which honors the direction explicitly)
+    // only for a column that newly became primary and is still ascending; a
+    // toggle or a sort refresh leaves the primary unchanged and is left alone.
+    use std::collections::HashSet;
+    let numeric_ptrs: HashSet<usize> = COLS
+        .iter()
+        .zip(&columns)
+        .filter(|(spec, _)| {
+            matches!(
+                spec.4,
+                SortColumn::CpuPercent
+                    | SortColumn::MemPercent
+                    | SortColumn::DiskRead
+                    | SortColumn::DiskWrite
+            )
+        })
+        .map(|(_, col)| col.as_ptr() as usize)
+        .collect();
+
+    let view_sorter = column_view.sorter().expect("ColumnView exposes a sorter");
+    let prev_primary = Rc::new(RefCell::new(None::<usize>));
+    let flipping = Rc::new(RefCell::new(false));
+    let cv = column_view.clone();
+    view_sorter.connect_changed(move |sorter, _change| {
+        // `sort_by_column` below re-emits `changed`; ignore that re-entrancy.
+        if *flipping.borrow() {
+            return;
+        }
+        let Some(s) = sorter.downcast_ref::<gtk4::ColumnViewSorter>() else {
+            return;
+        };
+        let Some(col) = s.primary_sort_column() else {
+            *prev_primary.borrow_mut() = None;
+            return;
+        };
+        let ptr = col.as_ptr() as usize;
+        let new_primary = Some(ptr) != *prev_primary.borrow();
+        *prev_primary.borrow_mut() = Some(ptr);
+        if new_primary
+            && numeric_ptrs.contains(&ptr)
+            && s.primary_sort_order() == gtk4::SortType::Ascending
+        {
+            *flipping.borrow_mut() = true;
+            cv.sort_by_column(Some(&col), gtk4::SortType::Descending);
+            *flipping.borrow_mut() = false;
+        }
+    });
+
     column_view.add_css_class("process-list");
 
     let list_scroll = gtk4::ScrolledWindow::new();
