@@ -41,3 +41,7 @@
 1. **Enhanced User Experience**
     - Improved visual layout and styling
     - Better error handling and user feedback
+2. **Show CPU status**
+   - Show current CPU frequency
+   - Show CPU frequency overtime on the usage graph
+   - Show CPU temps
