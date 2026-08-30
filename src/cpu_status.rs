@@ -4,7 +4,7 @@
 //! `None` when the source is absent (e.g. running in a container without the
 //! driver), so the UI can show a blank placeholder instead of failing.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use log::debug;
 
@@ -17,6 +17,10 @@ const CUR_FREQ_KHZ: &str = "scaling_cur_freq";
 /// `scaling_max_freq` reports the ceiling the governor can reach, in kHz — the
 /// top of the frequency-axis domain for the graph.
 const MAX_FREQ_KHZ: &str = "scaling_max_freq";
+
+/// Root of the hardware-monitor class; each `hwmonN` child carries a `name`
+/// and one or more `tempN_input` readings in millidegrees.
+const HWMON_DIR: &str = "/sys/class/hwmon";
 
 /// Parses a `cpufreq` frequency file containing a single kilohertz value into
 /// an integer kHz count. Returns `None` if it isn't a positive integer.
@@ -78,6 +82,99 @@ pub fn format_freq(mhz: f64) -> String {
     } else {
         format!("{:.0} MHz", mhz)
     }
+}
+
+/// Returns `true` when `name` identifies a CPU temperature sensor.
+///
+/// CPU sensors are named after their architecture driver (`coretemp`, `k10temp`,
+/// `zenpower`, `cpu`). Non-CPU sensors (GPU, NVMe, motherboard chips) are
+/// deliberately excluded so a CPU task manager never reports a disk or GPU
+/// temperature.
+pub fn is_cpu_sensor(name: &str) -> bool {
+    matches!(name, "cpu" | "coretemp" | "k10temp" | "zenpower")
+}
+
+/// The hottest reading, in °C, across a `hwmon` sensor's `tempN_input` files
+/// (each holds a millidegree value). Returns the maximum, dividing by 1000.
+///
+/// Returns `None` if no `tempN_input` file parses to a finite value.
+///
+/// Reads are performed from a snapshot of the directory listing so this is
+/// safe against concurrent `hwmon` changes; only the hottest value is kept
+/// since that is the value a user cares about (the "CPU is this hot" number).
+pub fn hottest_temp_c(sensor_dir: &Path) -> Option<f64> {
+    let Ok(entries) = std::fs::read_dir(sensor_dir) else {
+        return None;
+    };
+    let mut hottest: Option<f64> = None;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name().to_string_lossy().into_owned();
+        // Match `tempN_input` only — skip `tempN_label`, `tempN_crit`, etc.
+        let Some(index) = file_name.strip_prefix("temp") else {
+            continue;
+        };
+        let Some(index) = index.strip_suffix("_input") else {
+            continue;
+        };
+        if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        if let Some(millideg) = read_f64_file(&entry.path()) {
+            // Millidegrees → degrees. Skip non-finite values.
+            if millideg.is_finite() {
+                hottest = Some(hottest.map_or(millideg / 1000.0, |h| h.max(millideg / 1000.0)));
+            }
+        }
+    }
+    hottest
+}
+
+/// Reads a signed decimal file into an `f64`, e.g. `temp1_input` (millidegrees).
+pub fn read_f64_file(path: &Path) -> Option<f64> {
+    std::fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+}
+
+/// Scans `base` (an `hwmon` root directory) for the first sensor whose
+/// `name` is a CPU sensor, returning the directory that holds its
+/// `tempN_input` files.
+fn pick_cpu_hwmon(base: &Path) -> Option<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        // `hwmon` roots only contain directories named `hwmonN`; skip files.
+        let Ok(ft) = dir.symlink_metadata() else {
+            continue;
+        };
+        if !ft.is_dir() {
+            continue;
+        }
+        let name = std::fs::read_to_string(dir.join("name"))
+            .ok()?
+            .trim()
+            .to_owned();
+        if is_cpu_sensor(&name) {
+            return Some(dir);
+        }
+    }
+    None
+}
+
+/// The current CPU temperature in **°C**, or `None` when no CPU `hwmon`
+/// sensor is available (common in VMs and containers).
+pub fn read_cpu_temp_c() -> Option<f64> {
+    let sensor = pick_cpu_hwmon(Path::new(HWMON_DIR))?;
+    hottest_temp_c(&sensor)
+}
+
+/// Formats a Celsius value for display: `"72.3 °C"`.
+pub fn format_temp(celsius: f64) -> String {
+    format!("{:.1} °C", celsius)
 }
 
 #[cfg(test)]
@@ -153,6 +250,135 @@ mod tests {
                 mhz < 1_000_000.0,
                 "a frequency in the MHz hundreds of millions is a parsing bug"
             );
+        }
+    }
+
+    /// Creates a unique empty `hwmon` base directory and returns its path.
+    /// Tests build `hwmonN` sensor dirs inside it and remove the base at the
+    /// end, so parallel tests never share a tree.
+    fn hwmon_base(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "simpletaskmgr-hwmon-test-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("create hwmon base dir");
+        base
+    }
+
+    /// Creates one `hwmonN` sensor dir under `base` with the given `name` and
+    /// `tempN_input` files (`n` -> millidegree value).
+    fn mk_sensor(base: &Path, index: u32, name: &str, temps: &[(&str, &str)]) {
+        let dir = base.join(format!("hwmon{index}"));
+        std::fs::create_dir_all(&dir).expect("create sensor dir");
+        std::fs::write(dir.join("name"), name).expect("write name");
+        for (n, value) in temps {
+            std::fs::write(dir.join(format!("temp{n}_input")), value).expect("write input");
+        }
+    }
+
+    #[test]
+    fn test_is_cpu_sensor_recognizes_cpu_drivers() {
+        assert!(is_cpu_sensor("cpu"), "generic cpu sensor");
+        assert!(is_cpu_sensor("coretemp"), "Intel coretemp");
+        assert!(is_cpu_sensor("k10temp"), "AMD k10temp");
+        assert!(is_cpu_sensor("zenpower"), "AMD zenpower");
+    }
+
+    #[test]
+    fn test_is_cpu_sensor_excludes_non_cpu() {
+        assert!(!is_cpu_sensor("nvme"), "disk is not a CPU");
+        assert!(!is_cpu_sensor("amdgpu"), "GPU is not a CPU");
+        assert!(
+            !is_cpu_sensor("pch_thermal"),
+            "motherboard chip is not a CPU"
+        );
+    }
+
+    #[test]
+    fn test_hottest_temp_c_picks_max_and_converts_to_celsius() {
+        let base = hwmon_base("hottest");
+        // Two readings (Tctl 75.4 °C, Tccd1 62.5 °C) in millidegrees.
+        mk_sensor(&base, 3, "k10temp", &[("1", "75375"), ("3", "62500")]);
+        let dir = base.join("hwmon3");
+        assert_eq!(
+            hottest_temp_c(&dir),
+            Some(75.375),
+            "hottest of two inputs, /1000 to °C"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_hottest_temp_c_single_input() {
+        let base = hwmon_base("single");
+        mk_sensor(&base, 0, "coretemp", &[("1", "38500")]);
+        assert_eq!(hottest_temp_c(&base.join("hwmon0")), Some(38.5));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_hottest_temp_c_only_counts_input_files() {
+        let base = hwmon_base("inputonly");
+        mk_sensor(&base, 1, "k10temp", &[("1", "40000")]);
+        // A `temp1_label` and `temp1_crit` must not be mistaken for a reading.
+        std::fs::write(base.join("hwmon1/temp1_label"), "CPU").expect("write label");
+        std::fs::write(base.join("hwmon1/temp1_crit"), "110000").expect("write crit");
+        assert_eq!(
+            hottest_temp_c(&base.join("hwmon1")),
+            Some(40.0),
+            "only tempN_input is the reading"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_hottest_temp_c_missing_dir_returns_none() {
+        let p = std::env::temp_dir().join("no-such-hwmon-sensor-xyz");
+        assert_eq!(hottest_temp_c(&p), None);
+    }
+
+    #[test]
+    fn test_pick_cpu_hwmon_selects_cpu_sensor_over_others() {
+        let base = hwmon_base("pick");
+        // hwmon0 = nvme, hwmon1 = k10temp (CPU), hwmon2 = amdgpu.
+        mk_sensor(&base, 0, "nvme", &[]);
+        mk_sensor(&base, 1, "k10temp", &[("1", "60000")]);
+        mk_sensor(&base, 2, "amdgpu", &[]);
+
+        let picked = pick_cpu_hwmon(&base);
+        assert_eq!(
+            picked,
+            Some(base.join("hwmon1")),
+            "must pick the hwmon whose name says CPU"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_pick_cpu_hwmon_none_when_no_cpu_sensor() {
+        let base = hwmon_base("none");
+        mk_sensor(&base, 0, "nvme", &[]);
+        assert_eq!(pick_cpu_hwmon(&base), None, "no CPU sensor found");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_format_temp() {
+        assert_eq!(format_temp(72.3456), "72.3 °C");
+        assert_eq!(format_temp(75.375), "75.4 °C");
+        assert_eq!(format_temp(0.0), "0.0 °C");
+    }
+
+    /// On a real Linux host a CPU `hwmon` sensor is usually present; when it
+    /// is, the recorded temperature must be a positive and physically-sane
+    /// Celsius value. On a host/container without one the read is `None`.
+    #[test]
+    fn test_read_cpu_temp_c_sane_when_present() {
+        if let Some(c) = read_cpu_temp_c() {
+            assert!(c > 0.0, "a present CPU temp must be positive");
+            assert!(c < 150.0, "a CPU temp above 150 °C indicates a parsing bug");
         }
     }
 }

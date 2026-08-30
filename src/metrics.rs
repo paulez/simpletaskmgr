@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use log::warn;
 
-use crate::cpu_status::read_cpu0_freq_mhz;
+use crate::cpu_status::{read_cpu0_freq_mhz, read_cpu_temp_c};
 
 /// One system-wide usage sample.
 ///
@@ -174,8 +174,18 @@ impl SystemMetrics {
     pub fn push_sample(&mut self) {
         let cpu = self.sample_cpu().unwrap_or(0.0);
         let mem = self.sample_mem().unwrap_or(0.0);
-        let freq = read_cpu0_freq_mhz().or_else(|| self.latest().and_then(|s| s.freq));
-        let temp = self.latest().and_then(|s| s.temp);
+        // Frequency and temperature are live reads; when a read fails the
+        // previous value (if any) is carried forward so a momentary `sysfs`
+        // hiccup doesn't blank the series.
+        let prev = self.latest();
+        let freq = match read_cpu0_freq_mhz() {
+            Some(f) => Some(f),
+            None => prev.and_then(|s| s.freq),
+        };
+        let temp = match read_cpu_temp_c() {
+            Some(t) => Some(t),
+            None => prev.and_then(|s| s.temp),
+        };
         self.history.push_back(Sample {
             cpu,
             mem,
@@ -322,26 +332,29 @@ mod tests {
     }
 
     /// A pushed sample records the live core-0 frequency when the `cpufreq`
-    /// interface is present. The current frequency is *live* and changes
-    /// between reads (turbo boost), so we can't compare it to a separately
-    /// taken reading; we assert the recorded value, when present, is a
-    /// positive and physically-sane MHz frequency. The value is sticky on
-    /// failure (carried forward), so once a reading exists, a later sample
-    /// keeps a value even if a momentary read hiccups.
+    /// interface is present. The current frequency is a *live* reading that
+    /// changes between samples (turbo boost), so we assert the recorded
+    /// value, when present, is positive and physically sane — not that it
+    /// equals some other moment's reading. A sample with no `cpufreq` source
+    /// records `None`.
     #[test]
     fn test_push_sample_carries_freq() {
         let mut m = SystemMetrics::with_cap(10);
         m.push_sample();
-        let first = m.history().pop().unwrap();
-        if let Some(mhz) = first.freq {
+        let last = m.history().pop().unwrap();
+        if let Some(mhz) = last.freq {
             assert!(mhz > 0.0, "recorded freq must be positive");
-            assert!(mhz < 1_000_000.0, "recorded freq must be physically sane");
+            assert!(
+                mhz < 1_000_000.0,
+                "recorded freq must be physically sane Hz range"
+            );
         }
+        // A later sample with a successful live read also records a sane value.
         m.push_sample();
-        let second = m.history().pop().unwrap();
-        assert_eq!(
-            first.freq, second.freq,
-            "a freq reading is carried forward across samples"
-        );
+        let last2 = m.history().pop().unwrap();
+        if let Some(mhz) = last2.freq {
+            assert!(mhz > 0.0, "second sample's freq must be positive");
+            assert!(mhz < 1_000_000.0, "second sample's freq must be sane");
+        }
     }
 }
