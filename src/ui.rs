@@ -5,7 +5,8 @@ use gtk4::gio::prelude::*;
 use gtk4::prelude::*;
 
 use crate::config::RefreshInterval;
-use crate::metrics::SystemMetrics;
+use crate::cpu_status::{format_freq, format_temp};
+use crate::metrics::{Sample, SystemMetrics};
 use crate::process::ProcessItem;
 use crate::process_list::ProcessList;
 use crate::process_row::ProcessRow;
@@ -67,6 +68,17 @@ struct DetailPane {
     labels: DetailLabels,
     sighup: gtk4::Button,
     sigkill: gtk4::Button,
+}
+
+/// The live CPU-frequency and CPU-temperature values shown in the status line
+/// below the graph, kept addressable so each refresh can re-text them in place.
+/// `gtk4::Label` is internally reference-counted (clone is cheap and shares
+/// the same underlying widget), which lets us move an `Rc`-backed clone into
+/// long-lived closures without duplicating any GTK state.
+#[derive(Clone)]
+struct StatusLine {
+    freq: gtk4::Label,
+    temp: gtk4::Label,
 }
 
 struct State {
@@ -492,6 +504,63 @@ fn build_detail_pane() -> DetailPane {
     }
 }
 
+/// Builds the status line that sits directly below the usage graph:
+/// `CPU  3.45 GHz   ·   72 °C`. Both values start as `—` (no reading yet)
+/// and are re-texted in place by `apply_status` on every refresh.
+fn build_status_line() -> (StatusLine, gtk4::Box) {
+    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    row.add_css_class("status-line");
+    row.append(&{
+        let l = gtk4::Label::new(Some("CPU"));
+        l.add_css_class("status-label");
+        l
+    });
+    let freq = gtk4::Label::new(Some("—"));
+    freq.add_css_class("status-value");
+    freq.set_xalign(0.0);
+    row.append(&freq);
+    let sep = gtk4::Label::new(Some("·"));
+    sep.add_css_class("status-sep");
+    row.append(&sep);
+    row.append(&{
+        let l = gtk4::Label::new(Some("Temp"));
+        l.add_css_class("status-label");
+        l
+    });
+    let temp = gtk4::Label::new(Some("—"));
+    temp.add_css_class("status-value");
+    temp.set_xalign(0.0);
+    row.append(&temp);
+    (StatusLine { freq, temp }, row)
+}
+
+/// Re-texts the status line from the newest sample: `CPU <formatted freq>`.
+/// Missing (`None`) values — which happen on hosts without a `cpufreq`
+/// driver or a CPU `hwmon` sensor, e.g. in VMs and CI — show as `—` rather
+/// than a blank space or a misleading zero.
+fn apply_status(sl: &StatusLine, sample: Option<Sample>) {
+    let sample = match sample {
+        Some(s) => s,
+        None => {
+            sl.freq.set_label("—");
+            sl.temp.set_label("—");
+            return;
+        }
+    };
+    sl.freq.set_label(
+        &sample
+            .freq
+            .map(format_freq)
+            .unwrap_or_else(|| "—".to_string()),
+    );
+    sl.temp.set_label(
+        &sample
+            .temp
+            .map(format_temp)
+            .unwrap_or_else(|| "—".to_string()),
+    );
+}
+
 /// Builds the `Settings` button and its popover (show-all toggle, refresh
 /// interval list, and reset button).
 fn build_settings_popover() -> SettingsWidgets {
@@ -555,6 +624,7 @@ fn make_rebuild(
     state: Rc<RefCell<State>>,
     list: &ListView,
     dp: &Rc<DetailLabels>,
+    status: Option<StatusLine>,
     adj: gtk4::Adjustment,
 ) -> Rc<dyn Fn()> {
     let store_r = list.store.clone();
@@ -642,6 +712,9 @@ fn make_rebuild(
             }
         }
         apply_detail(&dp_r, &state_r, state_r.borrow().selected_pid);
+        if let Some(sl) = &status {
+            apply_status(sl, state_r.borrow().metrics.history().pop());
+        }
     })
 }
 
@@ -664,6 +737,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let list = build_process_list();
     let detail = build_detail_pane();
     let settings = build_settings_popover();
+    let (status_line, status_box) = build_status_line();
 
     // ---- Body row (list | detail) ---------------------------------------------
     let body = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
@@ -673,6 +747,10 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
 
     // ---- Assemble root ---------------------------------------------------------
     root.append(&graph_area);
+    // The status line sits directly below the graph, above the list/detail
+    // body. It is built now (and kept alive in `status_box`'s parent chain)
+    // so `make_rebuild` can address its `freq`/`temp` labels each refresh.
+    root.insert_child_after(&status_box, Some(&graph_area));
 
     // ---- Settings button + popover ---------------------------------------------
     let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
@@ -685,7 +763,13 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // ---- Shared closure: republish the store from state ------------------------
     let dp_labels = Rc::new(detail.labels);
     let adj = list.list_scroll.vadjustment();
-    let rebuild = make_rebuild(state.clone(), &list, &dp_labels, adj);
+    let rebuild = make_rebuild(
+        state.clone(),
+        &list,
+        &dp_labels,
+        Some(status_line.clone()),
+        adj,
+    );
 
     // ---- Row selection handler -------------------------------------------------
     {

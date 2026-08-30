@@ -17,6 +17,23 @@
   border-radius: 6px;
 }
 
+/* ---- Status line (CPU frequency · temperature below the graph) ----------- */
+.status-line {
+  padding: 2px 0;
+}
+
+.status-label {
+  font-size: 0.85em;
+}
+
+.status-value {
+  font-weight: bold;
+}
+
+.status-sep {
+  padding: 0 6px;
+}
+
 /* ---- Toolbar ------------------------------------------------------------- */
 .toolbar {
   padding: 6px 0;
