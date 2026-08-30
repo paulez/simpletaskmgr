@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 
 use log::warn;
 
+use crate::cpu_status::read_cpu0_freq_mhz;
+
 /// One system-wide usage sample.
 ///
 /// `cpu` and `mem` are percentages (0–100), the same units the graph plots.
@@ -13,6 +15,12 @@ pub struct Sample {
     /// Memory utilization percent ((MemTotal − MemAvailable) / MemTotal) for
     /// the instant this sample was taken (0–100).
     pub mem: f64,
+    /// Current frequency of core 0 in MHz (core 0 is the representative "CPU
+    /// frequency" source), or `None` when the `cpufreq` interface is absent.
+    pub freq: Option<f64>,
+    /// CPU temperature in °C read from the CPU's `hwmon` sensor, or `None`
+    /// when no CPU sensor is available.
+    pub temp: Option<f64>,
 }
 
 /// Baseline state used to compute a CPU% from `/proc/stat` tick deltas between
@@ -155,20 +163,33 @@ impl SystemMetrics {
         self.history.iter().copied().collect()
     }
 
-    /// Appends one freshly read sample of system CPU% and memory%.
+    /// The current system CPU% / memory% / frequency / temperature.
     ///
     /// CPU% for this interval is computed from the delta since the last call;
     /// the first call has no baseline, so its CPU value is 0.0. Memory% is
-    /// read directly from `/proc/meminfo`. On a read failure the previous
-    /// value (or 0.0 for the first sample) is carried forward so the graph
-    /// doesn't dip to zero spuriously.
+    /// read directly from `/proc/meminfo`. Frequency and temperature are read
+    /// from `sysfs`; on a read failure the previous value (or `None` for the
+    /// first sample) is carried forward so the graph doesn't dip to zero
+    /// spuriously.
     pub fn push_sample(&mut self) {
         let cpu = self.sample_cpu().unwrap_or(0.0);
         let mem = self.sample_mem().unwrap_or(0.0);
-        self.history.push_back(Sample { cpu, mem });
+        let freq = read_cpu0_freq_mhz().or_else(|| self.latest().and_then(|s| s.freq));
+        let temp = self.latest().and_then(|s| s.temp);
+        self.history.push_back(Sample {
+            cpu,
+            mem,
+            freq,
+            temp,
+        });
         while self.history.len() > self.cap {
             self.history.pop_front();
         }
+    }
+
+    /// The newest sample (if any).
+    fn latest(&self) -> Option<Sample> {
+        self.history.back().copied()
     }
 
     fn sample_cpu(&mut self) -> Option<f64> {
@@ -298,5 +319,29 @@ mod tests {
         assert!(m.history().is_empty());
         m.push_sample();
         assert_eq!(m.history().len(), 1);
+    }
+
+    /// A pushed sample records the live core-0 frequency when the `cpufreq`
+    /// interface is present. The current frequency is *live* and changes
+    /// between reads (turbo boost), so we can't compare it to a separately
+    /// taken reading; we assert the recorded value, when present, is a
+    /// positive and physically-sane MHz frequency. The value is sticky on
+    /// failure (carried forward), so once a reading exists, a later sample
+    /// keeps a value even if a momentary read hiccups.
+    #[test]
+    fn test_push_sample_carries_freq() {
+        let mut m = SystemMetrics::with_cap(10);
+        m.push_sample();
+        let first = m.history().pop().unwrap();
+        if let Some(mhz) = first.freq {
+            assert!(mhz > 0.0, "recorded freq must be positive");
+            assert!(mhz < 1_000_000.0, "recorded freq must be physically sane");
+        }
+        m.push_sample();
+        let second = m.history().pop().unwrap();
+        assert_eq!(
+            first.freq, second.freq,
+            "a freq reading is carried forward across samples"
+        );
     }
 }
