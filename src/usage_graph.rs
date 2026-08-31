@@ -158,6 +158,23 @@ fn draw_series(
     }
 }
 
+/// Which half of the split usage graph a `DrawingArea` should paint.
+///
+/// The graph is rendered in two side-by-side panes so each pair of series
+/// gets enough horizontal room to read: [`ChartPane::CpuMem`] draws the two
+/// percent series (memory + CPU) on a shared 0–100% grid, and
+/// [`ChartPane::FreqTemp`] draws the two hardware-sensor series (frequency,
+/// temperature) on their own dedicated axes. Both panes read the same
+/// rolling history and are drawn at the same cadence; only the series each
+/// paints differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChartPane {
+    /// The CPU + memory utilization pane (percent series).
+    CpuMem,
+    /// The CPU-frequency + temperature pane (MHz / °C series).
+    FreqTemp,
+}
+
 /// Configuration the chart needs to lay out its series, decoupled from the
 /// GTK widgets that own the samples. `freq_max_mhz` is the top of the
 /// frequency axis (MHz); `capacity` is the rolling-window width in samples.
@@ -285,57 +302,67 @@ fn draw_axis_ticks(
     let _ = ctx.stroke();
 }
 
-/// Paints the rolling-window usage chart into `ctx`, spanning `(w, h)`.
+/// Paints one pane of the split rolling-window usage chart into `ctx`,
+/// spanning `(w, h)`.
 ///
-/// Four series are drawn, each on its own vertical domain:
+/// `pane` selects which two series live in this pane:
 ///
-/// * Memory — percent, `MEM_RGB` (blue)
-/// * CPU — percent, `CPU_RGB` (green)
-/// * Frequency — MHz, `FREQ_RGB` (purple), domain `cfg.freq_max_mhz`
-/// * Temperature — °C, `TEMP_RGB` (red), domain 100 °C
+/// * [`ChartPane::CpuMem`] — memory (blue) then CPU (green), both on the
+///   shared 0–100% grid. No axis ticks: the percent scale is self-evident.
+/// * [`ChartPane::FreqTemp`] — frequency (purple, domain `cfg.freq_max_mhz`)
+///   then temperature (red, 0–100 °C), with their two dedicated axes drawn
+///   color-matched (frequency on the left, temperature on the right).
 ///
-/// Memory/CPU/temperature share the 0–100% (0–100 °C) grid; frequency is
-/// normalized by its own ceiling so a 3.4 GHz trace sits near the top. A
-/// series whose samples are all `None` (no sensor) is skipped. Ticks for the
-/// two non-0–100 axes are drawn color-matched on opposite sides: the
-/// frequency (MHz) axis on the left, the temperature (°C) axis on the right.
-/// An empty history paints a blank, valid chart.
-pub fn paint_usage_chart(ctx: &Context, w: f64, h: f64, samples: &[Sample], cfg: &ChartConfig) {
+/// A series whose samples are all `None` (no sensor) is skipped. An empty
+/// history paints a blank, valid chart.
+pub fn paint_usage_chart(
+    ctx: &Context,
+    w: f64,
+    h: f64,
+    samples: &[Sample],
+    cfg: &ChartConfig,
+    pane: ChartPane,
+) {
     if w <= 0.0 || h <= 0.0 {
         return;
     }
-    let percent: Vec<Option<f64>> = samples.iter().map(|s| Some(s.cpu)).collect();
-    let mem: Vec<Option<f64>> = samples.iter().map(|s| Some(s.mem)).collect();
-    let freq: Vec<Option<f64>> = samples.iter().map(|s| s.freq).collect();
-    let temp: Vec<Option<f64>> = samples.iter().map(|s| s.temp).collect();
-
-    // Draw order: memory (bottom), cpu, frequency, temperature (top).
-    draw_series(ctx, w, h, &mem, cfg.capacity, 100.0, MEM_RGB);
-    draw_series(ctx, w, h, &percent, cfg.capacity, 100.0, CPU_RGB);
-    draw_series(ctx, w, h, &freq, cfg.capacity, cfg.freq_max_mhz, FREQ_RGB);
-    draw_series(ctx, w, h, &temp, cfg.capacity, 100.0, TEMP_RGB);
-
-    // Axes for the two non-percent series: frequency on the left, temperature
-    // on the right, each color-matched to its series and drawn after the
-    // fills so the labels stay readable over the translucent bands.
-    draw_axis_ticks(
-        ctx,
-        w,
-        h,
-        cfg.freq_max_mhz,
-        FREQ_RGB,
-        axis_tick_mhz,
-        AxisSide::Left,
-    );
-    draw_axis_ticks(
-        ctx,
-        w,
-        h,
-        100.0,
-        TEMP_RGB,
-        axis_tick_celsius,
-        AxisSide::Right,
-    );
+    match pane {
+        ChartPane::CpuMem => {
+            let mem: Vec<Option<f64>> = samples.iter().map(|s| Some(s.mem)).collect();
+            let cpu: Vec<Option<f64>> = samples.iter().map(|s| Some(s.cpu)).collect();
+            // Draw order: memory (bottom), cpu (top).
+            draw_series(ctx, w, h, &mem, cfg.capacity, 100.0, MEM_RGB);
+            draw_series(ctx, w, h, &cpu, cfg.capacity, 100.0, CPU_RGB);
+        }
+        ChartPane::FreqTemp => {
+            let freq: Vec<Option<f64>> = samples.iter().map(|s| s.freq).collect();
+            let temp: Vec<Option<f64>> = samples.iter().map(|s| s.temp).collect();
+            // Draw order: frequency, temperature (top).
+            draw_series(ctx, w, h, &freq, cfg.capacity, cfg.freq_max_mhz, FREQ_RGB);
+            draw_series(ctx, w, h, &temp, cfg.capacity, 100.0, TEMP_RGB);
+            // Axes for the two non-percent series: frequency on the left,
+            // temperature on the right, drawn after the fills so the labels
+            // stay readable over the translucent bands.
+            draw_axis_ticks(
+                ctx,
+                w,
+                h,
+                cfg.freq_max_mhz,
+                FREQ_RGB,
+                axis_tick_mhz,
+                AxisSide::Left,
+            );
+            draw_axis_ticks(
+                ctx,
+                w,
+                h,
+                100.0,
+                TEMP_RGB,
+                axis_tick_celsius,
+                AxisSide::Right,
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -577,5 +604,16 @@ mod tests {
         let cfg = ChartConfig::default();
         assert!(cfg.freq_max_mhz > 0.0);
         assert!(cfg.capacity >= 2);
+    }
+
+    #[test]
+    fn test_chart_pane_is_copy_and_eq() {
+        // Copy so the draw closures can reuse the selector freely.
+        let a = ChartPane::CpuMem;
+        let b = a;
+        assert_eq!(a, b);
+        assert_ne!(ChartPane::CpuMem, ChartPane::FreqTemp);
+        let f = ChartPane::FreqTemp;
+        assert_eq!(f, ChartPane::FreqTemp);
     }
 }

@@ -5,15 +5,14 @@ use gtk4::gio::prelude::*;
 use gtk4::prelude::*;
 
 use crate::config::RefreshInterval;
-use crate::cpu_status::{format_freq, format_temp};
-use crate::metrics::{Sample, SystemMetrics};
+use crate::metrics::SystemMetrics;
 use crate::process::ProcessItem;
 use crate::process_list::ProcessList;
 use crate::process_row::ProcessRow;
 use crate::refresh_list;
 use crate::settings::{settings_path, UserSettings};
 use crate::signal::Signal;
-use crate::usage_graph::{paint_usage_chart, ChartConfig};
+use crate::usage_graph::{paint_usage_chart, ChartConfig, ChartPane};
 use crate::SortColumn;
 
 const CSS: &str = include_str!("ui.css");
@@ -68,17 +67,6 @@ struct DetailPane {
     labels: DetailLabels,
     sighup: gtk4::Button,
     sigkill: gtk4::Button,
-}
-
-/// The live CPU-frequency and CPU-temperature values shown in the status line
-/// below the graph, kept addressable so each refresh can re-text them in place.
-/// `gtk4::Label` is internally reference-counted (clone is cheap and shares
-/// the same underlying widget), which lets us move an `Rc`-backed clone into
-/// long-lived closures without duplicating any GTK state.
-#[derive(Clone)]
-struct StatusLine {
-    freq: gtk4::Label,
-    temp: gtk4::Label,
 }
 
 struct State {
@@ -206,7 +194,7 @@ fn detail_status(status: &KillStatus) -> String {
 fn restart_timer(
     state: &Rc<RefCell<State>>,
     rebuild: &Rc<dyn Fn()>,
-    graph_area: &gtk4::DrawingArea,
+    graph_areas: &[gtk4::DrawingArea],
 ) {
     if let Some(old) = state.borrow().take_timer_id() {
         old.remove();
@@ -214,35 +202,63 @@ fn restart_timer(
     let interval = state.borrow().settings.refresh.as_duration();
     let state_t = state.clone();
     let rebuild_t = rebuild.clone();
-    let graph_t = graph_area.clone();
+    let graphs = graph_areas.to_vec();
     let state_cb = state_t.clone();
     let id = glib::timeout_add_local(interval, move || {
         state_cb.borrow_mut().refresh();
         rebuild_t();
-        graph_t.queue_draw();
+        for a in &graphs {
+            a.queue_draw();
+        }
         glib::ControlFlow::Continue
     });
     state_t.borrow_mut().timer_id.set(Some(id));
 }
 
-/// Builds the usage-graph `DrawingArea` and wires its draw function to paint
-/// the current `SystemMetrics` history.
-fn build_graph_area(state: &Rc<RefCell<State>>) -> gtk4::DrawingArea {
-    // ---- Graph ---------------------------------------------------------------
-    let graph_area = gtk4::DrawingArea::new();
-    graph_area.set_content_height(110);
-    graph_area.set_hexpand(true);
-    graph_area.add_css_class("graph-area");
-    let st_graph = state.clone();
-    graph_area.set_draw_func(move |_da, cr: &gtk4::cairo::Context, w: i32, h: i32| {
-        let samples = st_graph.borrow().metrics.history();
+/// Builds the split usage-graph row — a horizontal strip of two
+/// [`gtk4::DrawingArea`]s separated by a GTK default vertical `Separator`.
+/// The left pane draws the CPU + memory utilization series (percent); the
+/// right pane draws the CPU frequency + temperature series (MHz / °C), each
+/// on its own dedicated axis. Both panes read the same rolling history and
+/// are redrawn in lockstep on every refresh.
+fn build_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::DrawingArea>) {
+    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    row.set_hexpand(true);
+
+    let st_left = state.clone();
+    let left = gtk4::DrawingArea::new();
+    left.set_content_height(110);
+    left.set_hexpand(true);
+    left.add_css_class("graph-area");
+    left.set_draw_func(move |_da, cr: &gtk4::cairo::Context, w: i32, h: i32| {
+        let samples = st_left.borrow().metrics.history();
         let cfg = ChartConfig {
-            freq_max_mhz: st_graph.borrow().freq_max_mhz,
+            freq_max_mhz: st_left.borrow().freq_max_mhz,
             capacity: SystemMetrics::MAX_HISTORY,
         };
-        paint_usage_chart(cr, w as f64, h as f64, &samples, &cfg);
+        paint_usage_chart(cr, w as f64, h as f64, &samples, &cfg, ChartPane::CpuMem);
     });
-    graph_area
+    row.append(&left);
+
+    let sep = gtk4::Separator::new(gtk4::Orientation::Vertical);
+    row.append(&sep);
+
+    let st_right = state.clone();
+    let right = gtk4::DrawingArea::new();
+    right.set_content_height(110);
+    right.set_hexpand(true);
+    right.add_css_class("graph-area");
+    right.set_draw_func(move |_da, cr: &gtk4::cairo::Context, w: i32, h: i32| {
+        let samples = st_right.borrow().metrics.history();
+        let cfg = ChartConfig {
+            freq_max_mhz: st_right.borrow().freq_max_mhz,
+            capacity: SystemMetrics::MAX_HISTORY,
+        };
+        paint_usage_chart(cr, w as f64, h as f64, &samples, &cfg, ChartPane::FreqTemp);
+    });
+    row.append(&right);
+
+    (row, vec![left, right])
 }
 
 /// One shared `SignalListItemFactory` for a text column: a single `Label`
@@ -513,63 +529,6 @@ fn build_detail_pane() -> DetailPane {
     }
 }
 
-/// Builds the status line that sits directly below the usage graph:
-/// `CPU  3.45 GHz   ·   72 °C`. Both values start as `—` (no reading yet)
-/// and are re-texted in place by `apply_status` on every refresh.
-fn build_status_line() -> (StatusLine, gtk4::Box) {
-    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-    row.add_css_class("status-line");
-    row.append(&{
-        let l = gtk4::Label::new(Some("CPU"));
-        l.add_css_class("status-label");
-        l
-    });
-    let freq = gtk4::Label::new(Some("—"));
-    freq.add_css_class("status-value");
-    freq.set_xalign(0.0);
-    row.append(&freq);
-    let sep = gtk4::Label::new(Some("·"));
-    sep.add_css_class("status-sep");
-    row.append(&sep);
-    row.append(&{
-        let l = gtk4::Label::new(Some("Temp"));
-        l.add_css_class("status-label");
-        l
-    });
-    let temp = gtk4::Label::new(Some("—"));
-    temp.add_css_class("status-value");
-    temp.set_xalign(0.0);
-    row.append(&temp);
-    (StatusLine { freq, temp }, row)
-}
-
-/// Re-texts the status line from the newest sample: `CPU <formatted freq>`.
-/// Missing (`None`) values — which happen on hosts without a `cpufreq`
-/// driver or a CPU `hwmon` sensor, e.g. in VMs and CI — show as `—` rather
-/// than a blank space or a misleading zero.
-fn apply_status(sl: &StatusLine, sample: Option<Sample>) {
-    let sample = match sample {
-        Some(s) => s,
-        None => {
-            sl.freq.set_label("—");
-            sl.temp.set_label("—");
-            return;
-        }
-    };
-    sl.freq.set_label(
-        &sample
-            .freq
-            .map(format_freq)
-            .unwrap_or_else(|| "—".to_string()),
-    );
-    sl.temp.set_label(
-        &sample
-            .temp
-            .map(format_temp)
-            .unwrap_or_else(|| "—".to_string()),
-    );
-}
-
 /// Builds the `Settings` button and its popover (show-all toggle, refresh
 /// interval list, and reset button).
 fn build_settings_popover() -> SettingsWidgets {
@@ -633,7 +592,6 @@ fn make_rebuild(
     state: Rc<RefCell<State>>,
     list: &ListView,
     dp: &Rc<DetailLabels>,
-    status: Option<StatusLine>,
     adj: gtk4::Adjustment,
 ) -> Rc<dyn Fn()> {
     let store_r = list.store.clone();
@@ -721,9 +679,6 @@ fn make_rebuild(
             }
         }
         apply_detail(&dp_r, &state_r, state_r.borrow().selected_pid);
-        if let Some(sl) = &status {
-            apply_status(sl, state_r.borrow().metrics.history().pop());
-        }
     })
 }
 
@@ -742,11 +697,10 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     window.set_child(Some(&root));
 
-    let graph_area = build_graph_area(&state);
+    let (graph_row, graph_areas) = build_graph_row(&state);
     let list = build_process_list();
     let detail = build_detail_pane();
     let settings = build_settings_popover();
-    let (status_line, status_box) = build_status_line();
 
     // ---- Body row (list | detail) ---------------------------------------------
     let body = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
@@ -755,30 +709,20 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     body.append(&detail.scroll);
 
     // ---- Assemble root ---------------------------------------------------------
-    root.append(&graph_area);
-    // The status line sits directly below the graph, above the list/detail
-    // body. It is built now (and kept alive in `status_box`'s parent chain)
-    // so `make_rebuild` can address its `freq`/`temp` labels each refresh.
-    root.insert_child_after(&status_box, Some(&graph_area));
+    root.append(&graph_row);
 
     // ---- Settings button + popover ---------------------------------------------
     let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     toolbar.add_css_class("toolbar");
     toolbar.append(&settings.button);
-    root.insert_child_after(&toolbar, Some(&graph_area));
+    root.insert_child_after(&toolbar, Some(&graph_row));
 
     root.append(&body);
 
     // ---- Shared closure: republish the store from state ------------------------
     let dp_labels = Rc::new(detail.labels);
     let adj = list.list_scroll.vadjustment();
-    let rebuild = make_rebuild(
-        state.clone(),
-        &list,
-        &dp_labels,
-        Some(status_line.clone()),
-        adj,
-    );
+    let rebuild = make_rebuild(state.clone(), &list, &dp_labels, adj);
 
     // ---- Row selection handler -------------------------------------------------
     {
@@ -822,13 +766,13 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         let state_c = state.clone();
         let rows_c = settings.rows.clone();
         let rebuild_c = rebuild.clone();
-        let graph_c = graph_area.clone();
+        let graphs_c = graph_areas.clone();
         settings.list.connect_row_activated(move |_list, row| {
             if let Some(pos) = rows_c.iter().position(|r| *r == *row) {
                 if let Some(interval) = RefreshInterval::ALL.get(pos) {
                     let changed = state_c.borrow_mut().set_refresh_interval(*interval);
                     if changed {
-                        restart_timer(&state_c, &rebuild_c, &graph_c);
+                        restart_timer(&state_c, &rebuild_c, &graphs_c);
                     }
                 }
             }
@@ -837,7 +781,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     {
         let state_r = state.clone();
         let rebuild_r = rebuild.clone();
-        let graph_r = graph_area.clone();
+        let graphs_r = graph_areas.clone();
         let check_w = settings.check.clone();
         let rows_w = settings.rows.clone();
         let list_w = settings.list.clone();
@@ -846,7 +790,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
             // only then is the running timer restarted.
             let changed = state_r.borrow_mut().reset_settings();
             if changed {
-                restart_timer(&state_r, &rebuild_r, &graph_r);
+                restart_timer(&state_r, &rebuild_r, &graphs_r);
             }
             sync_settings_widgets(&state_r, &check_w, &list_w, &rows_w);
             state_r.borrow_mut().refresh();
@@ -900,7 +844,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     });
 
     // ---- Refresh timer ------------------------------------------------------------
-    restart_timer(&state, &rebuild, &graph_area);
+    restart_timer(&state, &rebuild, &graph_areas);
 
     window
 }

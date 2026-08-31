@@ -26,11 +26,11 @@
     - No process is selected on launch
 
      5. **CPU Status**
-     - Live readout of current CPU frequency (core 0) and CPU temperature in a
-       status line below the usage graph
-     - Frequency and temperature traced over time on the usage graph, each on
-       its own dedicated axis (frequency top-anchored at `scaling_max_freq`,
-       temperature 0-100 °C)
+     - The usage graph is split into two side-by-side panes: the left pane
+       plots CPU + memory usage, the right pane plots CPU frequency +
+       temperature
+     - Frequency and temperature each draw on their own dedicated axis
+       (frequency top-anchored at `scaling_max_freq`, temperature 0-100 °C)
      - Sources: `cpufreq/scaling_cur_freq` for frequency; CPU `hwmon` sensor's
        hottest `tempN_input` for temperature; both blank when unavailable
      - Read failures carry the previous value forward so the series doesn't dip

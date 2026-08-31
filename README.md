@@ -15,8 +15,7 @@ A lightweight, interactive system process manager built with Rust that displays 
 - **Clean Start**: On launch no process is selected, so the list takes the full width and the detail pane is hidden until you pick one
 - **Highest CPU First**: On launch the list is sorted by CPU% (highest first) and scrolled to the top, so the most active processes are visible immediately
 - **Signal Management**: Send SIGHUP or SIGKILL to a selected process from its detail view, with success/failure feedback
-- **Resource Usage Graph**: An always-on chart above the process list shows system-wide CPU, memory, CPU frequency, and CPU temperature over time (a rolling window of ~3 minutes), updating with each refresh. The newest sample is pinned to the right edge and each sample occupies a fixed time slot: the trace grows from right to left until the history is full (~120 samples at the default 1.5s refresh), then scrolls left. CPU and memory share the 0-100% axis; frequency (MHz) is drawn on its own dedicated axis, with its top (e.g. `4 GHz`) read from `scaling_max_freq` at launch, so a trace at 3.4 GHz reads as 85% — not 0.85 — of the height; temperature (°C) is drawn on its own 0-100 °C axis
-- **CPU Status Readout**: A status line below the graph shows the current CPU frequency (MHz or GHz) and temperature (°C), updating in place with each refresh. Blank when the corresponding `sysfs` source is unavailable (e.g. no `cpufreq` driver or no CPU `hwmon` sensor — common in VMs and containers)
+- **Resource Usage Graph**: An always-on chart above the process list shows system-wide CPU and memory usage (left pane) and CPU frequency and temperature (right pane) over time, updating with each refresh. The two panes share one rolling history (~120 samples at the default 1.5s refresh, ~3 minutes), each right-anchored with a fixed time slot per sample: the trace grows from right to left until the history is full, then scrolls left. The left pane puts CPU and memory on a shared 0-100% axis; the right pane puts frequency (MHz) on its own dedicated axis — top read from `scaling_max_freq` at launch (e.g. `4 GHz`), so a trace at 3.4 GHz reads as 85% — not 0.85 — of the pane's height — and temperature (°C) on its own 0-100 °C axis
 - **Persistent Settings**: Your choices (show-all filter, refresh interval) survive restarts. Open the **Settings** popover in the toolbar to change them.
 
 ## Requirements
@@ -106,16 +105,16 @@ Temperature is read from the CPU's `hwmon` sensor (discovered by name: `cpu`,
 excluded), taking the hottest `tempN_input` reading in millidegrees. Each of
 these degrades gracefully to `None` when the source is absent (containers, VMs,
 or drivers not exposed); a momentary read failure carries the previous value
-forward so the graph doesn't dip to zero spuriously. The resource graph renders
-memory and CPU on a shared 0-100% axis, frequency (MHz) on its own dedicated
-axis (top anchored at `scaling_max_freq`, defaulting to 4 GHz if that
-interface isn't available), and temperature (°C) on its own 0-100 °C axis, all
-drawn with cairo into a `DrawingArea`. A status line below the graph shows the
-live frequency and temperature values for the newest sample. The window is
-right-anchored and fixed-slot: the newest sample sits at the right edge, each
-older sample one slot to the left, and the left side stays blank until the
-history fills the full width — then new samples scroll the trace left, exactly
-like a scrolling system monitor.
+forward so the graph doesn't dip to zero spuriously. The resource graph is
+split into two side-by-side panes that share one rolling history: the left
+pane draws memory and CPU on a shared 0-100% axis, and the right pane draws
+frequency (MHz) on its own dedicated axis — top anchored at `scaling_max_freq`,
+defaulting to 4 GHz if that interface isn't available — and temperature (°C)
+on its own 0-100 °C axis, each series drawn with cairo into its own
+`DrawingArea`. Each pane is right-anchored and fixed-slot: the newest sample
+sits at the right edge, each older sample one slot to the left, and the left
+side stays blank until the history fills the full width — then new samples
+scroll the trace left, exactly like a scrolling system monitor.
 
 Each process entry shows:
 - **PID**: Process identifier
