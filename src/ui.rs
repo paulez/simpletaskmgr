@@ -13,7 +13,7 @@ use crate::process_row::ProcessRow;
 use crate::refresh_list;
 use crate::settings::{settings_path, UserSettings};
 use crate::signal::Signal;
-use crate::usage_graph::paint_usage_chart;
+use crate::usage_graph::{paint_usage_chart, ChartConfig};
 use crate::SortColumn;
 
 const CSS: &str = include_str!("ui.css");
@@ -88,6 +88,11 @@ struct State {
     settings: UserSettings,
     save_path: std::path::PathBuf,
     timer_id: Cell<Option<glib::SourceId>>,
+    /// Top of the frequency-axis domain in MHz, read once at launch from
+    /// `scaling_max_freq`. The fallback (4.0 GHz) covers hosts without a
+    /// `cpufreq` interface (e.g. VMs); in that case the series is absent
+    /// anyway and the domain is unused.
+    freq_max_mhz: f64,
 }
 
 #[derive(Debug)]
@@ -119,6 +124,7 @@ impl State {
             settings,
             save_path: path,
             timer_id: Cell::new(None),
+            freq_max_mhz: crate::cpu_status::read_max_freq_mhz().unwrap_or(4000.0),
         }
     }
 
@@ -230,8 +236,11 @@ fn build_graph_area(state: &Rc<RefCell<State>>) -> gtk4::DrawingArea {
     let st_graph = state.clone();
     graph_area.set_draw_func(move |_da, cr: &gtk4::cairo::Context, w: i32, h: i32| {
         let samples = st_graph.borrow().metrics.history();
-        let capacity = SystemMetrics::MAX_HISTORY;
-        paint_usage_chart(cr, w as f64, h as f64, &samples, capacity);
+        let cfg = ChartConfig {
+            freq_max_mhz: st_graph.borrow().freq_max_mhz,
+            capacity: SystemMetrics::MAX_HISTORY,
+        };
+        paint_usage_chart(cr, w as f64, h as f64, &samples, &cfg);
     });
     graph_area
 }
