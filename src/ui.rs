@@ -215,48 +215,61 @@ fn restart_timer(
     state_t.borrow_mut().timer_id.set(Some(id));
 }
 
-/// Builds the split usage-graph row — a horizontal strip of two
-/// [`gtk4::DrawingArea`]s separated by a GTK default vertical `Separator`.
-/// The left pane draws the CPU + memory utilization series (percent); the
-/// right pane draws the CPU frequency + temperature series (MHz / °C), each
-/// on its own dedicated axis. Both panes read the same rolling history and
-/// are redrawn in lockstep on every refresh.
+/// Builds one pane of the split usage-graph row: a short centered title
+/// label above a [`gtk4::DrawingArea`]. The label is a standard GTK `Label`
+/// (theme color, theme font, centered) so it stays readable in both light
+/// and dark themes; the draw area below paints the pane's series via
+/// `paint_usage_chart`.
+fn build_graph_pane(
+    state: &Rc<RefCell<State>>,
+    title: &'static str,
+    pane: ChartPane,
+) -> (gtk4::Box, gtk4::DrawingArea) {
+    let box_v = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+    box_v.set_hexpand(true);
+
+    let label = gtk4::Label::new(Some(title));
+    label.set_halign(gtk4::Align::Center);
+    box_v.append(&label);
+
+    let drawing = gtk4::DrawingArea::new();
+    drawing.set_content_height(110);
+    drawing.set_hexpand(true);
+    drawing.set_vexpand(true);
+    drawing.add_css_class("graph-area");
+    let st = state.clone();
+    drawing.set_draw_func(move |_da, cr: &gtk4::cairo::Context, w: i32, h: i32| {
+        let samples = st.borrow().metrics.history();
+        let cfg = ChartConfig {
+            freq_max_mhz: st.borrow().freq_max_mhz,
+            capacity: SystemMetrics::MAX_HISTORY,
+        };
+        paint_usage_chart(cr, w as f64, h as f64, &samples, &cfg, pane);
+    });
+    box_v.append(&drawing);
+
+    (box_v, drawing)
+}
+
+/// Builds the split usage-graph row — a horizontal strip of two panes
+/// (each pane: a centered title label above a [`gtk4::DrawingArea`]),
+/// separated by a GTK default vertical `Separator`. The left pane draws the
+/// CPU + memory utilization series (percent); the right pane draws the CPU
+/// frequency + temperature series (MHz / °C), each on its own dedicated
+/// axis. Both panes read the same rolling history and are redrawn in
+/// lockstep on every refresh.
 fn build_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::DrawingArea>) {
     let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     row.set_hexpand(true);
 
-    let st_left = state.clone();
-    let left = gtk4::DrawingArea::new();
-    left.set_content_height(110);
-    left.set_hexpand(true);
-    left.add_css_class("graph-area");
-    left.set_draw_func(move |_da, cr: &gtk4::cairo::Context, w: i32, h: i32| {
-        let samples = st_left.borrow().metrics.history();
-        let cfg = ChartConfig {
-            freq_max_mhz: st_left.borrow().freq_max_mhz,
-            capacity: SystemMetrics::MAX_HISTORY,
-        };
-        paint_usage_chart(cr, w as f64, h as f64, &samples, &cfg, ChartPane::CpuMem);
-    });
-    row.append(&left);
+    let (pane_l, left) = build_graph_pane(state, "CPU & Memory", ChartPane::CpuMem);
+    row.append(&pane_l);
 
     let sep = gtk4::Separator::new(gtk4::Orientation::Vertical);
     row.append(&sep);
 
-    let st_right = state.clone();
-    let right = gtk4::DrawingArea::new();
-    right.set_content_height(110);
-    right.set_hexpand(true);
-    right.add_css_class("graph-area");
-    right.set_draw_func(move |_da, cr: &gtk4::cairo::Context, w: i32, h: i32| {
-        let samples = st_right.borrow().metrics.history();
-        let cfg = ChartConfig {
-            freq_max_mhz: st_right.borrow().freq_max_mhz,
-            capacity: SystemMetrics::MAX_HISTORY,
-        };
-        paint_usage_chart(cr, w as f64, h as f64, &samples, &cfg, ChartPane::FreqTemp);
-    });
-    row.append(&right);
+    let (pane_r, right) = build_graph_pane(state, "CPU Freq & Temp", ChartPane::FreqTemp);
+    row.append(&pane_r);
 
     (row, vec![left, right])
 }

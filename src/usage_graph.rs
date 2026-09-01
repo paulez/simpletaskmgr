@@ -20,11 +20,10 @@ pub const LINE_WIDTH: f64 = 1.5;
 /// Radius of the "latest sample" marker dot (in pixels).
 pub const DOT_RADIUS: f64 = 1.5;
 
-/// Vertical thickness of the pane title band (pixels at draw-time scale).
-pub const TITLE_H: f64 = 14.0;
-/// Vertical padding below the title band, before the plot begins — reserved
-/// for the topmost tick label so the max-value label is never clipped by the
-/// widget edge.
+/// Vertical padding above the plot, reserved for the topmost tick label so
+/// the max-value label is never clipped by the widget edge. (The pane title
+/// is rendered by a GTK label above the drawing area in `ui.rs`, so it does
+/// not consume any cairo pixel budget here.)
 pub const TOP_PAD: f64 = 14.0;
 /// Whitespace between a label gutter and the plot boundary, so tick labels
 /// don't hug the axis line.
@@ -133,15 +132,15 @@ impl Plot {
 }
 
 /// Computes the inner plot rectangle for a widget of size `(w, h)` with
-/// `left` and `right` gutter widths (pixels). Both dimensions clamp to 0
-/// when chrome exceeds the widget; the `ox + w ≤ w` and `oy + h ≤ h`
-/// invariants hold.
+/// `left` and `right` gutter widths (pixels). The plot origin is pushed down
+/// by `TOP_PAD` (space for the top tick label) and `left`/`right` (label
+/// gutters). Dimensions clamp to 0 when chrome exceeds the widget.
 fn plot_rect(w: f64, h: f64, left: f64, right: f64) -> Plot {
     let p = Plot {
         ox: left.max(0.0),
-        oy: (TITLE_H + TOP_PAD).max(0.0),
+        oy: TOP_PAD.max(0.0),
         w: (w - left - right).max(0.0),
-        h: (h - TITLE_H - TOP_PAD).max(0.0),
+        h: (h - TOP_PAD).max(0.0),
     };
     debug_assert!(p.non_negative(), "plot dimensions must be non-negative");
     p
@@ -159,22 +158,6 @@ fn measure_gutter(ctx: &Context, labels: &[String]) -> f64 {
         .map(|t| ctx.text_extents(t).map(|e| e.width()).unwrap_or(0.0))
         .fold(0.0f64, f64::max);
     width + 2.0 * GUTTER_PAD
-}
-
-/// Draws the pane's short title (e.g. `"CPU & Memory"`) in the
-/// `TITLE_H`-tall band above the plot, left-aligned with a small inset, in
-/// the pane's first series color.
-fn draw_title(ctx: &Context, text: &str, rgb: (u8, u8, u8)) {
-    let (r, g, b) = (
-        rgb.0 as f64 / 255.0,
-        rgb.1 as f64 / 255.0,
-        rgb.2 as f64 / 255.0,
-    );
-    // Baseline roughly centered in the title band.
-    let baseline = TITLE_H * 0.75;
-    ctx.set_source_rgb(r, g, b);
-    ctx.move_to(2.0, baseline);
-    let _ = ctx.show_text(text);
 }
 
 /// Draws one series (area fill + line + latest-sample dot) inside the inner
@@ -388,19 +371,21 @@ fn draw_axis_ticks(
 /// Paints one pane of the split rolling-window usage chart into `ctx`,
 /// spanning `(w, h)`.
 ///
-/// The pane is laid out top-to-bottom as: title band (`TITLE_H`), top
-/// padding (`TOP_PAD`, reserved for the topmost tick label so it is never
-/// clipped by the widget edge), and finally the plot. Left and right gutters
-/// hold the pane's tick labels outside the plot, sized at draw time from
-/// `ctx.text_extents` so even the widest label (e.g. `"100 °C"`) never
-/// clips.
+/// The pane is laid out top-to-bottom as: a top padding band (`TOP_PAD`),
+/// reserved for the topmost tick label so it is never clipped by the widget
+/// edge, and finally the plot. Left and right gutters hold the pane's tick
+/// labels outside the plot, sized at draw time from `ctx.text_extents` so
+/// even the widest label (e.g. `"100 °C"`) never clips.
 ///
-/// * [`ChartPane::CpuMem`] — title `"CPU & Memory"` (green), a left % axis
-///   (green-tinted), and memory (blue, 0–100%) + CPU (green, 0–100%) series.
-/// * [`ChartPane::FreqTemp`] — title `"CPU Freq & Temp"` (purple), a left
-///   MHz axis (purple-tinted) + a right °C axis (red-tinted), and frequency
-///   (purple, domain `cfg.freq_max_mhz`) + temperature (red, 0–100 °C)
-///   series.
+/// The pane title (e.g. `"CPU & Memory"`) is drawn by the GTK layer as a
+/// standard centered `Label` *above* this widget, using the theme's font and
+/// color — cairo does not paint it here.
+///
+/// * [`ChartPane::CpuMem`] — a left % axis (green-tinted) and memory (blue,
+///   0–100%) + CPU (green, 0–100%) series.
+/// * [`ChartPane::FreqTemp`] — a left MHz axis (purple-tinted) + a right °C
+///   axis (red-tinted), and frequency (purple, domain `cfg.freq_max_mhz`) +
+///   temperature (red, 0–100 °C) series.
 ///
 /// A series whose samples are all `None` (no sensor) is skipped. An empty
 /// history paints a blank, valid chart.
@@ -447,7 +432,6 @@ pub fn paint_usage_chart(
                 axis_tick_percent,
                 AxisSide::Left,
             );
-            draw_title(ctx, "CPU & Memory", CPU_RGB);
         }
         ChartPane::FreqTemp => {
             let freq: Vec<Option<f64>> = samples.iter().map(|s| s.freq).collect();
@@ -487,7 +471,6 @@ pub fn paint_usage_chart(
                 axis_tick_celsius,
                 AxisSide::Right,
             );
-            draw_title(ctx, "CPU Freq & Temp", FREQ_RGB);
         }
     }
 }
@@ -515,9 +498,9 @@ mod tests {
     fn test_plot_rect_basic_geometry() {
         let p = plot_rect(100.0, 80.0, 20.0, 10.0);
         assert_eq!(p.ox, 20.0);
-        assert_eq!(p.oy, TITLE_H + TOP_PAD);
+        assert_eq!(p.oy, TOP_PAD);
         assert_eq!(p.w, 100.0 - 20.0 - 10.0);
-        assert_eq!(p.h, 80.0 - TITLE_H - TOP_PAD);
+        assert_eq!(p.h, 80.0 - TOP_PAD);
     }
 
     #[test]
@@ -525,8 +508,8 @@ mod tests {
         let p = plot_rect(100.0, 80.0, 0.0, 0.0);
         assert_eq!(p.ox, 0.0);
         assert_eq!(p.w, 100.0);
-        assert_eq!(p.oy, TITLE_H + TOP_PAD);
-        assert_eq!(p.h, 80.0 - TITLE_H - TOP_PAD);
+        assert_eq!(p.oy, TOP_PAD);
+        assert_eq!(p.h, 80.0 - TOP_PAD);
     }
 
     #[test]
@@ -537,16 +520,16 @@ mod tests {
     }
 
     #[test]
-    fn test_plot_rect_clamps_to_zero_when_title_exceeds_height() {
+    fn test_plot_rect_clamps_to_zero_when_top_pad_exceeds_height() {
         let p = plot_rect(100.0, 5.0, 0.0, 0.0);
         assert_eq!(p.h, 0.0, "plot height clamps to 0");
-        assert_eq!(p.oy, TITLE_H + TOP_PAD, "title band still takes its height");
+        assert_eq!(p.oy, TOP_PAD, "top padding still takes its height");
     }
 
     #[test]
     fn test_plot_rect_dimensions_stay_non_negative() {
         // Covers both the normal case (chrome < widget) and the degenerate
-        // case where gutters or the title band exceed the widget size —
+        // case where gutters or the top pad exceed the widget size —
         // `plot_rect` must clamp to 0, never go negative.
         for (w, h, l, r) in [
             (100.0, 80.0, 0.0, 0.0),
@@ -554,7 +537,7 @@ mod tests {
             (50.0, 40.0, 10.0, 10.0),
             (60.0, 40.0, 80.0, 80.0), // gutters exceed width
             (0.0, 0.0, 10.0, 10.0),
-            (10.0, 5.0, 0.0, 0.0), // widget height under title band
+            (10.0, 5.0, 0.0, 0.0), // widget height under TOP_PAD
         ] {
             let p = plot_rect(w, h, l, r);
             assert!(

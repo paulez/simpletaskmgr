@@ -15,7 +15,7 @@ A lightweight, interactive system process manager built with Rust that displays 
 - **Clean Start**: On launch no process is selected, so the list takes the full width and the detail pane is hidden until you pick one
 - **Highest CPU First**: On launch the list is sorted by CPU% (highest first) and scrolled to the top, so the most active processes are visible immediately
 - **Signal Management**: Send SIGHUP or SIGKILL to a selected process from its detail view, with success/failure feedback
-- **Resource Usage Graph**: An always-on chart above the process list shows system-wide CPU and memory usage (left pane) and CPU frequency and temperature (right pane) over time, updating with each refresh. The two panes share one rolling history (~120 samples at the default 1.5s refresh, ~3 minutes), each right-anchored with a fixed time slot per sample: the trace grows from right to left until the history is full, then scrolls left. Each pane has a short title on top ("CPU & Memory" / "CPU Freq & Temp") and a tick-labeled axis — the left pane reads a 0-100% scale, the right pane reads frequency (MHz, top read from `scaling_max_freq`, e.g. `4 GHz`) on the left and temperature (°C, 0-100) on the right — so a trace at 3.4 GHz on a 4 GHz ceiling reads as 85% of the pane height, not 0.85. Tick labels live in gutters outside the plot so the colored series never overlap them and the top label is never clipped by the pane edge
+- **Resource Usage Graph**: An always-on chart above the process list shows system-wide CPU and memory usage (left pane, labeled "CPU & Memory") and CPU frequency and temperature (right pane, labeled "CPU Freq & Temp") over time, updating with each refresh. The two panes share one rolling history (~120 samples at the default 1.5s refresh, ~3 minutes), each right-anchored with a fixed time slot per sample: the trace grows from right to left until the history is full, then scrolls left. Each pane has a short centered title above the plot (standard theme-colored GTK label, readable in light and dark themes) and a tick-labeled axis — the left pane reads a 0-100% scale, the right pane reads frequency (MHz, top read from `scaling_max_freq`, e.g. `4 GHz`) on the left and temperature (°C, 0-100) on the right — so a trace at 3.4 GHz on a 4 GHz ceiling reads as 85% of the pane height, not 0.85. Tick labels live in gutters outside the plot so the colored series never overlap them and the top label is never clipped by the pane edge
 - **Persistent Settings**: Your choices (show-all filter, refresh interval) survive restarts. Open the **Settings** popover in the toolbar to change them.
 
 ## Requirements
@@ -111,14 +111,17 @@ pane draws memory and CPU on a shared 0-100% axis (with the % scale labeled
 on the left), and the right pane draws frequency (MHz) on its own dedicated
 left axis — top anchored at `scaling_max_freq`, defaulting to 4 GHz if that
 interface isn't available — and temperature (°C) on its own 0-100 °C right
-axis. Each pane has a short title at the top ("CPU & Memory" / "CPU Freq &
-Temp") and reserves a top band so the topmost tick label is never clipped,
-with the tick labels drawn in gutters outside the plot so the colored series
-never overlap them. Each series is drawn with cairo into its own
-`DrawingArea`. Each pane is right-anchored and fixed-slot: the newest sample
-sits at the right edge, each older sample one slot to the left, and the left
-side stays blank until the history fills the full width — then new samples
-scroll the trace left, exactly like a scrolling system monitor.
+axis. Each pane is wrapped in a vertical box with a short centered `Label`
+on top ("CPU & Memory" / "CPU Freq & Temp") and the cairo `DrawingArea`
+below it; the label uses the GTK theme's font and color so it stays readable
+in both light and dark themes. The cairo layer also reserves a small top
+band (`TOP_PAD`) so the topmost tick label is never clipped by the pane
+edge, and the tick labels are drawn in gutters outside the plot so the
+colored series never overlap them. Each pane is right-anchored and
+fixed-slot: the newest sample sits at the right edge, each older sample one
+slot to the left, and the left side stays blank until the history fills the
+full width — then new samples scroll the trace left, exactly like a
+scrolling system monitor.
 
 Each process entry shows:
 - **PID**: Process identifier
