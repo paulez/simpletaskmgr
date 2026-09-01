@@ -27,10 +27,14 @@
 
      5. **CPU Status**
      - The usage graph is split into two side-by-side panes: the left pane
-       plots CPU + memory usage, the right pane plots CPU frequency +
-       temperature
+       ("CPU & Memory") plots CPU + memory usage, the right pane
+       ("CPU Freq & Temp") plots CPU frequency + temperature
      - Frequency and temperature each draw on their own dedicated axis
-       (frequency top-anchored at `scaling_max_freq`, temperature 0-100 °C)
+       (frequency top-anchored at `scaling_max_freq`, temperature 0-100 °C);
+       CPU + memory read a 0-100% axis
+     - Each pane shows a short title and a top padding band so the topmost
+       tick label is never clipped; tick labels live in gutters outside the
+       plot so the colored series never overlap them
      - Sources: `cpufreq/scaling_cur_freq` for frequency; CPU `hwmon` sensor's
        hottest `tempN_input` for temperature; both blank when unavailable
      - Read failures carry the previous value forward so the series doesn't dip

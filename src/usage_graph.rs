@@ -20,6 +20,20 @@ pub const LINE_WIDTH: f64 = 1.5;
 /// Radius of the "latest sample" marker dot (in pixels).
 pub const DOT_RADIUS: f64 = 1.5;
 
+/// Vertical thickness of the pane title band (pixels at draw-time scale).
+pub const TITLE_H: f64 = 14.0;
+/// Vertical padding below the title band, before the plot begins — reserved
+/// for the topmost tick label so the max-value label is never clipped by the
+/// widget edge.
+pub const TOP_PAD: f64 = 14.0;
+/// Whitespace between a label gutter and the plot boundary, so tick labels
+/// don't hug the axis line.
+pub const GUTTER_PAD: f64 = 4.0;
+/// Baseline offset from a tick row, so the top tick (y = plot top) stays
+/// inside the widget and the bottom tick (y = plot bottom) is drawn just
+/// above it.
+const TICK_BASELINE: f64 = 3.0;
+
 /// Splits `values` into the index ranges of its maximal contiguous stretches
 /// of `Some`. `values[i].is_some()` is the only property consulted.
 ///
@@ -46,16 +60,16 @@ fn iter_some_runs(values: &[Option<f64>]) -> Vec<std::ops::Range<usize>> {
     runs
 }
 
-/// Maps the i-th of `n` samples (index 0 = oldest) to a pixel x coordinate on
-/// the right-anchored rolling window of width `w`.
+/// Maps the i-th of `n` samples (index 0 = oldest) to a pixel x offset on the
+/// right-anchored rolling window of width `w`.
 ///
 /// The latest sample (index `n - 1`) always lands on the right edge (`w`);
 /// each older sample sits one fixed slot to its left, where
 /// `slot = w / (capacity - 1)`. With `capacity == n` a full history spans the
 /// entire width; a partial history occupies only the right-hand portion, so
-/// the trace grows from right to left until it is full and then scrolls left.
-/// Positions past the left edge clamp to 0. Indexes past `n - 1` clamp to the
-/// latest position.
+/// the trace grows from right to left until it is full and then scrolls
+/// left. Positions past the left edge clamp to 0. Indexes past `n - 1` clamp
+/// to the latest position.
 pub fn sample_x(i: usize, n: usize, capacity: usize, w: f64) -> f64 {
     if n == 0 {
         return 0.0;
@@ -83,31 +97,106 @@ pub fn frac_of(value: f64, domain_max: f64) -> f64 {
 }
 
 /// Maps a 0–100 percent value to a normalized y position (0..=1). Kept as a
-/// thin wrapper over [`frac_of`](the chart's percent series use it), and it
+/// thin wrapper over [`frac_of`] (the chart's percent series use it), and it
 /// remains the canonical unit-mapping test target.
 pub fn sample_y_frac(value: f64) -> f64 {
     frac_of(value, 100.0)
 }
 
-/// Draws one series (area fill + line + latest-sample dot) into `ctx`, laid
-/// out across the widget's pixel size `(w, h)` on the right-anchored
+/// The inner drawable rectangle of a pane. Everything outside (title band,
+/// top padding band, label gutters) is reserved chrome so the series and the
+/// axis labels never overlap.
+///
+/// * `ox, oy` — origin of the plot (lower-left corner, in Cairo y-down
+///   convention `oy` is the plot *top*).
+/// * `w, h` — plot size. Clamped to 0 when chrome exceeds the widget.
+struct Plot {
+    /// x origin of the plot — right after the left gutter.
+    ox: f64,
+    /// y origin of the plot — below the title and top-padding bands.
+    oy: f64,
+    /// Plot width (0 when the widget is too narrow to fit both gutters).
+    w: f64,
+    /// Plot height (0 when the title+padding bands exceed the widget
+    /// height).
+    h: f64,
+}
+
+impl Plot {
+    /// Invariant: plot dimensions are non-negative. In the degenerate case
+    /// (chrome exceeds the widget) dimensions clamp to 0 rather than going
+    /// negative, so a caller that draws the plot at non-degenerate sizes still
+    /// stays inside its widget.
+    fn non_negative(&self) -> bool {
+        self.ox >= 0.0 && self.oy >= 0.0 && self.w >= 0.0 && self.h >= 0.0
+    }
+}
+
+/// Computes the inner plot rectangle for a widget of size `(w, h)` with
+/// `left` and `right` gutter widths (pixels). Both dimensions clamp to 0
+/// when chrome exceeds the widget; the `ox + w ≤ w` and `oy + h ≤ h`
+/// invariants hold.
+fn plot_rect(w: f64, h: f64, left: f64, right: f64) -> Plot {
+    let p = Plot {
+        ox: left.max(0.0),
+        oy: (TITLE_H + TOP_PAD).max(0.0),
+        w: (w - left - right).max(0.0),
+        h: (h - TITLE_H - TOP_PAD).max(0.0),
+    };
+    debug_assert!(p.non_negative(), "plot dimensions must be non-negative");
+    p
+}
+
+/// Width of the gutter needed to hold the widest of `labels`, measured at
+/// the current font settings: `widest_label + 2*GUTTER_PAD`. An empty slice
+/// or an all-empty measurement yields a zero-width gutter.
+fn measure_gutter(ctx: &Context, labels: &[String]) -> f64 {
+    if labels.is_empty() {
+        return 0.0;
+    }
+    let width = labels
+        .iter()
+        .map(|t| ctx.text_extents(t).map(|e| e.width()).unwrap_or(0.0))
+        .fold(0.0f64, f64::max);
+    width + 2.0 * GUTTER_PAD
+}
+
+/// Draws the pane's short title (e.g. `"CPU & Memory"`) in the
+/// `TITLE_H`-tall band above the plot, left-aligned with a small inset, in
+/// the pane's first series color.
+fn draw_title(ctx: &Context, text: &str, rgb: (u8, u8, u8)) {
+    let (r, g, b) = (
+        rgb.0 as f64 / 255.0,
+        rgb.1 as f64 / 255.0,
+        rgb.2 as f64 / 255.0,
+    );
+    // Baseline roughly centered in the title band.
+    let baseline = TITLE_H * 0.75;
+    ctx.set_source_rgb(r, g, b);
+    ctx.move_to(2.0, baseline);
+    let _ = ctx.show_text(text);
+}
+
+/// Draws one series (area fill + line + latest-sample dot) inside the inner
+/// `plot` rectangle, laid out across `plot.w` on the right-anchored
 /// `capacity`-slot window.
 ///
-/// `value_of` picks the sampled value for each sample; returning `None` for a
-/// sample leaves a blank gap at that x (the run before and after it is drawn
-/// as its own connected path). `domain_max` is the value that maps to the top
-/// of the chart — each series passes its own domain (`100.0` for the percent
-/// series, the freq ceiling for the frequency series), so a series on a
-/// different scale still reads as a normal curve.
+/// `values[i] = None` leaves a blank gap at that x (the run before and after
+/// it is drawn as its own connected path). `domain_max` is the value that
+/// maps to the top of the plot — each series passes its own domain
+/// (`100.0` for the percent series, the freq ceiling for the frequency
+/// series), so a series on a different scale still reads as a normal curve.
 fn draw_series(
     ctx: &Context,
-    w: f64,
-    h: f64,
+    plot: &Plot,
     values: &[Option<f64>],
     capacity: usize,
     domain_max: f64,
     rgb: (u8, u8, u8),
 ) {
+    if plot.w <= 0.0 || plot.h <= 0.0 {
+        return;
+    }
     let runs = iter_some_runs(values);
     let n = values.len();
     let (r, g, b) = (
@@ -115,17 +204,19 @@ fn draw_series(
         rgb.1 as f64 / 255.0,
         rgb.2 as f64 / 255.0,
     );
-    let x_at = |i: usize| sample_x(i, n, capacity, w);
-    let y_at = |i: usize| frac_of(values[i].unwrap_or(0.0), domain_max) * h;
+    let x_at = |i: usize| plot.ox + sample_x(i, n, capacity, plot.w);
+    let y_at = |i: usize| plot.oy + frac_of(values[i].unwrap_or(0.0), domain_max) * plot.h;
+    let bottom = plot.oy + plot.h;
     for run in &runs {
         let (a, z) = (run.start, run.end);
-        // 1) Area fill (low alpha) from the bottom up to the run's curve.
+        // 1) Area fill (low alpha) from the plot bottom up to the run's
+        //    curve.
         ctx.new_path();
-        ctx.move_to(x_at(a), h);
+        ctx.move_to(x_at(a), bottom);
         for i in a..z {
             ctx.line_to(x_at(i), y_at(i));
         }
-        ctx.line_to(x_at(z - 1), h);
+        ctx.line_to(x_at(z - 1), bottom);
         ctx.close_path();
         ctx.set_source_rgba(r, g, b, FILL_ALPHA);
         let _ = ctx.fill();
@@ -141,7 +232,8 @@ fn draw_series(
         let _ = ctx.stroke();
     }
     // 3) "Latest sample" marker on the newest run (the run ending at n-1),
-    //    so the "now" value stays visible even before a second sample arrives.
+    //    so the "now" value stays visible even before a second sample
+    //    arrives.
     if let Some(last) = runs.last() {
         if last.end == n {
             ctx.new_path();
@@ -216,11 +308,15 @@ pub fn axis_tick_celsius(celsius: f64) -> String {
     format!("{:.0} °C", celsius)
 }
 
-/// The right-side axis tick rows for a chart of height `h`: `(fraction,
-/// label)` pairs where the fraction is the normalized y position (0 = top,
-/// 1 = bottom) and the label is the value at that row. Three ticks — the
-/// domain top, a quarter, and the bottom (0) — are drawn, which is enough for
-/// a quick read without crowding the graph.
+/// Formats a percent-axis tick as a compact label: `"100%"`, `"25%"`.
+pub fn axis_tick_percent(p: f64) -> String {
+    format!("{:.0}%", p)
+}
+
+/// The three tick rows for a chart of a given domain — the domain top, a
+/// quarter, and the bottom (0) — returned as `(fraction, label)` pairs where
+/// `fraction` is the normalized y offset (0 = top, 1 = bottom) within the
+/// plot.
 fn axis_ticks(domain_max: f64, format: fn(f64) -> String) -> Vec<(f64, String)> {
     vec![
         (frac_of(domain_max, domain_max), format(domain_max)),
@@ -232,34 +328,26 @@ fn axis_ticks(domain_max: f64, format: fn(f64) -> String) -> Vec<(f64, String)> 
     ]
 }
 
-/// Tick label columns: the frequency axis reads on the left of the chart, the
-/// temperature axis on the right (a conventional dual-axis layout — each
-/// non-percent series gets its own axis and side so the two never overlap).
-const TICK_INSET: f64 = 4.0;
-/// Baseline offset from a tick row, so the top tick (y=0) stays inside the
-/// widget and the bottom tick (y=h) is drawn just above it.
-const TICK_BASELINE: f64 = 3.0;
-
-/// Whether an axis column sits on the left or right edge of the chart.
+/// Whether an axis column sits on the left or right edge of the plot.
 #[derive(Clone, Copy)]
 enum AxisSide {
     Left,
     Right,
 }
 
-/// Draws the tick labels for one axis: three rows (the domain top, 25% of the
-/// domain, and 0) tinted with `rgb` so the axis reads as belonging to that
-/// series (frequency purple on the left, temperature red on the right).
+/// Draws the tick labels for one axis *outside* the plot, in the left or
+/// right gutter (as named by `side`). Labels sit `GUTTER_PAD` away from the
+/// plot edge so they never overlap the series, and a faint guide is drawn
+/// along the plot edge the tick belongs to.
 fn draw_axis_ticks(
     ctx: &Context,
-    w: f64,
-    h: f64,
+    plot: &Plot,
     domain_max: f64,
     rgb: (u8, u8, u8),
     label: fn(f64) -> String,
     side: AxisSide,
 ) {
-    if w <= 0.0 || h <= 0.0 {
+    if plot.w <= 0.0 || plot.h <= 0.0 {
         return;
     }
     let (r, g, b) = (
@@ -267,20 +355,15 @@ fn draw_axis_ticks(
         rgb.1 as f64 / 255.0,
         rgb.2 as f64 / 255.0,
     );
-    ctx.select_font_face(
-        "sans-serif",
-        cairo::FontSlant::Normal,
-        cairo::FontWeight::Normal,
-    );
-    ctx.set_font_size(9.0);
     for (frac, text) in axis_ticks(domain_max, label) {
-        let y = frac * h;
+        let y = plot.oy + frac * plot.h;
         let width = ctx.text_extents(&text).map(|e| e.width()).unwrap_or(0.0);
         let x = match side {
-            AxisSide::Left => TICK_INSET,
-            AxisSide::Right => (w - width - TICK_INSET).max(0.0),
+            AxisSide::Left => (plot.ox - GUTTER_PAD - width).max(0.0),
+            AxisSide::Right => plot.ox + plot.w + GUTTER_PAD,
         };
-        // Top tick sits below its row, bottom tick above, so both stay on-canvas.
+        // Top tick sits below its row, bottom tick above, so both stay
+        // on-canvas.
         let baseline_y = if frac < 0.5 {
             y + TICK_BASELINE
         } else {
@@ -290,28 +373,34 @@ fn draw_axis_ticks(
         ctx.move_to(x, baseline_y);
         let _ = ctx.show_text(&text);
     }
-    // Faint guide along that side.
+    // Faint guide along the plot edge this axis belongs to.
     let gx = match side {
-        AxisSide::Left => 1.0,
-        AxisSide::Right => w - 1.0,
+        AxisSide::Left => plot.ox,
+        AxisSide::Right => plot.ox + plot.w,
     };
     ctx.set_source_rgba(r, g, b, FILL_ALPHA);
     ctx.set_line_width(1.0);
-    ctx.move_to(gx, 0.0);
-    ctx.line_to(gx, h);
+    ctx.move_to(gx, plot.oy);
+    ctx.line_to(gx, plot.oy + plot.h);
     let _ = ctx.stroke();
 }
 
 /// Paints one pane of the split rolling-window usage chart into `ctx`,
 /// spanning `(w, h)`.
 ///
-/// `pane` selects which two series live in this pane:
+/// The pane is laid out top-to-bottom as: title band (`TITLE_H`), top
+/// padding (`TOP_PAD`, reserved for the topmost tick label so it is never
+/// clipped by the widget edge), and finally the plot. Left and right gutters
+/// hold the pane's tick labels outside the plot, sized at draw time from
+/// `ctx.text_extents` so even the widest label (e.g. `"100 °C"`) never
+/// clips.
 ///
-/// * [`ChartPane::CpuMem`] — memory (blue) then CPU (green), both on the
-///   shared 0–100% grid. No axis ticks: the percent scale is self-evident.
-/// * [`ChartPane::FreqTemp`] — frequency (purple, domain `cfg.freq_max_mhz`)
-///   then temperature (red, 0–100 °C), with their two dedicated axes drawn
-///   color-matched (frequency on the left, temperature on the right).
+/// * [`ChartPane::CpuMem`] — title `"CPU & Memory"` (green), a left % axis
+///   (green-tinted), and memory (blue, 0–100%) + CPU (green, 0–100%) series.
+/// * [`ChartPane::FreqTemp`] — title `"CPU Freq & Temp"` (purple), a left
+///   MHz axis (purple-tinted) + a right °C axis (red-tinted), and frequency
+///   (purple, domain `cfg.freq_max_mhz`) + temperature (red, 0–100 °C)
+///   series.
 ///
 /// A series whose samples are all `None` (no sensor) is skipped. An empty
 /// history paints a blank, valid chart.
@@ -326,27 +415,65 @@ pub fn paint_usage_chart(
     if w <= 0.0 || h <= 0.0 {
         return;
     }
+    ctx.select_font_face(
+        "sans-serif",
+        cairo::FontSlant::Normal,
+        cairo::FontWeight::Normal,
+    );
+    ctx.set_font_size(9.0);
     match pane {
         ChartPane::CpuMem => {
             let mem: Vec<Option<f64>> = samples.iter().map(|s| Some(s.mem)).collect();
             let cpu: Vec<Option<f64>> = samples.iter().map(|s| Some(s.cpu)).collect();
+            // %-axis on the left: three ticks measured with the current font
+            // so the gutter is wide enough to hold "100%".
+            let left_gutter = measure_gutter(
+                ctx,
+                &[
+                    axis_tick_percent(100.0),
+                    axis_tick_percent(25.0),
+                    axis_tick_percent(0.0),
+                ],
+            );
+            let plot = plot_rect(w, h, left_gutter, 0.0);
             // Draw order: memory (bottom), cpu (top).
-            draw_series(ctx, w, h, &mem, cfg.capacity, 100.0, MEM_RGB);
-            draw_series(ctx, w, h, &cpu, cfg.capacity, 100.0, CPU_RGB);
+            draw_series(ctx, &plot, &mem, cfg.capacity, 100.0, MEM_RGB);
+            draw_series(ctx, &plot, &cpu, cfg.capacity, 100.0, CPU_RGB);
+            draw_axis_ticks(
+                ctx,
+                &plot,
+                100.0,
+                CPU_RGB,
+                axis_tick_percent,
+                AxisSide::Left,
+            );
+            draw_title(ctx, "CPU & Memory", CPU_RGB);
         }
         ChartPane::FreqTemp => {
             let freq: Vec<Option<f64>> = samples.iter().map(|s| s.freq).collect();
             let temp: Vec<Option<f64>> = samples.iter().map(|s| s.temp).collect();
+            let freq_labels = vec![
+                axis_tick_mhz(cfg.freq_max_mhz),
+                axis_tick_mhz(cfg.freq_max_mhz / 4.0),
+                axis_tick_mhz(0.0),
+            ];
+            let temp_labels = vec![
+                axis_tick_celsius(100.0),
+                axis_tick_celsius(25.0),
+                axis_tick_celsius(0.0),
+            ];
+            let left_gutter = measure_gutter(ctx, &freq_labels);
+            let right_gutter = measure_gutter(ctx, &temp_labels);
+            let plot = plot_rect(w, h, left_gutter, right_gutter);
             // Draw order: frequency, temperature (top).
-            draw_series(ctx, w, h, &freq, cfg.capacity, cfg.freq_max_mhz, FREQ_RGB);
-            draw_series(ctx, w, h, &temp, cfg.capacity, 100.0, TEMP_RGB);
-            // Axes for the two non-percent series: frequency on the left,
-            // temperature on the right, drawn after the fills so the labels
-            // stay readable over the translucent bands.
+            draw_series(ctx, &plot, &freq, cfg.capacity, cfg.freq_max_mhz, FREQ_RGB);
+            draw_series(ctx, &plot, &temp, cfg.capacity, 100.0, TEMP_RGB);
+            // Frequency axis on the left, temperature axis on the right — a
+            // conventional dual-axis layout where each non-percent series
+            // reads its own colored tick column outside the plot.
             draw_axis_ticks(
                 ctx,
-                w,
-                h,
+                &plot,
                 cfg.freq_max_mhz,
                 FREQ_RGB,
                 axis_tick_mhz,
@@ -354,13 +481,13 @@ pub fn paint_usage_chart(
             );
             draw_axis_ticks(
                 ctx,
-                w,
-                h,
+                &plot,
                 100.0,
                 TEMP_RGB,
                 axis_tick_celsius,
                 AxisSide::Right,
             );
+            draw_title(ctx, "CPU Freq & Temp", FREQ_RGB);
         }
     }
 }
@@ -369,17 +496,118 @@ pub fn paint_usage_chart(
 mod tests {
     use super::*;
 
-    fn samples(values: &[f64]) -> Vec<Sample> {
-        values
-            .iter()
-            .map(|v| Sample {
-                cpu: *v,
-                mem: *v,
-                freq: None,
-                temp: None,
-            })
-            .collect()
+    fn sample(v: f64) -> Sample {
+        Sample {
+            cpu: v,
+            mem: v,
+            freq: None,
+            temp: None,
+        }
     }
+
+    fn samples(values: &[f64]) -> Vec<Sample> {
+        values.iter().map(|v| sample(*v)).collect()
+    }
+
+    // ---- plot-rect geometry -----------------------------------------
+
+    #[test]
+    fn test_plot_rect_basic_geometry() {
+        let p = plot_rect(100.0, 80.0, 20.0, 10.0);
+        assert_eq!(p.ox, 20.0);
+        assert_eq!(p.oy, TITLE_H + TOP_PAD);
+        assert_eq!(p.w, 100.0 - 20.0 - 10.0);
+        assert_eq!(p.h, 80.0 - TITLE_H - TOP_PAD);
+    }
+
+    #[test]
+    fn test_plot_rect_no_gutters_is_full_width() {
+        let p = plot_rect(100.0, 80.0, 0.0, 0.0);
+        assert_eq!(p.ox, 0.0);
+        assert_eq!(p.w, 100.0);
+        assert_eq!(p.oy, TITLE_H + TOP_PAD);
+        assert_eq!(p.h, 80.0 - TITLE_H - TOP_PAD);
+    }
+
+    #[test]
+    fn test_plot_rect_clamps_to_zero_when_gutters_exceed_width() {
+        let p = plot_rect(30.0, 100.0, 40.0, 20.0);
+        assert_eq!(p.w, 0.0, "plot width clamps to 0");
+        assert_eq!(p.ox, 40.0, "left gutter still takes its width");
+    }
+
+    #[test]
+    fn test_plot_rect_clamps_to_zero_when_title_exceeds_height() {
+        let p = plot_rect(100.0, 5.0, 0.0, 0.0);
+        assert_eq!(p.h, 0.0, "plot height clamps to 0");
+        assert_eq!(p.oy, TITLE_H + TOP_PAD, "title band still takes its height");
+    }
+
+    #[test]
+    fn test_plot_rect_dimensions_stay_non_negative() {
+        // Covers both the normal case (chrome < widget) and the degenerate
+        // case where gutters or the title band exceed the widget size —
+        // `plot_rect` must clamp to 0, never go negative.
+        for (w, h, l, r) in [
+            (100.0, 80.0, 0.0, 0.0),
+            (100.0, 80.0, 20.0, 10.0),
+            (50.0, 40.0, 10.0, 10.0),
+            (60.0, 40.0, 80.0, 80.0), // gutters exceed width
+            (0.0, 0.0, 10.0, 10.0),
+            (10.0, 5.0, 0.0, 0.0), // widget height under title band
+        ] {
+            let p = plot_rect(w, h, l, r);
+            assert!(
+                p.non_negative(),
+                "plot (ox={ox}, oy={oy}, pw={pw}, ph={ph}) at widget ({w}x{h}) gutters ({l},{r}) must be non-negative",
+                ox = p.ox, oy = p.oy, pw = p.w, ph = p.h
+            );
+        }
+    }
+
+    // ---- axis-tick labels ---------------------------------------------
+
+    #[test]
+    fn test_axis_tick_percent_format() {
+        assert_eq!(axis_tick_percent(100.0), "100%");
+        assert_eq!(axis_tick_percent(25.0), "25%");
+        assert_eq!(axis_tick_percent(0.0), "0%");
+        assert_eq!(axis_tick_percent(50.0), "50%");
+    }
+
+    #[test]
+    fn test_axis_ticks_three_rows_evenly_spread() {
+        let ticks = axis_ticks(4000.0, axis_tick_mhz);
+        assert_eq!(ticks.len(), 3);
+        assert_eq!(ticks[0].0, 0.0, "top tick at the ceiling");
+        assert_eq!(
+            ticks[1].0, 0.75,
+            "quarter-value tick sits three-quarter down"
+        );
+        assert_eq!(ticks[2].0, 1.0, "bottom tick");
+        assert_eq!(ticks[0].1, "4 GHz");
+        assert_eq!(ticks[1].1, "1 GHz");
+        assert_eq!(ticks[2].1, "0 MHz");
+    }
+
+    #[test]
+    fn test_axis_tick_celsius_format() {
+        let ticks = axis_ticks(100.0, axis_tick_celsius);
+        assert_eq!(ticks[0].1, "100 °C");
+        assert_eq!(ticks[1].1, "25 °C");
+        assert_eq!(ticks[2].1, "0 °C");
+    }
+
+    #[test]
+    fn test_axis_tick_mhz_units() {
+        assert_eq!(axis_tick_mhz(4000.0), "4 GHz");
+        assert_eq!(axis_tick_mhz(2000.0), "2 GHz");
+        assert_eq!(axis_tick_mhz(1500.0), "1.5 GHz");
+        assert_eq!(axis_tick_mhz(550.0), "550 MHz");
+        assert_eq!(axis_tick_mhz(0.0), "0 MHz");
+    }
+
+    // ---- x/y mappings ---------------------------------------------------
 
     #[test]
     fn test_sample_x_latest_pins_to_right_edge() {
@@ -454,32 +682,26 @@ mod tests {
 
     #[test]
     fn test_frac_of_maps_by_domain_and_clamps() {
-        // 50% of a 100-domain sits at mid-height.
         assert!((frac_of(50.0, 100.0) - 0.5).abs() < 1e-9);
-        // 3.2 GHz on a 4 GHz ceiling sits at 20% from the top (y).
         assert!((frac_of(3200.0, 4000.0) - 0.2).abs() < 1e-9);
-        // Over-domain clamps to the top.
         assert_eq!(frac_of(5000.0, 4000.0), 0.0, "over-domain clamps to top");
-        // Under-domain clamps to the bottom.
         assert_eq!(frac_of(-10.0, 4000.0), 1.0, "under-domain clamps to bottom");
-        // Zero domain degenerates to the bottom (unused axis).
         assert_eq!(frac_of(500.0, 0.0), 1.0, "zero domain -> bottom");
-        // The old percent mapping is preserved via sample_y_frac.
         assert!((sample_y_frac(50.0) - frac_of(50.0, 100.0)).abs() < 1e-9);
     }
+
+    // ---- run splitting --------------------------------------------------
 
     #[test]
     fn test_iter_some_runs_contiguous() {
         let v: Vec<Option<f64>> = vec![Some(1.0), Some(2.0), Some(3.0)];
-        let runs = iter_some_runs(&v);
-        assert_eq!(runs, vec![0..3]);
+        assert_eq!(iter_some_runs(&v), vec![0..3]);
     }
 
     #[test]
     fn test_iter_some_runs_blank_middle() {
         let v: Vec<Option<f64>> = vec![Some(1.0), None, Some(3.0), None, Some(5.0)];
-        let runs = iter_some_runs(&v);
-        assert_eq!(runs, vec![0..1, 2..3, 4..5]);
+        assert_eq!(iter_some_runs(&v), vec![0..1, 2..3, 4..5]);
     }
 
     #[test]
@@ -497,13 +719,13 @@ mod tests {
     #[test]
     fn test_iter_some_runs_leading_trailing_gaps() {
         let v: Vec<Option<f64>> = vec![None, Some(1.0), Some(2.0), None];
-        let runs = iter_some_runs(&v);
-        assert_eq!(runs, vec![1..3]);
+        assert_eq!(iter_some_runs(&v), vec![1..3]);
     }
+
+    // ---- palette + layout bounds ----------------------------------------
 
     #[test]
     fn test_palette_constants_are_distinct() {
-        // Every pair of series colors must be distinguishable.
         let all = [CPU_RGB, MEM_RGB, FREQ_RGB, TEMP_RGB];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
@@ -518,21 +740,24 @@ mod tests {
         let s = samples(&[0.0, 25.0, 50.0, 75.0, 100.0]);
         let w = 400.0;
         let h = 90.0;
+        let left = 20.0;
+        let right = 10.0;
+        let plot = plot_rect(w, h, left, right);
         let n = s.len();
         for (i, smp) in s.iter().enumerate() {
-            let x = sample_x(i, n, 120, w);
-            let y = frac_of(smp.cpu, 100.0) * h;
-            assert!((0.0..=w).contains(&x));
-            assert!((0.0..=h).contains(&y));
+            let x = plot.ox + sample_x(i, n, 120, plot.w);
+            let y = plot.oy + frac_of(smp.cpu, 100.0) * plot.h;
+            assert!((0.0..=w).contains(&x), "x at sample {i} in [0, {w})");
+            assert!((0.0..=h).contains(&y), "y at sample {i} in [0, {h})");
         }
+        assert_eq!(plot.w + left + right, w, "plot + gutters fill widget width");
     }
 
     #[test]
     fn test_four_series_values_land_in_bounds() {
-        // Frequency on its own ceiling and temperature on 0–100 °C must both
-        // normalize into the chart, even though they share no scale with % or MHz.
         let w = 400.0;
         let h = 110.0;
+        let plot = plot_rect(w, h, 30.0, 30.0);
         let vals: Vec<Option<f64>> = vec![
             Some(800.0),
             Some(1200.0),
@@ -542,60 +767,32 @@ mod tests {
         ];
         for (i, v) in vals.iter().enumerate() {
             let v = v.expect("present");
-            let x = sample_x(i, vals.len(), 120, w);
-            let y = frac_of(v, 4000.0) * h;
-            assert!((0.0..=w).contains(&x));
-            assert!((0.0..=h).contains(&y));
+            let x = plot.ox + sample_x(i, vals.len(), 120, plot.w);
+            let y = plot.oy + frac_of(v, 4000.0) * plot.h;
+            assert!((0.0..=w).contains(&x), "freq x in [0, {w})");
+            assert!((0.0..=h).contains(&y), "freq y in [0, {h})");
         }
         let temps: Vec<Option<f64>> = vec![Some(20.0), Some(45.0), Some(75.0), Some(100.0)];
         for v in temps.iter() {
             let v = v.expect("present");
-            let y = frac_of(v, 100.0) * h;
-            assert!((0.0..=h).contains(&y), "{v} °C must fit");
+            let y = plot.oy + frac_of(v, 100.0) * plot.h;
+            assert!((0.0..=h).contains(&y), "{v} °C must fit in [0, {h})");
         }
-    }
-
-    #[test]
-    fn test_axis_ticks_three_rows_evenly_spread() {
-        let ticks = axis_ticks(4000.0, axis_tick_mhz);
-        assert_eq!(ticks.len(), 3);
-        // frac is the y position: top (0.0) = domain top, then 25% of the
-        // domain value is 75% down the chart, and the bottom row is 0.
-        assert_eq!(ticks[0].0, 0.0, "top tick at the ceiling");
-        assert_eq!(
-            ticks[1].0, 0.75,
-            "quarter-value tick sits three-quarter down"
-        );
-        assert_eq!(ticks[2].0, 1.0, "bottom tick");
-        assert_eq!(ticks[0].1, "4 GHz");
-        assert_eq!(ticks[1].1, "1 GHz");
-        assert_eq!(ticks[2].1, "0 MHz");
-    }
-
-    #[test]
-    fn test_axis_tick_celsius_format() {
-        let ticks = axis_ticks(100.0, axis_tick_celsius);
-        assert_eq!(ticks[0].1, "100 °C");
-        assert_eq!(ticks[1].1, "25 °C");
-        assert_eq!(ticks[2].1, "0 °C");
-    }
-
-    #[test]
-    fn test_axis_tick_mhz_units() {
-        assert_eq!(axis_tick_mhz(4000.0), "4 GHz");
-        assert_eq!(axis_tick_mhz(2000.0), "2 GHz");
-        assert_eq!(axis_tick_mhz(1500.0), "1.5 GHz");
-        assert_eq!(axis_tick_mhz(550.0), "550 MHz");
-        assert_eq!(axis_tick_mhz(0.0), "0 MHz");
     }
 
     #[test]
     fn test_single_sample_is_right_anchored_in_bounds() {
         let w = 300.0;
         let h = 80.0;
-        let x = sample_x(0, 1, 120, w);
-        let y = frac_of(55.0, 100.0) * h;
-        assert_eq!(x, w, "the lone 'now' sample sits on the right edge");
+        let plot = plot_rect(w, h, 25.0, 0.0);
+        // With a left gutter, the rightmost plot edge is w - right_gutter,
+        // so the latest sample sits on that edge (not the widget edge).
+        let x = plot.ox + sample_x(0, 1, 120, plot.w);
+        let y = plot.oy + frac_of(55.0, 100.0) * plot.h;
+        assert_eq!(
+            x, w,
+            "lone 'now' sample sits on the rightmost plot edge when right_gutter is 0"
+        );
         assert!((0.0..=h).contains(&y));
     }
 
@@ -608,7 +805,6 @@ mod tests {
 
     #[test]
     fn test_chart_pane_is_copy_and_eq() {
-        // Copy so the draw closures can reuse the selector freely.
         let a = ChartPane::CpuMem;
         let b = a;
         assert_eq!(a, b);
