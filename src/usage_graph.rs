@@ -297,16 +297,16 @@ pub fn axis_tick_celsius(celsius: f64) -> String {
     format!("{:.0} °C", celsius)
 }
 
-/// Formats a percent-axis tick as a compact label: `"100%"`, `"25%"`.
+/// Formats a percent-axis tick as a compact label: `"100%"`, `"50%"`.
 pub fn axis_tick_percent(p: f64) -> String {
     format!("{:.0}%", p)
 }
 
 /// Formats a memory-axis tick (in MB) as a compact, human label: a clean
 /// whole GiB multiple reads as GB (`"16 GB"`, `"2 GB"`), anything else stays
-/// in MB (`"1536 MB"`, `"0 MB"`). This keeps the top tick of a 16 GB host
-/// readable as `16 GB` while odd quarter-ticks still read as MB values
-/// rather than awkward `0.2 GC`.
+/// in MB (`"1536 MB"`, `"32 MB"`, `"0 MB"`). This keeps the top tick of a 16 GB
+/// host readable as `16 GB` while a host whose MemTotal isn't a clean GiB
+/// boundary still reads as a sensible MB value rather than `15.4 GC`.
 pub fn axis_tick_mb(mb: f64) -> String {
     if mb >= 1024.0 && (mb / 1024.0).fract() == 0.0 {
         format!("{:.0} GB", mb / 1024.0)
@@ -315,16 +315,16 @@ pub fn axis_tick_mb(mb: f64) -> String {
     }
 }
 
-/// The three tick rows for a chart of a given domain — the domain top, a
-/// quarter, and the bottom (0) — returned as `(fraction, label)` pairs where
+/// The three tick rows for a chart of a given domain — the domain top, the
+/// midpoint, and the bottom (0) — returned as `(fraction, label)` pairs where
 /// `fraction` is the normalized y offset (0 = top, 1 = bottom) within the
 /// plot.
 fn axis_ticks(domain_max: f64, format: fn(f64) -> String) -> Vec<(f64, String)> {
     vec![
         (frac_of(domain_max, domain_max), format(domain_max)),
         (
-            frac_of(domain_max * 0.25, domain_max),
-            format(domain_max * 0.25),
+            frac_of(domain_max * 0.5, domain_max),
+            format(domain_max * 0.5),
         ),
         (frac_of(0.0, domain_max), format(0.0)),
     ]
@@ -442,7 +442,7 @@ pub fn paint_usage_chart(
                 ctx,
                 &[
                     axis_tick_percent(100.0),
-                    axis_tick_percent(25.0),
+                    axis_tick_percent(50.0),
                     axis_tick_percent(0.0),
                 ],
             );
@@ -450,7 +450,7 @@ pub fn paint_usage_chart(
                 ctx,
                 &[
                     axis_tick_mb(cfg.mem_max_mb),
-                    axis_tick_mb(cfg.mem_max_mb / 4.0),
+                    axis_tick_mb(cfg.mem_max_mb / 2.0),
                     axis_tick_mb(0.0),
                 ],
             );
@@ -482,12 +482,12 @@ pub fn paint_usage_chart(
             let temp: Vec<Option<f64>> = samples.iter().map(|s| s.temp).collect();
             let freq_labels = vec![
                 axis_tick_mhz(cfg.freq_max_mhz),
-                axis_tick_mhz(cfg.freq_max_mhz / 4.0),
+                axis_tick_mhz(cfg.freq_max_mhz / 2.0),
                 axis_tick_mhz(0.0),
             ];
             let temp_labels = vec![
                 axis_tick_celsius(100.0),
-                axis_tick_celsius(25.0),
+                axis_tick_celsius(50.0),
                 axis_tick_celsius(0.0),
             ];
             let left_gutter = measure_gutter(ctx, &freq_labels);
@@ -619,13 +619,10 @@ mod tests {
         let ticks = axis_ticks(4000.0, axis_tick_mhz);
         assert_eq!(ticks.len(), 3);
         assert_eq!(ticks[0].0, 0.0, "top tick at the ceiling");
-        assert_eq!(
-            ticks[1].0, 0.75,
-            "quarter-value tick sits three-quarter down"
-        );
+        assert_eq!(ticks[1].0, 0.5, "midpoint tick sits half-way down");
         assert_eq!(ticks[2].0, 1.0, "bottom tick");
         assert_eq!(ticks[0].1, "4 GHz");
-        assert_eq!(ticks[1].1, "1 GHz");
+        assert_eq!(ticks[1].1, "2 GHz");
         assert_eq!(ticks[2].1, "0 MHz");
     }
 
@@ -633,7 +630,7 @@ mod tests {
     fn test_axis_tick_celsius_format() {
         let ticks = axis_ticks(100.0, axis_tick_celsius);
         assert_eq!(ticks[0].1, "100 °C");
-        assert_eq!(ticks[1].1, "25 °C");
+        assert_eq!(ticks[1].1, "50 °C");
         assert_eq!(ticks[2].1, "0 °C");
     }
 

@@ -109,11 +109,14 @@ these degrades gracefully to `None` when the source is absent (containers, VMs,
 or drivers not exposed); a momentary read failure carries the previous value
 forward so the graph doesn't dip to zero spuriously. The resource graph is
 split into two side-by-side panes that share one rolling history: the left
-pane draws memory and CPU on a shared 0-100% axis (with the % scale labeled
-on the left), and the right pane draws frequency (MHz) on its own dedicated
-left axis — top anchored at `scaling_max_freq`, defaulting to 4 GHz if that
-interface isn't available — and temperature (°C) on its own 0-100 °C right
-axis. Each pane is wrapped in a vertical box with a short centered `Label`
+pane draws CPU (green) on a 0-100% left axis and RAM (blue) in MB on a right
+axis whose top is the machine's total from `/proc/meminfo` — the RAM value is
+converted from the sampled percent against `MemTotal` at paint time — so a
+busy system and a full memory ceiling each read against their own realistic
+scale rather than being squeezed onto one shared axis. The right pane draws
+frequency (purple) on a dedicated left axis anchored at `scaling_max_freq`
+(defaulting to 4 GHz if that interface isn't available) and temperature (red)
+on its own 0-100 °C right axis. Each pane is wrapped in a vertical box with a short centered `Label`
 on top ("CPU & Memory" / "CPU Freq & Temp") and the cairo `DrawingArea`
 below it; the label uses the GTK theme's font and color so it stays readable
 in both light and dark themes. The cairo layer also reserves a small top
