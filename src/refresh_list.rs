@@ -110,7 +110,7 @@ pub fn refresh(store: &ListStore, items: &[ProcessItem]) {
     for i in 0..old_n {
         let o = store.item(i).expect("row present in store");
         let r = o.downcast::<ProcessRow>().expect("a ProcessRow");
-        let pid = r.item().pid;
+        let pid = r.pid();
         order.push(pid);
         rows.insert(pid, r);
     }
@@ -220,8 +220,7 @@ mod tests {
                     .expect("row present")
                     .downcast::<ProcessRow>()
                     .expect("a ProcessRow")
-                    .item()
-                    .pid
+                    .pid()
             })
             .collect()
     }
@@ -404,7 +403,7 @@ mod tests {
                     .expect("row present")
                     .downcast::<ProcessRow>()
                     .expect("a ProcessRow");
-                (r.item().pid, r.as_ptr() as usize)
+                (r.pid(), r.as_ptr() as usize)
             })
             .collect();
         for (pid, before) in &orig {

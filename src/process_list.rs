@@ -56,9 +56,15 @@ impl ProcessList {
     pub fn update_process_list(&mut self) {
         match self.refresh_process_list() {
             Ok(processes) => {
+                // `refresh_process_list` returns owned values — move them into the
+                // row instead of cloning each (a `ProcessItem::new(&p)` copies
+                // the row's `name`/`username` Strings per process per refresh).
                 self.processes = processes
                     .into_iter()
-                    .map(|p| ProcessItem::new(&p))
+                    .map(|p| ProcessItem {
+                        pid: p.pid,
+                        value: p,
+                    })
                     .collect();
             }
             Err(e) => {

@@ -278,4 +278,22 @@ mod tests {
         assert_eq!(cloned.value.cpu_percent, 1.0);
         assert_eq!(cloned.pid, item.pid);
     }
+
+    /// Constructing a row by moving an owned value is byte-for-byte the same
+    /// row as the borrowed `new(&p)` path — this pins the `update_process_list`
+    /// refactor, which moved `refresh_process_list`'s output into rows instead
+    /// of cloning each one.
+    #[test]
+    fn test_process_item_moved_construction_matches_borrowed() {
+        let p = proc(7, 1.0);
+        let from_ref = ProcessItem::new(&p);
+        let owned = p;
+        let from_owned = ProcessItem {
+            pid: owned.pid,
+            value: owned,
+        };
+        assert_eq!(from_owned, from_ref);
+        assert_eq!(from_owned.pid, 7);
+        assert_eq!(from_owned.value.name, "name7");
+    }
 }

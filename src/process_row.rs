@@ -130,6 +130,13 @@ impl ProcessRow {
         self.imp().data.borrow().clone()
     }
 
+    /// The row's stable `pid` without cloning the whole value — the refresh
+    /// and selection-match paths only need the identity, so this avoids the
+    /// `ProcessItem` clone (two `String` copies) that [`Self::item`] incurs.
+    pub fn pid(&self) -> i32 {
+        self.imp().data.borrow().pid
+    }
+
     /// Whether the row's current data is exactly equal to `item` (a no-clone
     /// comparison, for refresh bookkeeping).
     pub fn has_value(&self, item: &crate::process::ProcessItem) -> bool {
@@ -196,6 +203,20 @@ mod tests {
         let back = r.item();
         assert_eq!(back.pid, 123);
         assert_eq!(back, i);
+    }
+
+    /// `pid()` gives the row's stable identity directly, matching the
+    /// value clone, so callers that only need the pid avoid the `item()` clone.
+    #[test]
+    fn test_process_row_pid_accessor_matches_item() {
+        let r = ProcessRow::from_item(&item(4242));
+        assert_eq!(r.pid(), 4242);
+        assert_eq!(r.pid(), r.item().pid);
+        // After a data change the accessor still reports the (unchanged) pid.
+        let mut i = item(4242);
+        i.value.cpu_percent = 99.0;
+        r.set_item(&i);
+        assert_eq!(r.pid(), 4242);
     }
 
     #[test]

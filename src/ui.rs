@@ -648,7 +648,7 @@ fn make_rebuild(
             .selected_item()
             .as_ref()
             .and_then(|o| o.downcast_ref::<ProcessRow>())
-            .map(|r| r.item().pid);
+            .map(|r| r.pid());
         let items = state_r.borrow().process_list.processes.clone();
 
         // A refresh changes the store's size, and `GtkAdjustment` clamps
@@ -684,10 +684,10 @@ fn make_rebuild(
         });
 
         if let Some(p) = prev_pid {
-            let still_selected = sel_r.selected_item().as_ref().is_some_and(|o| {
-                o.downcast_ref::<ProcessRow>()
-                    .is_some_and(|r| r.item().pid == p)
-            });
+            let still_selected = sel_r
+                .selected_item()
+                .as_ref()
+                .is_some_and(|o| o.downcast_ref::<ProcessRow>().is_some_and(|r| r.pid() == p));
             if !still_selected {
                 // The selection wraps the *sorted* model, so resolve the
                 // position in the `SortListModel`'s space, not the store's.
@@ -695,7 +695,7 @@ fn make_rebuild(
                     sort_r
                         .item(*i)
                         .and_then(|o| o.downcast::<ProcessRow>().ok())
-                        .is_some_and(|row| row.item().pid == p)
+                        .is_some_and(|row| row.pid() == p)
                 }) {
                     // The row's position changed (or its object was
                     // replaced) and the highlight dropped — re-pin it. We
