@@ -142,12 +142,18 @@ impl ProcessList {
                 let mut task_mgr_process = build_task_mgr_process(&stat, ruid, username);
                 self.cpu_tracker
                     .update_process_cpu(&mut task_mgr_process, &stat);
-                // MEM% = VmRSS / MemTotal * 100 (top-style). The VmRSS line is
-                // absent for some kernel threads, so a missing `status` just
-                // leaves the cell blank instead of failing the whole refresh.
-                if let (Some(total), Some(status)) = (mem_total_kb, proc.status().ok()) {
-                    if let Some(rss_kb) = status.vmrss {
-                        task_mgr_process.mem_percent = Some(mem_percent_of(rss_kb, total));
+                // MEM% = VmRSS / MemTotal * 100 (top-style). `top` reads this
+                // from `statm.resident` (7 short fields) rather than `status`
+                // (60+ fields, one of which — VmRSS — is all we need);
+                // `statm`'s values are in *pages*, so convert to KiB to match
+                // `MemTotal`. A failed `statm` just leaves the cell blank
+                // instead of failing the whole refresh.
+                if let Some(total) = mem_total_kb {
+                    if let Ok(statm) = proc.statm() {
+                        let rss_kb = statm.resident.saturating_mul(procfs::page_size() / 1024);
+                        if rss_kb > 0 {
+                            task_mgr_process.mem_percent = Some(mem_percent_of(rss_kb, total));
+                        }
                     }
                 }
                 // /proc/[pid]/io is only readable for self-owned processes
@@ -528,6 +534,35 @@ mod tests {
         }
     }
 
+    /// Regression guard for switching MEM% to `statm`: the `VmRSS` value
+    /// reported by `status` and the one derived from `statm.resident` (in
+    /// pages) must be on the same scale. The two come from *separate* live
+    /// syscalls (so a little drift is normal under load), but a wrong
+    /// page→KiB unit would make the ratio 4x or 0.25x — well outside the band.
+    #[test]
+    fn test_statm_resident_matches_status_vmrss() {
+        use procfs::process::Process;
+        let me = std::process::id() as i32;
+        let proc = Process::new(me).expect("own process must be readable");
+        let status = proc.status().expect("status of own process");
+        let statm = proc.statm().expect("statm of own process");
+        let status_kb = status.vmrss.expect("VmRSS of own process");
+        let ps = procfs::page_size();
+        // `statm.resident` is in pages; convert to KiB to compare scales.
+        let statm_kb = statm.resident.saturating_mul(ps / 1024);
+        assert!(
+            status_kb > 0 && statm_kb > 0,
+            "both views should be non-zero"
+        );
+        // The views can drift between the two reads, so compare the ratio and
+        // allow generous slack; a 4x / 0.25x unit slip is far beyond it.
+        let ratio = statm_kb as f64 / status_kb as f64;
+        assert!(
+            (0.5..2.0).contains(&ratio),
+            "statm KiB {statm_kb} vs status VmRSS {status_kb} => ratio {ratio}; \
+             expected within 0.5..2.0 (a wrong page/KiB unit is 4x or 0.25x)"
+        );
+    }
     /// Comparing two rows by MEM% is NaN-safe and `None`-tolerant, mirroring
     /// the disk-speed comparator.
     #[test]
