@@ -66,27 +66,52 @@ fn iter_some_runs(values: &[Option<f64>]) -> Vec<std::ops::Range<usize>> {
     runs
 }
 
-/// Maps the i-th of `n` samples (index 0 = oldest) to a pixel x offset on the
-/// right-anchored rolling window of width `w`.
+/// Maps the i-th of `n` samples (index 0 = oldest) to a pixel x offset within
+/// a plot of width `w`.
 ///
-/// The latest sample (index `n - 1`) always lands on the right edge (`w`);
-/// older samples step left one slot each, where the slot width is chosen so
-/// that **however many samples are present they span the full width**. Slots
-/// are `w / (min(n, capacity) - 1)` — when `n < capacity` the newest sample
-/// reaches the left edge of the plot and the trace fills the pane (instead of
-/// living in a thin right-hand band while the app is warming up); once
-/// `n >= capacity` exactly `capacity` samples fit across the full width and
-/// the excess older samples clamp to the left edge (scroll). Indexes past
-/// `n - 1` clamp to the latest position; the width is clamped to 0 for any
-/// over-capacity overflow so nothing spills off the left side.
-pub fn sample_x(i: usize, n: usize, capacity: usize, w: f64) -> f64 {
+/// Two phases, continuous at the boundary so there is no visible snap:
+///
+/// * **Warm-up** (`n <= fill`): *left-anchored*. The oldest sample sits on the
+///   left edge and each newer sample steps one slot to the right, the newest
+///   still reaching the right edge only once `n` hits `fill`. At the default
+///   cadence this is the "fill the pane in ~10 s" phase: the trace clearly
+///   grows left→right across the first several samples instead of instantly
+///   stretching a few points across the full width.
+/// * **Settle + scroll** (`n > fill`): *right-anchored*. The newest sample is
+///   pinned to the right edge while the slot spacing **eases linearly** from
+///   the wide warm-up width `w / (fill - 1)` down to the steady width
+///   `w / (capacity - 1)`. As the window stretches from `fill` to `capacity`
+///   samples it therefore covers a growing span of history (the "slowly change
+///   the scale" phase); once `n` reaches `capacity` the spacing is fixed and
+///   the oldest samples slide off the left edge (scroll).
+///
+/// `fill` is the number of samples that span the full width at the end of the
+/// warm-up (≈ 10 s at the default 1.5 s refresh); `capacity` is the steady
+/// rolling-window width in samples (≈ 3 min at that cadence — the `MAX_HISTORY`
+/// cap the deque enforces). All output is clamped to `[0, w]` so an over-capacity
+/// history never spills past the left edge.
+pub fn sample_x(i: usize, n: usize, fill: usize, capacity: usize, w: f64) -> f64 {
     if n == 0 {
         return 0.0;
     }
-    let slots = n.min(capacity.max(2)).max(2);
-    let slot = w / (slots - 1) as f64;
-    let steps_back = (n - 1 - i.min(n - 1)) as f64;
-    (w - steps_back * slot).max(0.0)
+    let i = i.min(n - 1);
+    let fill = fill.max(2);
+    // The steady window is never narrower than the warm-up window.
+    let capacity = capacity.max(fill).max(2);
+    let warm_slot = w / (fill - 1) as f64;
+    let steady_slot = w / (capacity - 1) as f64;
+    if n <= fill {
+        // Warm-up: left-anchored; the newest sample lands on the right edge
+        // exactly when `fill` samples have arrived (the pane is "full").
+        return (i as f64 * warm_slot).clamp(0.0, w.max(0.0));
+    }
+    // Settle + scroll: right-anchored; the slot eases warm -> steady as the
+    // window stretches from `fill` to `capacity` samples, then holds steady.
+    let ramp = (capacity - fill).max(1);
+    let t = ((n - fill) as f64 / ramp as f64).clamp(0.0, 1.0);
+    let slot = warm_slot + t * (steady_slot - warm_slot);
+    let steps_back = (n - 1 - i) as f64;
+    (w - steps_back * slot).clamp(0.0, w.max(0.0))
 }
 
 /// Maps a value in `0..=domain_max` to a normalized y position (0..=1) where
@@ -208,6 +233,7 @@ fn draw_series(
     ctx: &Context,
     plot: &Plot,
     values: &[Option<f64>],
+    fill: usize,
     capacity: usize,
     domain_max: f64,
     rgb: (u8, u8, u8),
@@ -222,7 +248,7 @@ fn draw_series(
         rgb.1 as f64 / 255.0,
         rgb.2 as f64 / 255.0,
     );
-    let x_at = |i: usize| plot.ox + sample_x(i, n, capacity, plot.w);
+    let x_at = |i: usize| plot.ox + sample_x(i, n, fill, capacity, plot.w);
     let y_at = |i: usize| plot.oy + frac_of(values[i].unwrap_or(0.0), domain_max) * plot.h;
     let bottom = plot.oy + plot.h;
     for run in &runs {
@@ -288,15 +314,19 @@ pub enum ChartPane {
 /// Configuration the chart needs to lay out its series, decoupled from the
 /// GTK widgets that own the samples. `freq_max_mhz` is the top of the
 /// frequency axis (MHz), `mem_max_mb` the top of the memory axis (MB — the
-/// installed RAM, like `freq_max_mhz` is `scaling_max_freq`), and `capacity`
-/// is the rolling-window width in samples.
+/// installed RAM, like `freq_max_mhz` is `scaling_max_freq`), `fill` is the
+/// number of samples that span the full width once the warm-up finishes, and
+/// `capacity` is the steady rolling-window width in samples.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChartConfig {
     /// Top of the frequency-axis domain in MHz.
     pub freq_max_mhz: f64,
     /// Top of the memory-axis domain in MB (installed RAM).
     pub mem_max_mb: f64,
-    /// Number of samples a full rolling window holds.
+    /// Number of samples that fill the plot width at the end of the warm-up
+    /// (≈ 10 s at the default 1.5 s refresh).
+    pub fill: usize,
+    /// Number of samples a full steady rolling window holds.
     pub capacity: usize,
 }
 
@@ -306,6 +336,9 @@ impl Default for ChartConfig {
             freq_max_mhz: 4000.0,
             // A typical desktop; overridden by the live `MemTotal` at runtime.
             mem_max_mb: 16384.0,
+            // 7 samples ≈ 10 s at the default 1.5 s refresh — the time the
+            // trace takes to grow from the left edge to fill the pane width.
+            fill: 7,
             // Keep in sync with `SystemMetrics::MAX_HISTORY`.
             capacity: 120,
         }
@@ -527,8 +560,16 @@ pub fn paint_usage_chart(
             let plot = plot_rect(w, h, left_gutter, right_gutter);
             draw_gridlines(ctx, &plot);
             // Draw order: memory (bottom), cpu (top).
-            draw_series(ctx, &plot, &mem, cfg.capacity, cfg.mem_max_mb, MEM_RGB);
-            draw_series(ctx, &plot, &cpu, cfg.capacity, 100.0, CPU_RGB);
+            draw_series(
+                ctx,
+                &plot,
+                &mem,
+                cfg.fill,
+                cfg.capacity,
+                cfg.mem_max_mb,
+                MEM_RGB,
+            );
+            draw_series(ctx, &plot, &cpu, cfg.fill, cfg.capacity, 100.0, CPU_RGB);
             // CPU axis on the left (green, matching the CPU series), RAM axis
             // on the right (blue, matching the memory series).
             draw_axis_ticks(
@@ -566,8 +607,16 @@ pub fn paint_usage_chart(
             let plot = plot_rect(w, h, left_gutter, right_gutter);
             draw_gridlines(ctx, &plot);
             // Draw order: frequency, temperature (top).
-            draw_series(ctx, &plot, &freq, cfg.capacity, cfg.freq_max_mhz, FREQ_RGB);
-            draw_series(ctx, &plot, &temp, cfg.capacity, 100.0, TEMP_RGB);
+            draw_series(
+                ctx,
+                &plot,
+                &freq,
+                cfg.fill,
+                cfg.capacity,
+                cfg.freq_max_mhz,
+                FREQ_RGB,
+            );
+            draw_series(ctx, &plot, &temp, cfg.fill, cfg.capacity, 100.0, TEMP_RGB);
             // Frequency axis on the left, temperature axis on the right — a
             // conventional dual-axis layout where each non-percent series
             // reads its own colored tick column outside the plot.
@@ -754,97 +803,120 @@ mod tests {
 
     // ---- x/y mappings ---------------------------------------------------
 
-    #[test]
-    fn test_sample_x_latest_pins_to_right_edge() {
-        let w = 400.0;
-        assert_eq!(sample_x(4, 5, 120, w), w);
-        assert_eq!(
-            sample_x(0, 1, 120, w),
-            w,
-            "a lone sample sits on the right edge"
-        );
-        assert_eq!(
-            sample_x(9, 5, 120, w),
-            w,
-            "indexes past the end clamp to the latest position"
-        );
-    }
+    const FILL: usize = 10;
+    const CAP: usize = 120;
 
     #[test]
-    fn test_sample_x_steps_left_one_slot_older() {
-        // With `n < capacity` the slots scale so the newest sample reaches the
-        // left edge: slot = w / (n - 1). Three samples => slot = w/2, so the
-        // oldest is on the left edge and the middle sits exactly halfway.
-        let w = 480.0;
-        let cap = 10;
-        let slot = w / (3 - 1) as f64;
-        let n = 3;
+    fn test_sample_x_single_sample_sits_at_left_edge() {
+        // A lone sample is the first of the warm-up phase: it anchors the
+        // trace to the left edge (not the right), so the next samples visibly
+        // grow to the right.
         assert_eq!(
-            sample_x(n - 1, n, cap, w),
-            w,
-            "latest sits on the right edge"
-        );
-        assert_eq!(
-            sample_x(n - 2, n, cap, w),
-            w - slot,
-            "one older sits one slot to the left"
-        );
-        assert_eq!(
-            sample_x(n - 3, n, cap, w),
-            w - 2.0 * slot,
-            "two older sit two slots to the left (left edge)"
-        );
-    }
-
-    #[test]
-    fn test_sample_x_full_window_reaches_left_edge() {
-        let w = 400.0;
-        let cap = 120;
-        assert_eq!(
-            sample_x(0, cap, cap, w),
+            sample_x(0, 1, FILL, CAP, 400.0),
             0.0,
-            "a full history touches the left edge"
-        );
-        // Fill-the-pane: one sample short of a full window still spans the
-        // whole width, so the oldest sample is exactly on the left edge.
-        assert!(
-            (sample_x(0, cap - 1, cap, w) - 0.0).abs() < 1e-9,
-            "the oldest sample of a partial window sits on the left edge"
+            "a single sample anchors the left edge during warm-up"
         );
     }
 
     #[test]
-    fn test_sample_x_partial_history_fills_full_width() {
-        // The headline readability fix: however many samples are present
-        // (<capacity) they span the full plot width instead of cramping into
-        // a thin right-hand band.
-        let w = 400.0;
-        for n in 1..120 {
-            let x_oldest = sample_x(0, n, 120, w);
-            let x_newest = sample_x(n - 1, n, 120, w);
-            assert!((0.0..=w).contains(&x_oldest), "oldest of {n} in-bounds");
-            assert!(
-                x_oldest <= x_newest,
-                "oldest must not sit to the right of the newest"
-            );
-            if n >= 2 {
+    fn test_sample_x_warmup_left_anchored_evenly_spaced() {
+        // During the warm-up (n <= fill) the trace is left-anchored: the
+        // oldest pinned to the left edge and each sample one (wide) slot to
+        // the right, so the newest still short of the right edge.
+        let w = 1200.0;
+        let warm_slot = w / (FILL - 1) as f64; // 12 = 1200/99
+        for n in 1..=FILL {
+            for i in 0..n {
+                let expected = i as f64 * warm_slot;
                 assert!(
-                    (x_oldest - 0.0).abs() < 1e-9,
-                    "oldest of a {n}-sample partial window reaches the left edge"
+                    (sample_x(i, n, FILL, CAP, w) - expected).abs() < 1e-9,
+                    "n={n} i={i}: left-anchored, {i} slots from the left"
                 );
             }
-            assert!(
-                (x_newest - w).abs() < 1e-9,
-                "newest of a {n}-sample partial window reaches the right edge"
-            );
         }
+        // The newest is strictly below the right edge until the last warm-up
+        // sample — that is what makes the trace "fill" rather than snap.
+        assert!(
+            (sample_x(FILL - 2, FILL - 1, FILL, CAP, w) - w).abs() > 1e-9,
+            "one short of fill the newest has not yet reached the right edge"
+        );
     }
 
     #[test]
-    fn test_sample_x_clamps_at_left_edge() {
+    fn test_sample_x_fills_full_width_at_fill() {
+        // By the `fill`-th sample both edges are touched: oldest at the left,
+        // newest at the right — the pane is full (≈ 10 s at the default cadence).
         let w = 400.0;
-        let x = sample_x(0, 200, 5, w);
-        assert!((0.0..=w).contains(&x), "over-capacity histories clamp at 0");
+        assert_eq!(
+            sample_x(0, FILL, FILL, CAP, w),
+            0.0,
+            "oldest is on the left edge at fill"
+        );
+        assert_eq!(
+            sample_x(FILL - 1, FILL, FILL, CAP, w),
+            w,
+            "newest reaches the right edge exactly at fill"
+        );
+    }
+
+    #[test]
+    fn test_sample_x_settle_ramp_is_continuous_and_monotonic() {
+        // Past `fill` the newest stays pinned to the right edge while the slot
+        // spacing eases monotonically from the warm width down to the steady
+        // width. Continuity at the boundary: the warm and settle expressions
+        // agree at n = fill (both reach the left edge at i = 0).
+        let w = 400.0;
+        let warm_slot = w / (FILL - 1) as f64;
+        let steady_slot = w / (CAP - 1) as f64;
+        let ramp = (CAP - FILL) as f64;
+        let mut prev_slot = warm_slot;
+        for n in FILL + 1..=CAP {
+            let t = (n - FILL) as f64 / ramp;
+            let slot = warm_slot + t * (steady_slot - warm_slot);
+            assert!(
+                slot <= prev_slot + 1e-12,
+                "n={n}: slot must monotonically shrink while settling"
+            );
+            prev_slot = slot;
+            // Newest always pinned to the right edge once settled.
+            assert!(
+                (sample_x(n - 1, n, FILL, CAP, w) - w).abs() < 1e-9,
+                "newest of {n} settles to the right edge"
+            );
+            // The window spans a growing time span: the oldest visible sample
+            // walks leftward as the slot compresses.
+            let x_oldest = sample_x(0, n, FILL, CAP, w);
+            assert!(
+                (0.0..=w).contains(&x_oldest),
+                "n={n}: oldest stays in-bounds while the window stretches"
+            );
+        }
+        // At the steady window the full capacity of samples spans the width.
+        assert_eq!(
+            sample_x(0, CAP, FILL, CAP, w),
+            0.0,
+            "oldest of a full window sits on the left edge"
+        );
+        assert_eq!(
+            sample_x(CAP - 1, CAP, FILL, CAP, w),
+            w,
+            "newest of a full window sits on the right edge"
+        );
+    }
+
+    #[test]
+    fn test_sample_x_scroll_clamps_within_bounds() {
+        // Beyond capacity (a history over cap) must not spill past the left
+        // edge: the oldest visible samples clamp to 0 and the newest to w.
+        let w = 400.0;
+        for n in CAP..=CAP + 50 {
+            for i in 0..n {
+                let x = sample_x(i, n, FILL, CAP, w);
+                assert!((0.0..=w).contains(&x), "n={n} i={i}: in [0, {w}]");
+            }
+            assert!((sample_x(n - 1, n, FILL, CAP, w) - w).abs() < 1e-9);
+            assert!(sample_x(0, n, FILL, CAP, w) < 1e-9);
+        }
     }
 
     #[test]
@@ -921,7 +993,7 @@ mod tests {
         let plot = plot_rect(w, h, left, right);
         let n = s.len();
         for (i, smp) in s.iter().enumerate() {
-            let x = plot.ox + sample_x(i, n, 120, plot.w);
+            let x = plot.ox + sample_x(i, n, FILL, CAP, plot.w);
             let y = plot.oy + frac_of(smp.cpu, 100.0) * plot.h;
             assert!((0.0..=w).contains(&x), "x at sample {i} in [0, {w})");
             assert!((0.0..=h).contains(&y), "y at sample {i} in [0, {h})");
@@ -943,7 +1015,7 @@ mod tests {
         ];
         for (i, v) in vals.iter().enumerate() {
             let v = v.expect("present");
-            let x = plot.ox + sample_x(i, vals.len(), 120, plot.w);
+            let x = plot.ox + sample_x(i, vals.len(), FILL, CAP, plot.w);
             let y = plot.oy + frac_of(v, 4000.0) * plot.h;
             assert!((0.0..=w).contains(&x), "freq x in [0, {w})");
             assert!((0.0..=h).contains(&y), "freq y in [0, {h})");
@@ -957,18 +1029,16 @@ mod tests {
     }
 
     #[test]
-    fn test_single_sample_is_right_anchored_in_bounds() {
+    fn test_single_sample_is_left_anchored_in_bounds() {
         let w = 300.0;
         let h = 80.0;
         let plot = plot_rect(w, h, 25.0, 0.0);
-        // With a left gutter, the rightmost plot edge is w - right_gutter,
-        // so the latest sample sits on that edge (not the widget edge).
-        let x = plot.ox + sample_x(0, 1, 120, plot.w);
+        // A lone sample anchors the left edge of the plot (just inside the
+        // left gutter), so the trace grows to the right from there.
+        let x = plot.ox + sample_x(0, 1, FILL, CAP, plot.w);
         let y = plot.oy + frac_of(55.0, 100.0) * plot.h;
-        assert_eq!(
-            x, w,
-            "lone 'now' sample sits on the rightmost plot edge when right_gutter is 0"
-        );
+        assert_eq!(x, plot.ox, "a lone 'now' sample sits on the left plot edge");
+        assert!((0.0..=w).contains(&x), "x in [0, {w}]");
         assert!((0.0..=h).contains(&y));
     }
 
@@ -977,7 +1047,10 @@ mod tests {
         let cfg = ChartConfig::default();
         assert!(cfg.freq_max_mhz > 0.0);
         assert!(cfg.mem_max_mb > 0.0);
+        assert!(cfg.fill >= 2);
         assert!(cfg.capacity >= 2);
+        // The warm-up window must not exceed the steady window.
+        assert!(cfg.fill <= cfg.capacity);
     }
 
     #[test]

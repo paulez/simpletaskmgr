@@ -248,6 +248,9 @@ fn build_graph_pane(
         let cfg = ChartConfig {
             freq_max_mhz: st.borrow().freq_max_mhz,
             mem_max_mb: st.borrow().mem_max_mb,
+            // ~10 s to fill at the default 1.5 s refresh (7 samples), matching
+            // `ChartConfig::default().fill`.
+            fill: 7,
             capacity: SystemMetrics::MAX_HISTORY,
         };
         // Keep the pane header in sync with the newest sample so the current
