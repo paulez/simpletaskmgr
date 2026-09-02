@@ -105,7 +105,7 @@ impl ProcessList {
         debug!("Retrieved {} processes from /proc", all_processes.len());
 
         let mut io_failed = 0u32;
-        let mut io_last_err: Option<procfs::ProcError> = None;
+        let mut io_last_err: Option<std::io::Error> = None;
 
         // Per-row order matters: the cheap `fstat`-based `uid()` runs first
         // and gates the expensive `/proc/[pid]/{stat,status,io}` reads. When
@@ -159,14 +159,17 @@ impl ProcessList {
                 // /proc/[pid]/io is only readable for self-owned processes
                 // (EACCES otherwise), so skip the read entirely for other
                 // users' processes — the rate column stays blank. As root
-                // (uid 0) the file is readable for every pid.
+                // (uid 0) the file is readable for every pid. We read only the
+                // two counters we use (`read_bytes`, `write_bytes`) instead of
+                // `proc.io()`, which parses all seven into a `HashMap<String, _>`
+                // and allocates a key `String` per field.
                 if should_read_io(current_uid, ruid) {
-                    match proc.io() {
-                        Ok(io) => {
+                    match read_io_bytes(proc.pid()) {
+                        Ok((read_bytes, write_bytes)) => {
                             self.io_tracker.update_process_io(
                                 &mut task_mgr_process,
-                                io.read_bytes,
-                                io.write_bytes,
+                                read_bytes,
+                                write_bytes,
                             );
                         }
                         Err(e) => {
@@ -287,6 +290,36 @@ fn read_mem_total_kb() -> Option<u64> {
 fn mem_percent_of(rss_kb: u64, total_kb: u64) -> f64 {
     debug_assert!(total_kb > 0, "mem_percent_of called with zero MemTotal");
     rss_kb as f64 / total_kb as f64 * 100.0
+}
+
+/// Reads only `read_bytes` and `write_bytes` from `/proc/[pid]/io`.
+///
+/// `procfs::Process::io()` parses all seven counters into a
+/// `HashMap<String, u64>` and allocates a `String` key per field; we only ever
+/// need the two *real-bytes* counters for the disk r/w rate, so parse just
+/// those. Fields are `name: value` lines; this stops at the two it finds.
+fn read_io_bytes(pid: i32) -> std::io::Result<(u64, u64)> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/io"))?;
+    let mut read_bytes: Option<u64> = None;
+    let mut write_bytes: Option<u64> = None;
+    for line in text.lines() {
+        // Each line is `field: value`; find the two we use and stop early.
+        if let Some(value) = line.strip_prefix("read_bytes:") {
+            read_bytes = value.trim().parse().ok();
+        } else if let Some(value) = line.strip_prefix("write_bytes:") {
+            write_bytes = value.trim().parse().ok();
+        }
+        if read_bytes.is_some() && write_bytes.is_some() {
+            break;
+        }
+    }
+    match (read_bytes, write_bytes) {
+        (Some(r), Some(w)) => Ok((r, w)),
+        (other, _) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("read_bytes/write_bytes missing from /proc/{pid}/io: {other:?}"),
+        )),
+    }
 }
 
 /// Whether `/proc/[pid]/io` should be read for a process with owner `ruid`
@@ -563,6 +596,19 @@ mod tests {
              expected within 0.5..2.0 (a wrong page/KiB unit is 4x or 0.25x)"
         );
     }
+    /// The targeted `read_io_bytes` reader must report the same `read_bytes`
+    /// and `write_bytes` as `procfs`'s full `io()` parse for the same PID.
+    #[test]
+    fn test_read_io_bytes_matches_procfs_io() {
+        use procfs::process::Process;
+        let me = std::process::id() as i32;
+        let mine = read_io_bytes(me).expect("own /proc/self/io must be readable");
+        let proc = Process::new(me).expect("own process must be readable");
+        let ref_io = proc.io().expect("procfs io() for own process");
+        assert_eq!(mine.0, ref_io.read_bytes, "read_bytes mismatch");
+        assert_eq!(mine.1, ref_io.write_bytes, "write_bytes mismatch");
+    }
+
     /// Comparing two rows by MEM% is NaN-safe and `None`-tolerant, mirroring
     /// the disk-speed comparator.
     #[test]
