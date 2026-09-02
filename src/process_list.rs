@@ -107,21 +107,31 @@ impl ProcessList {
         let mut io_failed = 0u32;
         let mut io_last_err: Option<procfs::ProcError> = None;
 
-        // Each /proc file is read once per process per refresh.
+        // Per-row order matters: the cheap `fstat`-based `uid()` runs first
+        // and gates the expensive `/proc/[pid]/{stat,status,io}` reads. When
+        // we're not showing every process (`show_all == false`), a
+        // non-current-user row is thrown out by the end `filter_by_user`
+        // anyway, so we skip `stat`, `status`, and `io` entirely for it —
+        // the same trick `top` uses (`library/readproc.c:1249-1250` bails
+        // before `stat2proc` on `!XinLN(sb.st_uid, uids, nuid)`).
+        let want_all = self.show_all;
         let task_mgr_process_list: Vec<TaskMgrProcess> = all_processes
             .iter()
             .filter_map(|proc| {
-                let stat = match proc.stat() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        warn!("Can't read stat for pid {}: {e:?}", proc.pid());
-                        return None;
-                    }
-                };
                 let ruid = match proc.uid() {
                     Ok(u) => u,
                     Err(e) => {
                         warn!("Can't read UID for pid {}: {e:?}", proc.pid());
+                        return None;
+                    }
+                };
+                if !want_all && ruid != current_uid {
+                    return None;
+                }
+                let stat = match proc.stat() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!("Can't read stat for pid {}: {e:?}", proc.pid());
                         return None;
                     }
                 };
