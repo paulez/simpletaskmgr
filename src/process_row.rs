@@ -152,37 +152,60 @@ impl ProcessRow {
         if *imp.data.borrow() == *item {
             return;
         }
-        let old = imp.data.borrow().clone();
-        *imp.data.borrow_mut() = item.clone();
-        let o = &old.value;
+        // Compute the per-field `changed` flags *under an immutable borrow*,
+        // so the diff never clones the old `ProcessItem` (two `String`
+        // copies). The flags are `Bool` (`Copy`), so they outlive the borrow
+        // safely; only after the borrow is dropped do we overwrite the cell.
+        let o = imp.data.borrow();
         let p = &item.value;
-        if o.pid != p.pid {
+        let (
+            pid_changed,
+            username_changed,
+            name_changed,
+            cpu_changed,
+            mem_changed,
+            read_changed,
+            write_changed,
+        ) = {
+            let ov = &o.value;
+            (
+                ov.pid != p.pid,
+                ov.username != p.username,
+                ov.name != p.name,
+                ov.cpu_percent.total_cmp(&p.cpu_percent) != std::cmp::Ordering::Equal,
+                // `Option<f64>` needs an explicit `None` arm — two `None`s
+                // must not fire a notify — and `total_cmp` keeps the `Some`
+                // comparison NaN-safe like cpu.
+                match (ov.mem_percent, p.mem_percent) {
+                    (None, None) => false,
+                    (Some(a), Some(b)) => a.total_cmp(&b) != std::cmp::Ordering::Equal,
+                    (Some(_), None) | (None, Some(_)) => true,
+                },
+                ov.disk_read_speed != p.disk_read_speed,
+                ov.disk_write_speed != p.disk_write_speed,
+            )
+        };
+        drop(o);
+        *imp.data.borrow_mut() = item.clone();
+        if pid_changed {
             self.notify("pid");
         }
-        if o.username != p.username {
+        if username_changed {
             self.notify("username");
         }
-        if o.name != p.name {
+        if name_changed {
             self.notify("name");
         }
-        if o.cpu_percent.total_cmp(&p.cpu_percent) != std::cmp::Ordering::Equal {
+        if cpu_changed {
             self.notify("cpu");
         }
-        // `Option<f64>` needs an explicit `None` arm — two `None`s must not
-        // fire a notify — and `total_cmp` keeps the `Some` comparison
-        // NaN-safe like `cpu`.
-        let mem_changed = match (o.mem_percent, p.mem_percent) {
-            (None, None) => false,
-            (Some(a), Some(b)) => a.total_cmp(&b) != std::cmp::Ordering::Equal,
-            (Some(_), None) | (None, Some(_)) => true,
-        };
         if mem_changed {
             self.notify("mem");
         }
-        if o.disk_read_speed != p.disk_read_speed {
+        if read_changed {
             self.notify("disk-read");
         }
-        if o.disk_write_speed != p.disk_write_speed {
+        if write_changed {
             self.notify("disk-write");
         }
     }
