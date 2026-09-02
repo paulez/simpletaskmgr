@@ -118,6 +118,41 @@ fn read_meminfo_percent() -> Option<f64> {
     }
 }
 
+/// Parses `/proc/meminfo` and returns the total physical memory in **MB**
+/// (`MemTotal kB / 1024`). Used as the top of the memory-axis domain,
+/// mirroring the role `read_max_freq_mhz` plays for the frequency axis.
+/// Returns `None` when the field is missing or `MemTotal` is zero.
+pub fn meminfo_total_mb(meminfo: &str) -> Option<f64> {
+    fn field_kb(meminfo: &str, key: &str) -> Option<u64> {
+        for line in meminfo.lines() {
+            let label = format!("{key}:");
+            let mut parts = line.split_whitespace();
+            if parts.next() != Some(label.as_str()) {
+                continue;
+            }
+            return parts.next()?.parse::<u64>().ok();
+        }
+        None
+    }
+    let kb = field_kb(meminfo, "MemTotal")?;
+    if kb == 0 {
+        return None;
+    }
+    Some(kb as f64 / 1024.0)
+}
+
+/// Reads the live `/proc/meminfo` and returns total memory in **MB**, or
+/// `None` (with a warning) if the file is unreadable or lacks `MemTotal`.
+pub fn read_mem_total_mb() -> Option<f64> {
+    match std::fs::read_to_string("/proc/meminfo") {
+        Ok(text) => meminfo_total_mb(&text),
+        Err(e) => {
+            warn!("Can't read /proc/meminfo: {e:?}");
+            None
+        }
+    }
+}
+
 /// Holds a rolling history of system-wide CPU/memory samples so the UI can
 /// plot them over time.
 ///
@@ -312,6 +347,27 @@ mod tests {
     fn test_meminfo_zero_total() {
         let m = "MemTotal: 0 kB\nMemAvailable: 0 kB\n";
         assert!(meminfo_used_percent(m).is_none());
+    }
+
+    #[test]
+    fn test_meminfo_total_mb_happy() {
+        // 16 GiB host: MemTotal = 16384 * 1024 kB.
+        let m = "MemTotal:       16777216 kB\nMemFree:         1000000 kB\n";
+        assert_eq!(meminfo_total_mb(m), Some(16384.0));
+    }
+
+    #[test]
+    fn test_meminfo_total_mb_exact_value() {
+        // A value that doesn't divide evenly into a whole GB; we report exact MB.
+        let m = "MemTotal:       16000000 kB\nMemFree:         1000000 kB\n";
+        assert_eq!(meminfo_total_mb(m), Some(16000000.0 / 1024.0));
+    }
+
+    #[test]
+    fn test_meminfo_total_mb_missing_or_zero() {
+        assert!(meminfo_total_mb("MemFree: 100 kB\n").is_none());
+        assert!(meminfo_total_mb("").is_none());
+        assert!(meminfo_total_mb("MemTotal: 0 kB\n").is_none());
     }
 
     #[test]

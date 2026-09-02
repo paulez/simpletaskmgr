@@ -27,17 +27,22 @@
 
      5. **CPU Status**
      - The usage graph is split into two side-by-side panes: the left pane
-       ("CPU & Memory") plots CPU + memory usage, the right pane
-       ("CPU Freq & Temp") plots CPU frequency + temperature
-     - Frequency and temperature each draw on their own dedicated axis
-       (frequency top-anchored at `scaling_max_freq`, temperature 0-100 °C);
-       CPU + memory read a 0-100% axis
+       ("CPU & Memory") plots CPU% (green, on the left 0-100% axis) + RAM in
+       MB (blue, on the right axis, top read from `/proc/meminfo` `MemTotal`,
+       e.g. "16 GB"); the right pane ("CPU Freq & Temp") plots frequency
+       (purple, on the left MHz axis, top read from `scaling_max_freq`) +
+       temperature (red, on the right 0-100 °C axis)
+     - Each series has its own dedicated axis: CPU + RAM on the left pane,
+       Freq + Temp on the right pane; every axis is colored to match its
+       series for quick reading
      - Each pane is wrapped in a vertical box with a short centered GTK
        label on top (theme color, standard font, readable in both light and
        dark themes) and the cairo `DrawingArea` below
      - A top padding band (TOP_PAD) is reserved inside the drawing area so
        the topmost tick label is never clipped; tick labels live in gutters
        outside the plot so the colored series never overlap them
+     - The drawing area has a fixed natural height (`content_height(80)`) so
+       the graph row doesn't stretch to fill the window
      - Sources: `cpufreq/scaling_cur_freq` for frequency; CPU `hwmon` sensor's
        hottest `tempN_input` for temperature; both blank when unavailable
      - Read failures carry the previous value forward so the series doesn't dip

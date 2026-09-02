@@ -81,6 +81,10 @@ struct State {
     /// `cpufreq` interface (e.g. VMs); in that case the series is absent
     /// anyway and the domain is unused.
     freq_max_mhz: f64,
+    /// Top of the memory-axis domain in MB — the installed RAM, read once at
+    /// launch from `/proc/meminfo` `MemTotal`. The fallback (16 GB) covers
+    /// hosts where `/proc/meminfo` is unavailable.
+    mem_max_mb: f64,
 }
 
 #[derive(Debug)]
@@ -113,6 +117,7 @@ impl State {
             save_path: path,
             timer_id: Cell::new(None),
             freq_max_mhz: crate::cpu_status::read_max_freq_mhz().unwrap_or(4000.0),
+            mem_max_mb: crate::metrics::read_mem_total_mb().unwrap_or(16.0 * 1024.0),
         }
     }
 
@@ -233,15 +238,15 @@ fn build_graph_pane(
     box_v.append(&label);
 
     let drawing = gtk4::DrawingArea::new();
-    drawing.set_content_height(110);
+    drawing.set_content_height(80);
     drawing.set_hexpand(true);
-    drawing.set_vexpand(true);
     drawing.add_css_class("graph-area");
     let st = state.clone();
     drawing.set_draw_func(move |_da, cr: &gtk4::cairo::Context, w: i32, h: i32| {
         let samples = st.borrow().metrics.history();
         let cfg = ChartConfig {
             freq_max_mhz: st.borrow().freq_max_mhz,
+            mem_max_mb: st.borrow().mem_max_mb,
             capacity: SystemMetrics::MAX_HISTORY,
         };
         paint_usage_chart(cr, w as f64, h as f64, &samples, &cfg, pane);

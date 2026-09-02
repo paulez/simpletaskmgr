@@ -59,9 +59,45 @@ Work in small, focused changes. Follow this gate before committing:
 - Read GTK4 documentation when adding UI components (see https://gtk-rs.org/docs-rs/latest/ or gtk-rs source for patterns)
 - Keep UI code reactive: bind data to signal handlers, update UI when state changes
 
+## Graphical Verification (screenshots)
+
+Logic is verified with tests (never by running the app). But **UI/layout**
+changes — graph sizing, axis placement, label legibility, spacing — can only
+be confirmed by rendering. Do this with a headless display + a screenshot, and
+capture a **before** and **after** so the change is visible:
+
+```bash
+# 1. Start a fixed-display virtual X server with access control off.
+#    A fixed display (e.g. :96) is required — xvfb-run -a's auto-assigned
+#    display + `import` fails with "Authorization required".
+Xvfb :96 -ac -screen 0 1024x768x24 >/tmp/opencode/xvfb.log 2>&1 &
+
+# 2. Launch the app against that display.
+DISPLAY=:96 GDK_BACKEND=x11 target/debug/simpletaskmgr >/tmp/opencode/app.log 2>&1 &
+APP_PID=$!
+
+# 3. Wait a few refresh cycles so the rolling graph has data, then screenshot
+#    the whole root window (ImageMagick `import`).
+sleep 8
+DISPLAY=:96 import -window root /tmp/opencode/AFTER_graph.png
+
+# 4. Tear down.
+kill "$APP_PID" 2>/dev/null
+kill %1 2>/dev/null
+```
+
+- Open the PNG to confirm the change (height, axis side/units, label
+  legibility) instead of guessing.
+- `import -window root` captures the full screen; the app window is in the
+  top-left, which is where the graph row lives.
+- The binary must be built first (`cargo build`); use the debug build.
+- This is a **manual eyeball check** complementing the gate — it does not
+  replace `cargo test` / clippy / fmt, and it is not part of the commit gate.
+
 ## Important Notes
 
 - Read Rust crate docs in `generated_docs/<crate>` (refresh with `cargo docs-md docs`)
 - Read GTK4 examples and docs before writing UI code
-- Validate changes with tests, do not run the app
+- Validate logic with tests (do not run the app to confirm behavior); use the
+  **Graphical Verification** section only to eyeball layout/UI changes
 - Always update README.md when adding/modifying features

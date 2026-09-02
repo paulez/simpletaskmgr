@@ -15,7 +15,7 @@ A lightweight, interactive system process manager built with Rust that displays 
 - **Clean Start**: On launch no process is selected, so the list takes the full width and the detail pane is hidden until you pick one
 - **Highest CPU First**: On launch the list is sorted by CPU% (highest first) and scrolled to the top, so the most active processes are visible immediately
 - **Signal Management**: Send SIGHUP or SIGKILL to a selected process from its detail view, with success/failure feedback
-- **Resource Usage Graph**: An always-on chart above the process list shows system-wide CPU and memory usage (left pane, labeled "CPU & Memory") and CPU frequency and temperature (right pane, labeled "CPU Freq & Temp") over time, updating with each refresh. The two panes share one rolling history (~120 samples at the default 1.5s refresh, ~3 minutes), each right-anchored with a fixed time slot per sample: the trace grows from right to left until the history is full, then scrolls left. Each pane has a short centered title above the plot (standard theme-colored GTK label, readable in light and dark themes) and a tick-labeled axis — the left pane reads a 0-100% scale, the right pane reads frequency (MHz, top read from `scaling_max_freq`, e.g. `4 GHz`) on the left and temperature (°C, 0-100) on the right — so a trace at 3.4 GHz on a 4 GHz ceiling reads as 85% of the pane height, not 0.85. Tick labels live in gutters outside the plot so the colored series never overlap them and the top label is never clipped by the pane edge
+- **Resource Usage Graph**: An always-on chart above the process list shows system-wide CPU and memory usage (left pane, labeled "CPU & Memory") and CPU frequency and temperature (right pane, labeled "CPU Freq & Temp") over time, updating with each refresh. The two panes share one rolling history (~120 samples at the default 1.5s refresh, ~3 minutes), each right-anchored with a fixed time slot per sample: the trace grows from right to left until the history is full, then scrolls left. Each pane has a short centered title above the plot (standard theme-colored GTK label, readable in light and dark themes) and a tick-labeled axis — the left pane reads CPU (0-100%, left axis) and RAM (MB, right axis, top read from `/proc/meminfo` `MemTotal`, e.g. `16 GB`); the right pane reads frequency (MHz, top read from `scaling_max_freq`, e.g. `4 GHz`) on the left and temperature (°C, 0-100) on the right — so a CPU trace at 60% on a 100% scale and a RAM trace at 10 GB on a 16 GB ceiling each read as 60% and 63% of the pane height. Tick labels live in gutters outside the plot so the colored series never overlap them and the top label is never clipped by the pane edge
 - **Persistent Settings**: Your choices (show-all filter, refresh interval) survive restarts. Open the **Settings** popover in the toolbar to change them.
 
 ## Requirements
@@ -93,8 +93,10 @@ blank disk columns — this is a Linux restriction, not an error.
 
 System-wide CPU and memory usage are sampled once per refresh and kept in a
 rolling history (the last ~120 samples). CPU% is computed from the delta in the
-aggregate `/proc/stat` `cpu` line; memory% is `(MemTotal − MemAvailable) /
-MemTotal` from `/proc/meminfo`.
+aggregate `/proc/stat` `cpu` line; memory is `(MemTotal − MemAvailable) /
+MemTotal` from `/proc/meminfo`, and `MemTotal` is also read up front as the
+top of the RAM axis (in MB) so the RAM trace reads as full-height against the
+installed memory rather than as a share of a fixed 100%.
 
 CPU frequency and temperature are sampled on the same schedule and added to
 each sample. Frequency is read from

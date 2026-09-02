@@ -252,11 +252,15 @@ pub enum ChartPane {
 
 /// Configuration the chart needs to lay out its series, decoupled from the
 /// GTK widgets that own the samples. `freq_max_mhz` is the top of the
-/// frequency axis (MHz); `capacity` is the rolling-window width in samples.
+/// frequency axis (MHz), `mem_max_mb` the top of the memory axis (MB — the
+/// installed RAM, like `freq_max_mhz` is `scaling_max_freq`), and `capacity`
+/// is the rolling-window width in samples.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChartConfig {
     /// Top of the frequency-axis domain in MHz.
     pub freq_max_mhz: f64,
+    /// Top of the memory-axis domain in MB (installed RAM).
+    pub mem_max_mb: f64,
     /// Number of samples a full rolling window holds.
     pub capacity: usize,
 }
@@ -265,6 +269,8 @@ impl Default for ChartConfig {
     fn default() -> Self {
         Self {
             freq_max_mhz: 4000.0,
+            // A typical desktop; overridden by the live `MemTotal` at runtime.
+            mem_max_mb: 16384.0,
             // Keep in sync with `SystemMetrics::MAX_HISTORY`.
             capacity: 120,
         }
@@ -294,6 +300,19 @@ pub fn axis_tick_celsius(celsius: f64) -> String {
 /// Formats a percent-axis tick as a compact label: `"100%"`, `"25%"`.
 pub fn axis_tick_percent(p: f64) -> String {
     format!("{:.0}%", p)
+}
+
+/// Formats a memory-axis tick (in MB) as a compact, human label: a clean
+/// whole GiB multiple reads as GB (`"16 GB"`, `"2 GB"`), anything else stays
+/// in MB (`"1536 MB"`, `"0 MB"`). This keeps the top tick of a 16 GB host
+/// readable as `16 GB` while odd quarter-ticks still read as MB values
+/// rather than awkward `0.2 GC`.
+pub fn axis_tick_mb(mb: f64) -> String {
+    if mb >= 1024.0 && (mb / 1024.0).fract() == 0.0 {
+        format!("{:.0} GB", mb / 1024.0)
+    } else {
+        format!("{:.0} MB", mb)
+    }
 }
 
 /// The three tick rows for a chart of a given domain — the domain top, a
@@ -381,8 +400,11 @@ fn draw_axis_ticks(
 /// standard centered `Label` *above* this widget, using the theme's font and
 /// color — cairo does not paint it here.
 ///
-/// * [`ChartPane::CpuMem`] — a left % axis (green-tinted) and memory (blue,
-///   0–100%) + CPU (green, 0–100%) series.
+/// * [`ChartPane::CpuMem`] — a left % axis (green-tinted) for CPU + a right
+///   MB axis (blue-tinted) for RAM. CPU is drawn 0–100%; RAM is scaled to the
+///   installed RAM (`cfg.mem_max_mb`, like `freq_max_mhz` for the Freq/Temp
+///   pane) so a 10 GB / 16 GB trace reads near the top rather than 63% of the
+///   way down.
 /// * [`ChartPane::FreqTemp`] — a left MHz axis (purple-tinted) + a right °C
 ///   axis (red-tinted), and frequency (purple, domain `cfg.freq_max_mhz`) +
 ///   temperature (red, 0–100 °C) series.
@@ -408,10 +430,14 @@ pub fn paint_usage_chart(
     ctx.set_font_size(9.0);
     match pane {
         ChartPane::CpuMem => {
-            let mem: Vec<Option<f64>> = samples.iter().map(|s| Some(s.mem)).collect();
+            // Each series has its own axis: CPU on the left in % (0–100), and
+            // RAM on the right in MB scaled to the installed RAM, so both read
+            // as full-height curves rather than sharing one % scale.
             let cpu: Vec<Option<f64>> = samples.iter().map(|s| Some(s.cpu)).collect();
-            // %-axis on the left: three ticks measured with the current font
-            // so the gutter is wide enough to hold "100%".
+            let mem: Vec<Option<f64>> = samples
+                .iter()
+                .map(|s| Some(s.mem / 100.0 * cfg.mem_max_mb))
+                .collect();
             let left_gutter = measure_gutter(
                 ctx,
                 &[
@@ -420,10 +446,20 @@ pub fn paint_usage_chart(
                     axis_tick_percent(0.0),
                 ],
             );
-            let plot = plot_rect(w, h, left_gutter, 0.0);
+            let right_gutter = measure_gutter(
+                ctx,
+                &[
+                    axis_tick_mb(cfg.mem_max_mb),
+                    axis_tick_mb(cfg.mem_max_mb / 4.0),
+                    axis_tick_mb(0.0),
+                ],
+            );
+            let plot = plot_rect(w, h, left_gutter, right_gutter);
             // Draw order: memory (bottom), cpu (top).
-            draw_series(ctx, &plot, &mem, cfg.capacity, 100.0, MEM_RGB);
+            draw_series(ctx, &plot, &mem, cfg.capacity, cfg.mem_max_mb, MEM_RGB);
             draw_series(ctx, &plot, &cpu, cfg.capacity, 100.0, CPU_RGB);
+            // CPU axis on the left (green, matching the CPU series), RAM axis
+            // on the right (blue, matching the memory series).
             draw_axis_ticks(
                 ctx,
                 &plot,
@@ -431,6 +467,14 @@ pub fn paint_usage_chart(
                 CPU_RGB,
                 axis_tick_percent,
                 AxisSide::Left,
+            );
+            draw_axis_ticks(
+                ctx,
+                &plot,
+                cfg.mem_max_mb,
+                MEM_RGB,
+                axis_tick_mb,
+                AxisSide::Right,
             );
         }
         ChartPane::FreqTemp => {
@@ -556,6 +600,18 @@ mod tests {
         assert_eq!(axis_tick_percent(25.0), "25%");
         assert_eq!(axis_tick_percent(0.0), "0%");
         assert_eq!(axis_tick_percent(50.0), "50%");
+    }
+
+    #[test]
+    fn test_axis_tick_mb_format() {
+        // A clean GiB multiple switches to GB.
+        assert_eq!(axis_tick_mb(16384.0), "16 GB");
+        assert_eq!(axis_tick_mb(2048.0), "2 GB");
+        // An odd MB value stays in MB (not a fractional GB).
+        assert_eq!(axis_tick_mb(4096.0), "4 GB");
+        assert_eq!(axis_tick_mb(1536.0), "1536 MB");
+        assert_eq!(axis_tick_mb(512.0), "512 MB");
+        assert_eq!(axis_tick_mb(0.0), "0 MB");
     }
 
     #[test]
@@ -783,6 +839,7 @@ mod tests {
     fn test_chart_config_defaults() {
         let cfg = ChartConfig::default();
         assert!(cfg.freq_max_mhz > 0.0);
+        assert!(cfg.mem_max_mb > 0.0);
         assert!(cfg.capacity >= 2);
     }
 
