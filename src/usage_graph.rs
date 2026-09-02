@@ -349,23 +349,25 @@ fn gig_label(mb: f64) -> String {
     }
 }
 
-/// The live readout for the CPU & Memory pane header: `CPU 4.5% · MEM 14.2 GB`.
+/// The live readout for the CPU & Memory pane header: `Cpu 4.5% · Mem 14.2 GB`.
 /// `cpu`/`mem` are percents (0–100) as stored in [`Sample`]; `mem_max_mb`
 /// scales the percent into an absolute amount matching the pane's right axis.
+/// The `Cpu`/`Mem` labels make a bare value unambiguous (it never reads as a
+/// stray `100` or `8`), mirroring the `Freq`/`Temp` labels on the other pane.
 pub fn cpu_mem_readout(cpu: f64, mem: f64, mem_max_mb: f64) -> String {
     format!(
-        "CPU {cpu:.1}% \u{b7} MEM {}",
+        "Cpu {cpu:.1}% \u{b7} Mem {}",
         gig_label(mem / 100.0 * mem_max_mb)
     )
 }
 
 /// The live readout for the CPU Freq & Temp pane header:
-/// `3.7 GHz · 56 °C`. A `None` sensor (no frequency or temperature source)
-/// reads as `"-"` so a missing reading never reads as `0`.
+/// `Freq 3.7 GHz · Temp 56 °C`. A `None` sensor (no frequency or temperature
+/// source) reads as `"-"` so a missing reading never reads as `0`.
 pub fn freq_temp_readout(freq_mhz: Option<f64>, temp_c: Option<f64>) -> String {
     let freq = freq_mhz.map(axis_tick_mhz).unwrap_or_else(|| "-".into());
     let temp = temp_c.map(axis_tick_celsius).unwrap_or_else(|| "-".into());
-    format!("{freq} \u{b7} {temp}")
+    format!("Freq {freq} \u{b7} Temp {temp}")
 }
 
 /// Formats a memory-axis tick (in MB) as a compact, human label: a clean
@@ -720,21 +722,27 @@ mod tests {
         // 24% of 64 GB = 15.36 GB, shown to one decimal.
         assert_eq!(
             cpu_mem_readout(4.5, 24.0, 65536.0),
-            "CPU 4.5% \u{b7} MEM 15.4 GB"
+            "Cpu 4.5% \u{b7} Mem 15.4 GB"
         );
         // Sub-gigabyte memory amounts fall back to megabytes.
-        assert_eq!(cpu_mem_readout(0.0, 5.0, 100.0), "CPU 0.0% \u{b7} MEM 5 MB");
+        assert_eq!(cpu_mem_readout(0.0, 5.0, 100.0), "Cpu 0.0% \u{b7} Mem 5 MB");
     }
 
     #[test]
     fn test_freq_temp_readout_present_and_absent() {
         assert_eq!(
             freq_temp_readout(Some(3700.0), Some(56.0)),
-            "3.7 GHz \u{b7} 56 \u{b0}C"
+            "Freq 3.7 GHz \u{b7} Temp 56 \u{b0}C"
         );
         // A missing sensor reads as "-" instead of "0".
-        assert_eq!(freq_temp_readout(None, Some(56.0)), "- \u{b7} 56 \u{b0}C");
-        assert_eq!(freq_temp_readout(Some(550.0), None), "550 MHz \u{b7} -");
+        assert_eq!(
+            freq_temp_readout(None, Some(56.0)),
+            "Freq - \u{b7} Temp 56 \u{b0}C"
+        );
+        assert_eq!(
+            freq_temp_readout(Some(550.0), None),
+            "Freq 550 MHz \u{b7} Temp -"
+        );
     }
 
     #[test]
