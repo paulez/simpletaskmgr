@@ -154,11 +154,15 @@ fn pick_cpu_hwmon(base: &Path) -> Option<PathBuf> {
         if !ft.is_dir() {
             continue;
         }
-        let name = std::fs::read_to_string(dir.join("name"))
-            .ok()?
-            .trim()
-            .to_owned();
-        if is_cpu_sensor(&name) {
+        // A sensor whose `name` can't be read is skipped, not fatal: one
+        // unreadable sensor must not abort the scan and hide a CPU sensor
+        // that comes later (the old `.ok()?` bailed on the first error and
+        // discarded the real `k10temp`/`coretemp` sensor behind it, so CPU
+        // temperature silently read as `None`).
+        let Ok(name) = std::fs::read_to_string(dir.join("name")) else {
+            continue;
+        };
+        if is_cpu_sensor(name.trim()) {
             return Some(dir);
         }
     }
@@ -361,6 +365,25 @@ mod tests {
         let base = hwmon_base("none");
         mk_sensor(&base, 0, "nvme", &[]);
         assert_eq!(pick_cpu_hwmon(&base), None, "no CPU sensor found");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_pick_cpu_hwmon_skips_sensor_with_missing_name() {
+        let base = hwmon_base("skipmissingname");
+        // A sensor whose `name` file is missing (read error) sits *before* the
+        // CPU sensor. The scan must skip it and still find the k10temp sensor
+        // that follows — the old `.ok()?` aborted the whole scan here.
+        let broken = base.join("hwmon0");
+        std::fs::create_dir_all(&broken).expect("create broken sensor dir");
+        // Note: no `name` file written.
+        mk_sensor(&base, 1, "k10temp", &[("1", "60000")]);
+
+        assert_eq!(
+            pick_cpu_hwmon(&base),
+            Some(base.join("hwmon1")),
+            "a sensor with an unreadable name must not hide a later CPU sensor"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

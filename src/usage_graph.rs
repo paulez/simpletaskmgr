@@ -15,10 +15,17 @@ pub const FREQ_RGB: (u8, u8, u8) = (171, 71, 189);
 pub const TEMP_RGB: (u8, u8, u8) = (229, 57, 53);
 /// Translucent fill alpha so overlapping series areas read as distinct bands.
 pub const FILL_ALPHA: f64 = 0.22;
-/// Line width of each series (in pixels at the draw-time scale).
-pub const LINE_WIDTH: f64 = 1.5;
+/// Line width of each series (in pixels at the draw-time scale). Thicker than
+/// a hairline so a low-but-real trace (a few percent) reads as a curve rather
+/// than a hair along the baseline.
+pub const LINE_WIDTH: f64 = 2.5;
 /// Radius of the "latest sample" marker dot (in pixels).
-pub const DOT_RADIUS: f64 = 1.5;
+pub const DOT_RADIUS: f64 = 2.5;
+/// Alpha of the horizontal gridlines and baseline drawn behind the series.
+const GRID_ALPHA: f64 = 0.28;
+/// Neutral grey for gridlines (0–1); the baseline sits a touch darker.
+const GRID_RGB: (f64, f64, f64) = (0.55, 0.55, 0.55);
+const BASELINE_RGB: (f64, f64, f64) = (0.42, 0.42, 0.42);
 
 /// Vertical padding above the plot, reserved for the topmost tick label so
 /// the max-value label is never clipped by the widget edge. (The pane title
@@ -63,18 +70,21 @@ fn iter_some_runs(values: &[Option<f64>]) -> Vec<std::ops::Range<usize>> {
 /// right-anchored rolling window of width `w`.
 ///
 /// The latest sample (index `n - 1`) always lands on the right edge (`w`);
-/// each older sample sits one fixed slot to its left, where
-/// `slot = w / (capacity - 1)`. With `capacity == n` a full history spans the
-/// entire width; a partial history occupies only the right-hand portion, so
-/// the trace grows from right to left until it is full and then scrolls
-/// left. Positions past the left edge clamp to 0. Indexes past `n - 1` clamp
-/// to the latest position.
+/// older samples step left one slot each, where the slot width is chosen so
+/// that **however many samples are present they span the full width**. Slots
+/// are `w / (min(n, capacity) - 1)` — when `n < capacity` the newest sample
+/// reaches the left edge of the plot and the trace fills the pane (instead of
+/// living in a thin right-hand band while the app is warming up); once
+/// `n >= capacity` exactly `capacity` samples fit across the full width and
+/// the excess older samples clamp to the left edge (scroll). Indexes past
+/// `n - 1` clamp to the latest position; the width is clamped to 0 for any
+/// over-capacity overflow so nothing spills off the left side.
 pub fn sample_x(i: usize, n: usize, capacity: usize, w: f64) -> f64 {
     if n == 0 {
         return 0.0;
     }
-    let cap = capacity.max(2);
-    let slot = w / (cap - 1) as f64;
+    let slots = n.min(capacity.max(2)).max(2);
+    let slot = w / (slots - 1) as f64;
     let steps_back = (n - 1 - i.min(n - 1)) as f64;
     (w - steps_back * slot).max(0.0)
 }
@@ -158,6 +168,31 @@ fn measure_gutter(ctx: &Context, labels: &[String]) -> f64 {
         .map(|t| ctx.text_extents(t).map(|e| e.width()).unwrap_or(0.0))
         .fold(0.0f64, f64::max);
     width + 2.0 * GUTTER_PAD
+}
+
+/// Faint horizontal gridlines at 25/50/75% of the plot height plus a slightly
+/// darker baseline (the 0 line), all confined to the plot rectangle. Drawn
+/// *before* the series so it reads as a backdrop, and only where the plot has
+/// real area — a degenerate (zero-size) plot draws nothing.
+fn draw_gridlines(ctx: &Context, plot: &Plot) {
+    if plot.w <= 0.0 || plot.h <= 0.0 {
+        return;
+    }
+    for &frac in &[0.25_f64, 0.5, 0.75] {
+        let y = plot.oy + frac * plot.h;
+        ctx.set_source_rgba(GRID_RGB.0, GRID_RGB.1, GRID_RGB.2, GRID_ALPHA);
+        ctx.set_line_width(1.0);
+        ctx.move_to(plot.ox, y);
+        ctx.line_to(plot.ox + plot.w, y);
+        let _ = ctx.stroke();
+    }
+    // Baseline (value 0) a touch darker than the interior gridlines.
+    let y = plot.oy + plot.h;
+    ctx.set_source_rgba(BASELINE_RGB.0, BASELINE_RGB.1, BASELINE_RGB.2, GRID_ALPHA);
+    ctx.set_line_width(1.0);
+    ctx.move_to(plot.ox, y);
+    ctx.line_to(plot.ox + plot.w, y);
+    let _ = ctx.stroke();
 }
 
 /// Draws one series (area fill + line + latest-sample dot) inside the inner
@@ -302,6 +337,37 @@ pub fn axis_tick_percent(p: f64) -> String {
     format!("{:.0}%", p)
 }
 
+/// Compact "Gigabyte" label for a value in MB, with one decimal ("14.2 GB"),
+/// falling back to whole megabytes ("512 MB") when the amount is under a
+/// gigabyte. Used by the pane-header readout where a decimal-GB value reads
+/// better than the integer-GB axis tick.
+fn gig_label(mb: f64) -> String {
+    if mb >= 1024.0 {
+        format!("{:.1} GB", mb / 1024.0)
+    } else {
+        format!("{:.0} MB", mb)
+    }
+}
+
+/// The live readout for the CPU & Memory pane header: `CPU 4.5% · MEM 14.2 GB`.
+/// `cpu`/`mem` are percents (0–100) as stored in [`Sample`]; `mem_max_mb`
+/// scales the percent into an absolute amount matching the pane's right axis.
+pub fn cpu_mem_readout(cpu: f64, mem: f64, mem_max_mb: f64) -> String {
+    format!(
+        "CPU {cpu:.1}% \u{b7} MEM {}",
+        gig_label(mem / 100.0 * mem_max_mb)
+    )
+}
+
+/// The live readout for the CPU Freq & Temp pane header:
+/// `3.7 GHz · 56 °C`. A `None` sensor (no frequency or temperature source)
+/// reads as `"-"` so a missing reading never reads as `0`.
+pub fn freq_temp_readout(freq_mhz: Option<f64>, temp_c: Option<f64>) -> String {
+    let freq = freq_mhz.map(axis_tick_mhz).unwrap_or_else(|| "-".into());
+    let temp = temp_c.map(axis_tick_celsius).unwrap_or_else(|| "-".into());
+    format!("{freq} \u{b7} {temp}")
+}
+
 /// Formats a memory-axis tick (in MB) as a compact, human label: a clean
 /// whole GiB multiple reads as GB (`"16 GB"`, `"2 GB"`), anything else stays
 /// in MB (`"1536 MB"`, `"32 MB"`, `"0 MB"`). This keeps the top tick of a 16 GB
@@ -427,7 +493,9 @@ pub fn paint_usage_chart(
         cairo::FontSlant::Normal,
         cairo::FontWeight::Normal,
     );
-    ctx.set_font_size(9.0);
+    // 10pt keeps the tick labels readable at the default 940px window width
+    // without crowding the narrow plot — 9pt read as thin/faint on screen.
+    ctx.set_font_size(10.0);
     match pane {
         ChartPane::CpuMem => {
             // Each series has its own axis: CPU on the left in % (0–100), and
@@ -455,6 +523,7 @@ pub fn paint_usage_chart(
                 ],
             );
             let plot = plot_rect(w, h, left_gutter, right_gutter);
+            draw_gridlines(ctx, &plot);
             // Draw order: memory (bottom), cpu (top).
             draw_series(ctx, &plot, &mem, cfg.capacity, cfg.mem_max_mb, MEM_RGB);
             draw_series(ctx, &plot, &cpu, cfg.capacity, 100.0, CPU_RGB);
@@ -493,6 +562,7 @@ pub fn paint_usage_chart(
             let left_gutter = measure_gutter(ctx, &freq_labels);
             let right_gutter = measure_gutter(ctx, &temp_labels);
             let plot = plot_rect(w, h, left_gutter, right_gutter);
+            draw_gridlines(ctx, &plot);
             // Draw order: frequency, temperature (top).
             draw_series(ctx, &plot, &freq, cfg.capacity, cfg.freq_max_mhz, FREQ_RGB);
             draw_series(ctx, &plot, &temp, cfg.capacity, 100.0, TEMP_RGB);
@@ -643,6 +713,37 @@ mod tests {
         assert_eq!(axis_tick_mhz(0.0), "0 MHz");
     }
 
+    // ---- pane-header live readouts -------------------------------------
+
+    #[test]
+    fn test_cpu_mem_readout_format() {
+        // 24% of 64 GB = 15.36 GB, shown to one decimal.
+        assert_eq!(
+            cpu_mem_readout(4.5, 24.0, 65536.0),
+            "CPU 4.5% \u{b7} MEM 15.4 GB"
+        );
+        // Sub-gigabyte memory amounts fall back to megabytes.
+        assert_eq!(cpu_mem_readout(0.0, 5.0, 100.0), "CPU 0.0% \u{b7} MEM 5 MB");
+    }
+
+    #[test]
+    fn test_freq_temp_readout_present_and_absent() {
+        assert_eq!(
+            freq_temp_readout(Some(3700.0), Some(56.0)),
+            "3.7 GHz \u{b7} 56 \u{b0}C"
+        );
+        // A missing sensor reads as "-" instead of "0".
+        assert_eq!(freq_temp_readout(None, Some(56.0)), "- \u{b7} 56 \u{b0}C");
+        assert_eq!(freq_temp_readout(Some(550.0), None), "550 MHz \u{b7} -");
+    }
+
+    #[test]
+    fn test_gig_label_mb_and_gb() {
+        assert_eq!(gig_label(1536.0), "1.5 GB");
+        assert_eq!(gig_label(512.0), "512 MB");
+        assert_eq!(gig_label(65536.0), "64.0 GB");
+    }
+
     // ---- x/y mappings ---------------------------------------------------
 
     #[test]
@@ -663,9 +764,12 @@ mod tests {
 
     #[test]
     fn test_sample_x_steps_left_one_slot_older() {
+        // With `n < capacity` the slots scale so the newest sample reaches the
+        // left edge: slot = w / (n - 1). Three samples => slot = w/2, so the
+        // oldest is on the left edge and the middle sits exactly halfway.
         let w = 480.0;
         let cap = 10;
-        let slot = w / (cap - 1) as f64;
+        let slot = w / (3 - 1) as f64;
         let n = 3;
         assert_eq!(
             sample_x(n - 1, n, cap, w),
@@ -675,12 +779,12 @@ mod tests {
         assert_eq!(
             sample_x(n - 2, n, cap, w),
             w - slot,
-            "one older steps back one slot"
+            "one older sits one slot to the left"
         );
         assert_eq!(
             sample_x(n - 3, n, cap, w),
             w - 2.0 * slot,
-            "two older step back two slots"
+            "two older sit two slots to the left (left edge)"
         );
     }
 
@@ -693,11 +797,39 @@ mod tests {
             0.0,
             "a full history touches the left edge"
         );
-        let expected = w * (cap - (cap - 1)) as f64 / (cap - 1) as f64;
+        // Fill-the-pane: one sample short of a full window still spans the
+        // whole width, so the oldest sample is exactly on the left edge.
         assert!(
-            (sample_x(0, cap - 1, cap, w) - expected).abs() < 1e-9,
-            "one sample short of a full window leaves one slot blank on the left"
+            (sample_x(0, cap - 1, cap, w) - 0.0).abs() < 1e-9,
+            "the oldest sample of a partial window sits on the left edge"
         );
+    }
+
+    #[test]
+    fn test_sample_x_partial_history_fills_full_width() {
+        // The headline readability fix: however many samples are present
+        // (<capacity) they span the full plot width instead of cramping into
+        // a thin right-hand band.
+        let w = 400.0;
+        for n in 1..120 {
+            let x_oldest = sample_x(0, n, 120, w);
+            let x_newest = sample_x(n - 1, n, 120, w);
+            assert!((0.0..=w).contains(&x_oldest), "oldest of {n} in-bounds");
+            assert!(
+                x_oldest <= x_newest,
+                "oldest must not sit to the right of the newest"
+            );
+            if n >= 2 {
+                assert!(
+                    (x_oldest - 0.0).abs() < 1e-9,
+                    "oldest of a {n}-sample partial window reaches the left edge"
+                );
+            }
+            assert!(
+                (x_newest - w).abs() < 1e-9,
+                "newest of a {n}-sample partial window reaches the right edge"
+            );
+        }
     }
 
     #[test]

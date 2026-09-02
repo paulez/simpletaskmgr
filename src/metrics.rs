@@ -209,6 +209,7 @@ impl SystemMetrics {
     pub fn push_sample(&mut self) {
         let cpu = self.sample_cpu().unwrap_or(0.0);
         let mem = self.sample_mem().unwrap_or(0.0);
+        log::debug!("cpu used {cpu:.1}% (mem {mem:.1}%)");
         // Frequency and temperature are live reads; when a read fails the
         // previous value (if any) is carried forward so a momentary `sysfs`
         // hiccup doesn't blank the series.
@@ -239,13 +240,27 @@ impl SystemMetrics {
 
     fn sample_cpu(&mut self) -> Option<f64> {
         let (total, idle) = read_live_cpu_line();
-        let baseline = self.stat_baseline?;
-        let percent = cpu_percent(&baseline, total, idle);
-        let new_baseline = StatBaseline {
+        // `(0, 0)` can only mean the aggregate `cpu` line was missing or
+        // unparsable — a real `/proc/stat` always reports non-zero cumulative
+        // counters, so `total == 0` is unambiguously a failed read. Skip
+        // recording that as a baseline, or the next interval would compute a
+        // bogus spike against it. Returning `None` here maps to `0.0` in
+        // `push_sample`, keeping the previous baseline intact for the retry.
+        if total == 0 {
+            return None;
+        }
+        // The *first* call has no prior baseline, so its percent is `None`
+        // (mapped to `0.0` by `push_sample`). Crucially the baseline is still
+        // recorded unconditionally above — the old code returned `None` via
+        // `?` *before* storing it, so `stat_baseline` stayed `None` forever and
+        // every subsequent sample collapsed to `0.0` ("CPU stuck at 0").
+        let percent = self
+            .stat_baseline
+            .and_then(|baseline| cpu_percent(&baseline, total, idle));
+        self.stat_baseline = Some(StatBaseline {
             last_total: total,
             last_idle: idle,
-        };
-        self.stat_baseline = Some(new_baseline);
+        });
         percent
     }
 
@@ -385,6 +400,41 @@ mod tests {
         assert!(m.history().is_empty());
         m.push_sample();
         assert_eq!(m.history().len(), 1);
+    }
+
+    /// Regression test for "CPU stuck at 0": the baseline must be recorded on
+    /// the very first read even though that read has no prior interval to
+    /// measure. Before the fix, `sample_cpu` returned `None` on the first call
+    /// *and left `stat_baseline` empty*, so every call after it also returned
+    /// `None` (mapped to `0.0`) and the CPU series was permanently zero.
+    ///
+    /// After the fix, the first call establishes the baseline and the second
+    /// call measures against it. On any machine with a readable
+    /// `/proc/stat` the second call must therefore return `Some` — an idle
+    /// interval legitimately yields `Some(0.0)`, but `None` (the old symptom)
+    /// no longer occurs.
+    #[test]
+    fn test_second_cpu_sample_is_measured_not_stuck_zero() {
+        let mut m = SystemMetrics::with_cap(10);
+        // First read: no baseline yet, so no percent — but it *must* record
+        // one, which is exactly what the bug failed to do.
+        let first = m.sample_cpu();
+        assert!(
+            m.stat_baseline.is_some(),
+            "the first read must record a baseline for the next interval"
+        );
+        assert!(
+            first.is_none() || first.unwrap() >= 0.0,
+            "first interval has no prior baseline -> None, or a valid percent"
+        );
+        // Second read: a baseline now exists, so a real measurement is
+        // possible and the permanent-None / permanent-zero symptom is gone.
+        let second = m.sample_cpu();
+        assert!(
+            second.is_some(),
+            "the second read must return Some (some %), not None — the old \
+             bug returned None forever after the first call"
+        );
     }
 
     /// A pushed sample records the live core-0 frequency when the `cpufreq`

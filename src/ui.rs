@@ -242,6 +242,7 @@ fn build_graph_pane(
     drawing.set_hexpand(true);
     drawing.add_css_class("graph-area");
     let st = state.clone();
+    let header = label.clone();
     drawing.set_draw_func(move |_da, cr: &gtk4::cairo::Context, w: i32, h: i32| {
         let samples = st.borrow().metrics.history();
         let cfg = ChartConfig {
@@ -249,6 +250,17 @@ fn build_graph_pane(
             mem_max_mb: st.borrow().mem_max_mb,
             capacity: SystemMetrics::MAX_HISTORY,
         };
+        // Keep the pane header in sync with the newest sample so the current
+        // values are always readable even when a low/flat line is hard to see.
+        if let Some(last) = samples.last() {
+            let text = match pane {
+                ChartPane::CpuMem => {
+                    crate::usage_graph::cpu_mem_readout(last.cpu, last.mem, cfg.mem_max_mb)
+                }
+                ChartPane::FreqTemp => crate::usage_graph::freq_temp_readout(last.freq, last.temp),
+            };
+            header.set_text(&text);
+        }
         paint_usage_chart(cr, w as f64, h as f64, &samples, &cfg, pane);
     });
     box_v.append(&drawing);
