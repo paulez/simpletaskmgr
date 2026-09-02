@@ -649,7 +649,6 @@ fn make_rebuild(
             .as_ref()
             .and_then(|o| o.downcast_ref::<ProcessRow>())
             .map(|r| r.pid());
-        let items = state_r.borrow().process_list.processes.clone();
 
         // A refresh changes the store's size, and `GtkAdjustment` clamps
         // `value` to the valid range whenever `upper`/`page` change at layout
@@ -659,7 +658,13 @@ fn make_rebuild(
         // drifted. The adjustment auto-clamps to the valid range anyway.
         let saved = adj_r.value();
 
-        refresh_list::refresh(&store_r, &items);
+        // Borrow (not clone) the process list: `refresh` only reads a
+        // `&[ProcessItem]`, so the whole-Vec clone here — every `ProcessRow`
+        // value (two Strings each), once per refresh tick — was pure waste.
+        {
+            let s = state_r.borrow();
+            refresh_list::refresh(&store_r, &s.process_list.processes);
+        }
 
         // `refresh` updated the row *values* in place — it deliberately emits
         // no `items-changed` for a stable-position value update (that is the
