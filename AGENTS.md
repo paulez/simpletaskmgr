@@ -53,10 +53,16 @@ one commit:
 4. **Format** with `cargo fmt`
 5. **Commit** with a clear message (no `Co-Authored-By` or AI attribution)
 
+Committing is **part of** step 5, not a follow-up: once the gate passes,
+commit immediately and do **not** ask for permission to commit. Asking first
+leaves the tree uncommitted, which the user cannot pull or test.
+
 **Commit rules:**
 - **Always commit after implementing a change**, once the gate above passes. The
   user pulls and tests remotely between changes, so a committed, green state is
   the only way to test it — do not leave changes uncommitted in the working tree.
+- **Commit without asking.** Do not end a turn to request permission to commit;
+  commit as soon as the gate is green. (Pushing still requires explicit ask.)
 - Commit **per logical change** (a feature, a fix, a readability tweak); keep the
   history granular so `git log` makes it easy to see exactly what was done.
 - **Track what has been done**: the commit message is the record. State, in
