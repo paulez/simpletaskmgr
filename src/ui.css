@@ -19,11 +19,7 @@
   border-radius: 6px;
 }
 
-/* ---- Toolbar ------------------------------------------------------------- */
-.toolbar {
-  padding: 6px 0;
-}
-
+/* ---- Settings control (header bar) ---------------------------------------- */
 .settings-btn {
   padding: 3px 12px;
 }

@@ -38,7 +38,7 @@ struct DetailLabels {
 /// The widgets the `Settings` popover exposes so its change handlers and the
 /// reset path can address them without name lookup.
 struct SettingsWidgets {
-    button: gtk4::Button,
+    button: gtk4::MenuButton,
     check: gtk4::CheckButton,
     list: gtk4::ListBox,
     rows: Vec<gtk4::ListBoxRow>,
@@ -565,8 +565,8 @@ fn build_detail_pane() -> DetailPane {
 /// Builds the `Settings` button and its popover (show-all toggle, refresh
 /// interval list, and reset button).
 fn build_settings_popover() -> SettingsWidgets {
-    let settings_btn = gtk4::Button::new();
-    settings_btn.set_label("Settings");
+    let settings_btn = gtk4::MenuButton::new();
+    settings_btn.set_icon_name("open-menu-symbolic");
     settings_btn.add_css_class("settings-btn");
 
     let popover = gtk4::Popover::new();
@@ -607,7 +607,7 @@ fn build_settings_popover() -> SettingsWidgets {
     pop_box.append(&reset_btn);
 
     popover.set_child(Some(&pop_box));
-    settings_btn.set_child(Some(&popover));
+    settings_btn.set_popover(Some(&popover));
 
     SettingsWidgets {
         button: settings_btn,
@@ -740,6 +740,11 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let detail = build_detail_pane();
     let settings = build_settings_popover();
 
+    // ---- Header bar (titlebar) with the trailing Settings control ---------------
+    let header_bar = gtk4::HeaderBar::new();
+    header_bar.pack_end(&settings.button);
+    window.set_titlebar(Some(&header_bar));
+
     // ---- Body row (list | detail) ---------------------------------------------
     let body = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     body.add_css_class("body");
@@ -747,13 +752,10 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     body.append(&detail.scroll);
 
     // ---- Assemble root ---------------------------------------------------------
+    // The graph row sits on top and the body (list | detail) directly below it;
+    // the Settings control lives in the header bar, so nothing wedges a row
+    // between the graph and the list.
     root.append(&graph_row);
-
-    // ---- Settings button + popover ---------------------------------------------
-    let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-    toolbar.add_css_class("toolbar");
-    toolbar.append(&settings.button);
-    root.insert_child_after(&toolbar, Some(&graph_row));
 
     root.append(&body);
 
