@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use log::warn;
 
 use crate::cpu_status::{read_cpu0_freq_mhz, read_cpu_temp_c};
+use crate::disk_status::{DiskSample, DiskStatus};
 use crate::gpu_status::GpuSample;
 
 /// One system-wide usage sample.
@@ -11,8 +12,9 @@ use crate::gpu_status::GpuSample;
 /// units the graph plots. The GPU fields (and `freq`/`temp`) are `Option`
 /// because their source is platform-conditional — a host without a GPU or,
 /// respectively, the `cpufreq`/`hwmon` interface reports `None` and the UI
-/// reads those as a blank series.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// reads those as a blank series. `disks` is a per-disk reading (empty on no
+/// physical disk); it breaks `Copy`, so the history clones on access.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Sample {
     /// System CPU utilization percent (0–100) for the interval since the
     /// previous sample.
@@ -35,6 +37,11 @@ pub struct Sample {
     /// GPU edge temperature in °C read from `rocm-smi` `card0`, or `None`
     /// when no GPU is available.
     pub gpu_temp: Option<f64>,
+    /// Per-physical-disk read/write throughput and utilization for this
+    /// interval, one entry per physical disk. Empty when no physical disk is
+    /// present; each field is `None` on the device's first sample (a rate
+    /// needs two samples).
+    pub disks: Vec<DiskSample>,
 }
 
 /// Baseline state used to compute a CPU% from `/proc/stat` tick deltas between
@@ -187,6 +194,7 @@ pub struct SystemMetrics {
     history: VecDeque<Sample>,
     cap: usize,
     stat_baseline: Option<StatBaseline>,
+    disk: DiskStatus,
 }
 
 impl Default for SystemMetrics {
@@ -205,6 +213,7 @@ impl SystemMetrics {
             history: VecDeque::new(),
             cap: Self::MAX_HISTORY,
             stat_baseline: None,
+            disk: DiskStatus::new(),
         }
     }
 
@@ -214,16 +223,18 @@ impl SystemMetrics {
             history: VecDeque::new(),
             cap,
             stat_baseline: None,
+            disk: DiskStatus::new(),
         }
     }
 
     /// The current history, oldest first.
     pub fn history(&self) -> Vec<Sample> {
-        self.history.iter().copied().collect()
+        self.history.iter().cloned().collect()
     }
 
-    /// The current system CPU% / memory% / frequency / temperature, plus the
-    /// last GPU reading (utilization, VRAM, temperature).
+    /// The current system CPU% / memory% / frequency / temperature, the
+    /// per-disk I/O reading, plus the last GPU reading (utilization, VRAM,
+    /// temperature).
     ///
     /// CPU% for this interval is computed from the delta since the last call;
     /// the first call has no baseline, so its CPU value is 0.0. Memory% is
@@ -235,9 +246,17 @@ impl SystemMetrics {
     /// `None`, and the caller on a host with no GPU can keep skipping the
     /// `rocm-smi` spawn by passing `None` every tick (see
     /// [`crate::gpu_status::gpu_available`]).
+    ///
+    /// The per-disk reading (read/write bytes-per-second and utilization) is
+    /// sampled from `/proc/diskstats` each call inside the tracker — there is
+    /// no new `push_sample` parameter (unlike the GPU, whose source is a
+    /// process spawn the caller may skip). Its first sample for a device is
+    /// `None` (a rate needs two samples) and later samples measure the
+    /// interval since the last one.
     pub fn push_sample(&mut self, gpu: Option<GpuSample>) {
         let cpu = self.sample_cpu().unwrap_or(0.0);
         let mem = self.sample_mem().unwrap_or(0.0);
+        let disks = self.disk.snapshot();
         log::debug!("cpu used {cpu:.1}% (mem {mem:.1}%)");
         // Frequency and temperature are live reads; when a read fails the
         // previous value (if any) is carried forward so a momentary `sysfs`
@@ -245,11 +264,11 @@ impl SystemMetrics {
         let prev = self.latest();
         let freq = match read_cpu0_freq_mhz() {
             Some(f) => Some(f),
-            None => prev.and_then(|s| s.freq),
+            None => prev.as_ref().and_then(|s| s.freq),
         };
         let temp = match read_cpu_temp_c() {
             Some(t) => Some(t),
-            None => prev.and_then(|s| s.temp),
+            None => prev.as_ref().and_then(|s| s.temp),
         };
         // GPU: same carry-over rule as freq/temp. On a host with no GPU the
         // caller keeps passing `None` (and never spawns rocm-smi), so the
@@ -257,9 +276,9 @@ impl SystemMetrics {
         let (gpu_use, gpu_vram, gpu_temp) = match gpu {
             Some(g) => (Some(g.use_pct), Some(g.vram_pct), Some(g.temp_c)),
             None => (
-                prev.and_then(|s| s.gpu_use),
-                prev.and_then(|s| s.gpu_vram),
-                prev.and_then(|s| s.gpu_temp),
+                prev.as_ref().and_then(|s| s.gpu_use),
+                prev.as_ref().and_then(|s| s.gpu_vram),
+                prev.as_ref().and_then(|s| s.gpu_temp),
             ),
         };
         self.history.push_back(Sample {
@@ -270,6 +289,7 @@ impl SystemMetrics {
             gpu_use,
             gpu_vram,
             gpu_temp,
+            disks,
         });
         while self.history.len() > self.cap {
             self.history.pop_front();
@@ -278,7 +298,7 @@ impl SystemMetrics {
 
     /// The newest sample (if any).
     fn latest(&self) -> Option<Sample> {
-        self.history.back().copied()
+        self.history.back().cloned()
     }
 
     fn sample_cpu(&mut self) -> Option<f64> {
@@ -509,5 +529,36 @@ mod tests {
         assert_eq!(last.gpu_use, Some(42.0), "carry-over must hold 42.0");
         assert_eq!(last.gpu_vram, Some(77.0));
         assert_eq!(last.gpu_temp, Some(61.0));
+    }
+
+    /// A pushed sample records a per-disk reading. The first sample for a disk
+    /// reports `None` rates (a rate needs two samples); the second measures the
+    /// interval since the first. On a host with no physical disk the `disks`
+    /// field is simply empty — both are acceptable outcomes.
+    #[test]
+    fn test_push_sample_carries_disks() {
+        let mut m = SystemMetrics::with_cap(10);
+        m.push_sample(None);
+        let first = m.history().pop().unwrap();
+        for d in &first.disks {
+            assert!(
+                d.read_bps.is_none() && d.write_bps.is_none() && d.util_pct.is_none(),
+                "the first sample has no prior baseline -> None rates"
+            );
+        }
+        // The second sample now has a baseline, so each disk reports real
+        // (>= 0) readings.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        m.push_sample(None);
+        let second = m.history().pop().unwrap();
+        assert_eq!(second.disks.len(), first.disks.len(), "same set of disks");
+        for d in &second.disks {
+            if let Some(b) = d.read_bps {
+                assert!(b >= 0.0);
+            }
+            if let Some(u) = d.util_pct {
+                assert!((0.0..=100.0).contains(&u));
+            }
+        }
     }
 }
