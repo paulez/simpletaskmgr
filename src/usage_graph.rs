@@ -1,5 +1,6 @@
 use cairo::Context;
 
+use crate::disk_status::DiskSample;
 use crate::metrics::Sample;
 
 /// Normalizes an `(r, g, b)` value in `0–255` to `0–1` for cairo drawing.
@@ -33,6 +34,17 @@ pub const GPU_VRAM_RGB: (u8, u8, u8) = MEM_RGB;
 /// the CPU-temperature series, so "temperature" reads the same colour
 /// regardless of which device it belongs to.
 pub const GPU_TEMP_RGB: (u8, u8, u8) = TEMP_RGB;
+/// RGB triplet (0–255) for the disk read series — green, shared with the CPU
+/// series so "the busy colour" stays consistent. Read is the left/front side
+/// of the throughput pane, mirroring how CPU (front) and memory (back) pair.
+pub const DISK_READ_RGB: (u8, u8, u8) = CPU_RGB;
+/// RGB triplet (0–255) for the disk write series — blue, shared with the
+/// memory series for the same reason.
+pub const DISK_WRITE_RGB: (u8, u8, u8) = MEM_RGB;
+/// RGB triplet (0–255) for the disk-utilization series — amber, distinct from
+/// the green read / blue write / red temperature swatches so a busy % bar
+/// reads as its own thing.
+pub const DISK_UTIL_RGB: (u8, u8, u8) = (255, 152, 0);
 /// Translucent fill alpha so overlapping series areas read as distinct bands.
 pub const FILL_ALPHA: f64 = 0.22;
 /// Line width of each series (in pixels at the draw-time scale). Thicker than
@@ -445,6 +457,15 @@ pub enum ChartPane {
     /// `GpuTemp` layout where both the left and right slot carry the same
     /// reading so that the shared two-axis drawing path needs no change.
     GpuTemp,
+    /// The disk-throughput pane: total read + write bytes/second across the
+    /// physical disks, drawn as two auto-scaled series (read green front,
+    /// write blue back) on a shared byte-rate axis. Mirrors `CpuMem`, where
+    /// both series are percent — here both are bytes/s.
+    DiskThroughput,
+    /// The disk-utilization pane: the busiest disk's share of each interval
+    /// spent in I/O (0–100%), drawn as a single series on a fixed 0-anchored
+    /// percent axis.
+    DiskUtil,
 }
 
 /// Configuration the chart needs to lay out its series, decoupled from the
@@ -506,6 +527,60 @@ pub fn axis_tick_percent(p: f64) -> String {
     format!("{:.0}%", p)
 }
 
+/// Sums a per-disk rate (bytes/second) across `disks`, ignoring `None`
+/// entries. Returns `None` when no disk reports a value (e.g. no physical
+/// disk, or the first sample which has no baseline yet) — so the series paints
+/// a blank gap rather than a spurious zero. Shared by the two throughput
+/// series so the per-sample total is computed identically for read and write.
+fn disks_total(
+    disks: &[crate::disk_status::DiskSample],
+    field: fn(&crate::disk_status::DiskSample) -> Option<f64>,
+) -> Option<f64> {
+    let mut sum = 0.0;
+    let mut any = false;
+    for d in disks {
+        if let Some(v) = field(d) {
+            sum += v;
+            any = true;
+        }
+    }
+    any.then_some(sum)
+}
+
+/// Formats a byte/second axis tick as a compact label: `"16 GB/s"`,
+/// `"128 MB/s"`, `"512 KB/s"`, `"0 B/s"`. Forwards to [`format_bytes_per_s`],
+/// which already picks the largest whole unit that keeps the value >= 1 (so a
+/// top tick of a 480 MiB/s disk reads as `480 MB/s` rather than `0.5 GB/s`).
+pub fn axis_tick_bytes(bps: f64) -> String {
+    format_bytes_per_s(Some(bps))
+}
+
+/// Formats a byte rate (bytes/second) as a compact, human label: `"12.3 MB/s"`,
+/// `"1.2 GB/s"`. Values under 1 KiB/s read as `"<1 KB/s"`, so a near-idle disk
+/// still reads as a real (tiny) speed rather than `0` or a confusing `0.0`.
+/// Used by the disk pane-header readout where a decimal MB/s value reads
+/// better than a raw integer-bytes tick.
+fn format_bytes_per_s(bps: Option<f64>) -> String {
+    let Some(v) = bps else {
+        return "-".into();
+    };
+    const UNITS: [&str; 4] = ["B/s", "KB/s", "MB/s", "GB/s"];
+    let mut value = v;
+    let mut idx = 0;
+    while value >= 1024.0 && idx < UNITS.len() - 1 {
+        value /= 1024.0;
+        idx += 1;
+    }
+    if idx == 0 {
+        if value < 1.0 {
+            return "<1 B/s".into();
+        }
+        format!("{:.0} B/s", value)
+    } else {
+        format!("{:.1} {}", value, UNITS[idx])
+    }
+}
+
 /// Compact "Gigabyte" label for a value in MB, with one decimal ("14.2 GB"),
 /// falling back to whole megabytes ("512 MB") when the amount is under a
 /// gigabyte. Used by the pane-header readout where a decimal-GB value reads
@@ -552,6 +627,52 @@ pub fn gpu_temp_readout(temp_c: Option<f64>) -> String {
         .map(|c| format!("{c:.1} °C"))
         .unwrap_or_else(|| "-".into());
     format!("Temp {temp}")
+}
+
+/// The live readout for the Disk Throughput pane header. For one disk it lists
+/// the name with its per-interval read + write speed (`nvme0n1 R 1.2 MB/s · W
+/// 3.4 MB/s`); for several it reports the count plus the total of each
+/// (`2 disks · R 4.0 MB/s · W 6.0 MB/s`). `None` fields read as `"-"`; an
+/// empty list (no physical disk) reads as `"no disk"`, matching the plot's
+/// blank pane.
+pub fn disk_throughput_readout(disks: &[DiskSample]) -> String {
+    if disks.is_empty() {
+        return "no disk".into();
+    }
+    let total_read = disks_total(disks, |d| d.read_bps);
+    let total_write = disks_total(disks, |d| d.write_bps);
+    if disks.len() == 1 {
+        let d = &disks[0];
+        format!(
+            "{} R {} · W {}",
+            d.name,
+            format_bytes_per_s(d.read_bps),
+            format_bytes_per_s(d.write_bps)
+        )
+    } else {
+        format!(
+            "{} disks · R {} · W {}",
+            disks.len(),
+            format_bytes_per_s(total_read),
+            format_bytes_per_s(total_write)
+        )
+    }
+}
+
+/// The live readout for the Disk Utilization pane header: `Util 12%` — the
+/// busiest disk's share of the interval spent in I/O (0–100%). Reading the max
+/// (not the sum) keeps a multi-disk host from ever exceeding 100%; a `None`
+/// reading (first sample / no disk) reads as `"-"`.
+pub fn disk_util_readout(disks: &[DiskSample]) -> String {
+    let util = disks
+        .iter()
+        .filter_map(|d| d.util_pct)
+        .fold(None, |acc: Option<f64>, u: f64| {
+            Some(acc.map_or(u, |p| p.max(u)))
+        })
+        .map(|v| format!("{v:.0}%"))
+        .unwrap_or_else(|| "-".into());
+    format!("Util {util}")
 }
 
 /// The live readout for the CPU Freq & Temp pane header:
@@ -770,6 +891,60 @@ pub fn paint_usage_chart(
                 true,
             )
         }
+        // DiskUtil: single-series pane on a fixed 0–100% axis. Each sample
+        // reports the busiest disk's utilization (time in I/O, 0–100). A
+        // sample with no physical disk — or with only `None` util values — is
+        // a gap in the series (`iter_some_runs` leaves it blank).
+        ChartPane::DiskUtil => {
+            let util: Vec<Option<f64>> = samples
+                .iter()
+                .map(|s| {
+                    s.disks
+                        .iter()
+                        .filter_map(|d| d.util_pct)
+                        .fold(None, |acc: Option<f64>, u: f64| {
+                            Some(acc.map_or(u, |p| p.max(u)))
+                        })
+                })
+                .collect();
+            (
+                (util, (0.0, 100.0), DISK_UTIL_RGB, axis_tick_percent),
+                None,
+                true,
+            )
+        }
+        // DiskThroughput: two series (read front, write back) on a shared
+        // byte-rate axis, mirroring `CpuMem` (percent) but scaled to a byte
+        // domain. The domain auto-scales to the measured band of both series
+        // (floored at 1 MiB/s so an idle disk still has a readable axis rather
+        // than collapsing to a flat 0 line). A `None` series point (first
+        // sample / no disk) is a blank gap.
+        ChartPane::DiskThroughput => {
+            const MIN_SPAN_BYTES: f64 = 1_000_000.0; // ~1 MiB/s floor
+            let read: Vec<Option<f64>> = samples
+                .iter()
+                .map(|s| disks_total(&s.disks, |d| d.read_bps))
+                .collect();
+            let write: Vec<Option<f64>> = samples
+                .iter()
+                .map(|s| disks_total(&s.disks, |d| d.write_bps))
+                .collect();
+            let dom = auto_domain(
+                &read,
+                (0.0, MIN_SPAN_BYTES),
+                MIN_SPAN_BYTES,
+                AUTO_DOMAIN_PAD,
+            );
+            let dom2 = auto_domain(&write, dom, MIN_SPAN_BYTES, AUTO_DOMAIN_PAD);
+            // Both series share the wider of the two domains so their lines
+            // are comparable on the same axis.
+            let shared = (dom2.0.max(dom.0), dom2.1.max(dom.1));
+            (
+                (read, shared, DISK_READ_RGB, axis_tick_bytes),
+                Some((write, shared, DISK_WRITE_RGB, axis_tick_bytes)),
+                true,
+            )
+        }
     };
     let labels = |s: &Side| {
         let tick: fn(f64) -> String = s.3;
@@ -829,6 +1004,7 @@ mod tests {
             gpu_use: None,
             gpu_vram: None,
             gpu_temp: None,
+            disks: Vec::new(),
         }
     }
 
@@ -1039,6 +1215,115 @@ mod tests {
     #[case::absent(None, "Temp -")]
     fn test_gpu_temp_readout(#[case] temp: Option<f64>, #[case] expected: &str) {
         assert_eq!(gpu_temp_readout(temp), expected);
+    }
+
+    // ---- disk I/O readouts / formatting ---------------------------------
+
+    /// `format_bytes_per_s` picks the largest whole unit that keeps the value
+    /// >= 1, and reads `"-"` for `None`.
+    #[rstest]
+    #[case::none(None, "-")]
+    #[case::zero(Some(0.0), "<1 B/s")]
+    #[case::sub_kb(Some(512.0), "512 B/s")]
+    #[case::kb(Some(512.0 * 1024.0), "512.0 KB/s")]
+    #[case::mb(Some(1.2 * 1024.0 * 1024.0), "1.2 MB/s")]
+    #[case::gb(Some(1.2 * 1024.0 * 1024.0 * 1024.0), "1.2 GB/s")]
+    fn test_format_bytes_per_s(#[case] v: Option<f64>, #[case] expected: &str) {
+        assert_eq!(format_bytes_per_s(v), expected);
+    }
+
+    /// `axis_tick_bytes` forwards to `format_bytes_per_s`.
+    #[test]
+    fn test_axis_tick_bytes() {
+        assert_eq!(axis_tick_bytes(0.0), "<1 B/s");
+        assert_eq!(axis_tick_bytes(1.0 * 1024.0 * 1024.0), "1.0 MB/s");
+        assert_eq!(axis_tick_bytes(2.0 * 1024.0 * 1024.0 * 1024.0), "2.0 GB/s");
+    }
+
+    /// `disk_throughput_readout` lists a single disk's name + R/W, totals for a
+    /// multi-disk host, and `"no disk"` for an empty set.
+    #[test]
+    fn test_disk_throughput_readout_single() {
+        let disks = vec![crate::disk_status::DiskSample {
+            name: "nvme0n1".into(),
+            read_bps: Some(1.2 * 1024.0 * 1024.0),
+            write_bps: Some(3.4 * 1024.0 * 1024.0),
+            util_pct: Some(12.0),
+        }];
+        assert_eq!(
+            disk_throughput_readout(&disks),
+            "nvme0n1 R 1.2 MB/s \u{b7} W 3.4 MB/s"
+        );
+    }
+
+    #[test]
+    fn test_disk_throughput_readout_multi() {
+        let disks = vec![
+            crate::disk_status::DiskSample {
+                name: "nvme0n1".into(),
+                read_bps: Some(1_000_000.0),
+                write_bps: Some(2_000_000.0),
+                util_pct: Some(10.0),
+            },
+            crate::disk_status::DiskSample {
+                name: "sda".into(),
+                read_bps: Some(1_000_000.0),
+                write_bps: Some(4_000_000.0),
+                util_pct: Some(20.0),
+            },
+        ];
+        let got = disk_throughput_readout(&disks);
+        assert!(got.starts_with("2 disks"), "got {got}");
+    }
+
+    #[test]
+    fn test_disk_throughput_readout_empty() {
+        assert_eq!(disk_throughput_readout(&[]), "no disk");
+    }
+
+    /// `disk_util_readout` shows the busiest disk's percent (not a sum), and
+    /// "-" when no disk has a reading.
+    #[rstest]
+    #[case::single(
+        vec![crate::disk_status::DiskSample {
+            name: "sda".into(),
+            read_bps: Some(0.0),
+            write_bps: Some(0.0),
+            util_pct: Some(42.0),
+        }],
+        "Util 42%"
+    )]
+    #[case::multi(
+        vec![
+            crate::disk_status::DiskSample {
+                name: "a".into(),
+                read_bps: None,
+                write_bps: None,
+                util_pct: Some(10.0),
+            },
+            crate::disk_status::DiskSample {
+                name: "b".into(),
+                read_bps: None,
+                write_bps: None,
+                util_pct: Some(77.0),
+            },
+        ],
+        "Util 77%"
+    )]
+    #[case::none(
+        vec![crate::disk_status::DiskSample {
+            name: "sda".into(),
+            read_bps: None,
+            write_bps: None,
+            util_pct: None,
+        }],
+        "Util -"
+    )]
+    fn test_disk_util_readout(
+        #[case] disks: Vec<crate::disk_status::DiskSample>,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(disk_util_readout(&disks), expected);
     }
 
     // ---- x/y mappings ---------------------------------------------------

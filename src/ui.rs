@@ -295,6 +295,10 @@ fn build_graph_pane(
                     crate::usage_graph::gpu_use_vram_readout(last.gpu_use, last.gpu_vram)
                 }
                 ChartPane::GpuTemp => crate::usage_graph::gpu_temp_readout(last.gpu_temp),
+                ChartPane::DiskThroughput => {
+                    crate::usage_graph::disk_throughput_readout(&last.disks)
+                }
+                ChartPane::DiskUtil => crate::usage_graph::disk_util_readout(&last.disks),
             };
             header.set_text(&text);
         }
