@@ -186,86 +186,64 @@ impl CpuTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     /// Shorthand for `calculate_cpu_percent` with the tests' fixed `tps = 100`.
     fn cpu(ru: u64, rs: u64, lt: (u64, u64), cur: f64, last: f64) -> Option<f64> {
         CpuTracker::calculate_cpu_percent(ru, rs, lt, 100, cur, last)
     }
 
-    /// Test CPU percent calculation for 100% usage (maximum across 2 cores)
-    #[test]
-    fn test_cpu_percent_100_percent() {
-        assert_eq!(cpu(200, 200, (100, 100), 1001.0, 1000.0), Some(200.0));
+    /// `calculate_cpu_percent` over two cores, tps = 100. Covers the normal
+    /// busy/idle math, a shorter history, PID reuse (counter decrease) and a
+    /// u64 overflow, plus sub-second intervals.
+    #[rstest]
+    #[case::full(200, 200, 100, 100, 1001.0, 1000.0, Some(200.0))]
+    #[case::idle(100, 100, 100, 100, 1001.0, 1000.0, Some(0.0))]
+    #[case::partial(150, 150, 100, 100, 1002.0, 1000.0, Some(50.0))]
+    #[case::longer_interval(300, 300, 100, 100, 1010.0, 1000.0, Some(40.0))]
+    #[case::minimal_history(200, 100, 100, 50, 1001.0, 1000.0, Some(150.0))]
+    #[case::pid_reuse(5, 5, 100, 100, 1001.0, 1000.0, None)]
+    #[case::ticks_overflow(u64::MAX, 1, 1, 1, 1001.0, 1000.0, None)]
+    #[case::subsecond(150, 150, 100, 100, 1000.5, 1000.0, Some(200.0))]
+    fn test_cpu_percent(
+        #[case] utime: u64,
+        #[case] stime: u64,
+        #[case] last_u: u64,
+        #[case] last_s: u64,
+        #[case] now: f64,
+        #[case] last: f64,
+        #[case] expected: Option<f64>,
+    ) {
+        let got = cpu(utime, stime, (last_u, last_s), now, last);
+        if let (Some(g), Some(e)) = (got, expected) {
+            assert!((g - e).abs() < 0.01, "got {g}, expected {e}");
+        } else {
+            assert_eq!(got, expected);
+        }
     }
 
-    /// Test CPU percent calculation for 0% usage (idle process)
-    #[test]
-    fn test_cpu_percent_0_percent() {
-        assert_eq!(cpu(100, 100, (100, 100), 1001.0, 1000.0), Some(0.0));
-    }
-
-    /// Test CPU percent calculation for partial usage
-    #[test]
-    fn test_cpu_percent_partial_usage() {
-        assert_eq!(cpu(150, 150, (100, 100), 1002.0, 1000.0), Some(50.0));
-    }
-
-    /// Test CPU percent calculation with different time intervals
-    #[test]
-    fn test_cpu_percent_different_time_intervals() {
-        assert_eq!(cpu(300, 300, (100, 100), 1010.0, 1000.0), Some(40.0));
-    }
-
-    /// Test CPU percent calculation with minimal history
-    #[test]
-    fn test_cpu_percent_minimal_history() {
-        assert_eq!(cpu(200, 100, (100, 50), 1001.0, 1000.0), Some(150.0));
-    }
-
-    /// Test that decreased ticks (PID reuse) returns None instead of underflowing
-    #[test]
-    fn test_cpu_percent_pid_reuse_returns_none() {
-        assert_eq!(cpu(5, 5, (100, 100), 1001.0, 1000.0), None);
-    }
-
-    /// Test CPU percent calculation when tick totals overflow u64 component sum
-    #[test]
-    fn test_cpu_percent_ticks_overflow_returns_none() {
-        assert_eq!(cpu(u64::MAX, 1, (1, 1), 1001.0, 1000.0), None);
-    }
-
-    /// Test the since-start average used for a process's first sample.
-    /// A process that used 2000 ticks over its 100s lifetime shows 20%.
-    #[test]
-    fn test_lifetime_avg_percent() {
-        // tps=100, uptime=1000s => uptime_ticks=100_000
-        // starttime=90_000 ticks => process age = 10_000 ticks = 100s
-        let percent = CpuTracker::lifetime_avg_percent(800, 1200, 90_000, 100, 1000.0);
-        assert_eq!(percent, 20.0, "2000 ticks over 100s should be 20%");
-    }
-
-    /// Test that a process whose age can't be established yields 0.0
-    #[test]
-    fn test_lifetime_avg_percent_nonpositive_age_returns_zero() {
-        // starttime later than uptime: not possible in practice, guards the math
+    /// `lifetime_avg_percent` = ticks used over the process's age. Zero for a
+    /// non-positive age and for a u64 tick-sum overflow.
+    #[rstest]
+    #[case::twenty_percent(800, 1200, 90_000, 100, 1000.0, 20.0)]
+    #[case::nonpositive_age(100, 100, 200_000, 100, 1000.0, 0.0)]
+    #[case::zero_uptime(100, 100, 0, 100, 0.0, 0.0)]
+    #[case::overflow(u64::MAX, 1, 90_000, 100, 1000.0, 0.0)]
+    fn test_lifetime_avg_percent(
+        #[case] utime: u64,
+        #[case] stime: u64,
+        #[case] starttime_ticks: u64,
+        #[case] tps: u64,
+        #[case] uptime: f64,
+        #[case] expected: f64,
+    ) {
         assert_eq!(
-            CpuTracker::lifetime_avg_percent(100, 100, 200_000, 100, 1000.0),
-            0.0
-        );
-        // uptime reads as 0 (e.g. unreadable /proc/uptime)
-        assert_eq!(CpuTracker::lifetime_avg_percent(100, 100, 0, 100, 0.0), 0.0);
-    }
-
-    /// Test that overflow of tick sums is handled safely
-    #[test]
-    fn test_lifetime_avg_percent_overflow_returns_zero() {
-        assert_eq!(
-            CpuTracker::lifetime_avg_percent(u64::MAX, 1, 90_000, 100, 1000.0),
-            0.0
+            CpuTracker::lifetime_avg_percent(utime, stime, starttime_ticks, tps, uptime),
+            expected
         );
     }
 
-    /// Test that evict_dead_processes removes entries for dead PIDs
+    /// `evict_dead_processes` drops baselines whose pid is no longer alive.
     #[test]
     fn test_evict_dead_processes() {
         let mut tracker = CpuTracker::new();
@@ -281,16 +259,5 @@ mod tests {
         assert_eq!(tracker.process_usage.len(), 1);
         assert!(tracker.process_usage.contains_key(&100));
         assert!(!tracker.process_usage.contains_key(&200));
-    }
-
-    /// Test CPU percent calculation with sub-second precision
-    #[test]
-    fn test_cpu_percent_subsecond_precision() {
-        let percent =
-            cpu(150, 150, (100, 100), 1000.5, 1000.0).expect("sub-second should not be None");
-        assert!(
-            (percent - 200.0).abs() < 0.01,
-            "Should handle sub-second precision"
-        );
     }
 }
