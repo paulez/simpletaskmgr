@@ -80,58 +80,10 @@ Licenses verified via the crates.io API.
 
 ---
 
-## What the switch costs (migration plan)
-
-The cost is **not** "swap the UI" — we must also de-floem the data layer, which currently
-uses floem reactive primitives:
-
-- `src/process.rs` — `ProcessItem { value: RwSignal<TaskMgrProcess> }` → plain `TaskMgrProcess`
-- `src/process_list.rs` — `processes: RwSignal<Vector<ProcessItem>>` → `Vec<ProcessItem>`
-- `src/metrics.rs` — `history_signal: RwSignal<Vec<Sample>>` → `Vec<Sample>` (keep the
-  `push_sample` bounded-deque + pure parsers intact; they're already framework-free and
-  tested)
-
-**Carries over almost unchanged:** `cpu_tracker`, `metrics` parsing, `process` core,
-`config`, `signal`, and the pure presentation helpers (e.g. `render_usage_svg`-style
-functions stay headless-testable).
-
-**View layer to rewrite** (~600 LOC total):
-- `src/ui.rs` (~300 LOC)
-- `src/usage_graph.rs` (~230 LOC) → GTK `DrawingArea` + Cairo (the graph is *simpler* in
-  GTK: an imperative `cairo` context in a `draw` callback, driven by a plain `Vec<Sample>`)
-- `src/main.rs` `app_view` (~100 LOC)
-
-**Layout/styling:** inline `.style(|s| …)` becomes **GTK CSS** (`.css` file + named
-classes). Adjustment, not a blocker.
-
-**Refresh loop:** floem `create_effect` + `exec_after` → **`glib::timeout_add`** (or
-`glib::MainContext`) timer firing every `Config::REFRESH_INTERVAL_MS` (1500 ms); handler
-reads `/proc` and updates widgets on the GTK main thread (GTK is **not** thread-safe;
-all widget access must be on the main thread — the `timeout_add` callback already is).
-
-### Build / platform prerequisites (this box)
-- **GTK4 dev packages are NOT installed here** (`pkg-config` can't find gtk4/glib).
-  First step to build: `apt install libgtk-4-dev pkg-config` (pulls glib-2.0, gio-2.0,
-  cairo, pango, gdk-pixbuf dev).
-- Replace `floem` dep with `gtk4 = "0.11"` (feature `v4_10`+ as needed) in `Cargo.toml`.
-- No Skia/Qt/winit toolchain needed; GTK pulls its own C deps via `-sys`/pkg-config.
-
-### Threading notes (GTK)
-- GTK 4 is **single-threaded / not thread-safe**; no struct is `Send`/`Sync`.
-- Initialize on the main thread (`gtk::init()` or `Application::run` which does it).
-- All widget construction & mutation on the main thread. The existing refresh is already
-  main-thread (floem `exec_after`), so the `timeout_add` handler maps 1:1.
-- Any future async work must hop to the main loop via `glib::idle_add` /
-  `glib::MainContext::default().spawn_local`.
-
----
-
-## Open / follow-up (not blockers)
-1. **Project license:** add `license = "MIT OR Apache-2.0"` (or `BSD-3-Clause`) to
-   `Cargo.toml` + a `LICENSE` file (currently none is declared). Align with the intended
-   BSD-like choice before publishing.
-2. **Minimum GTK version to support:** pick the lowest GTK 4.x we target (e.g. 4.10
-   "LTS"-ish) and gate features with the matching `v4_10`/`v4_12` feature flags so the
-   binary runs on older distros.
-3. Keep all *presentation math* pure and unit-tested (the `render_usage_svg` pattern) so
-   that even the graph's numeric core stays testable independent of the Cairo drawing.
+## GTK invariants (still true post-migration)
+- GTK 4 is **single-threaded / not thread-safe**; no widget struct is `Send`/`Sync`.
+- All widget construction & mutation happens on the main thread; the refresh timer
+  (`glib::timeout_add`) fires on the main loop, and any future async work must hop back
+  via `glib::MainContext::default().spawn_local` or `glib::idle_add`.
+- The data layer stays framework-free and thread-agnostic (`metrics` parsers,
+  `cpu_tracker`, `process` core), so it is unit-testable with no GTK runtime.
