@@ -22,6 +22,17 @@ pub const MEM_RGB: (u8, u8, u8) = (33, 150, 243);
 pub const FREQ_RGB: (u8, u8, u8) = (171, 71, 189);
 /// RGB triplet (0–255) for the CPU-temperature series — red.
 pub const TEMP_RGB: (u8, u8, u8) = (229, 57, 53);
+/// RGB triplet (0–255) for the GPU-utilization series — green, shared with
+/// the CPU series so the "busy" colour stays consistent across the two
+/// tabs.
+pub const GPU_USE_RGB: (u8, u8, u8) = CPU_RGB;
+/// RGB triplet (0–255) for the GPU-VRAM series — blue, shared with the
+/// memory series for the same reason.
+pub const GPU_VRAM_RGB: (u8, u8, u8) = MEM_RGB;
+/// RGB triplet (0–255) for the GPU-temperature reading — same red used for
+/// the CPU-temperature series, so "temperature" reads the same colour
+/// regardless of which device it belongs to.
+pub const GPU_TEMP_RGB: (u8, u8, u8) = TEMP_RGB;
 /// Translucent fill alpha so overlapping series areas read as distinct bands.
 pub const FILL_ALPHA: f64 = 0.22;
 /// Line width of each series (in pixels at the draw-time scale). Thicker than
@@ -426,6 +437,14 @@ pub enum ChartPane {
     CpuMem,
     /// The CPU-frequency + temperature pane (MHz / °C series).
     FreqTemp,
+    /// The GPU utilization + VRAM pane (two percent series, 0–100%),
+    /// mirroring `CpuMem` but reading `gpu_use` and `gpu_vram` from the
+    /// [`Sample`] history.
+    GpuUseVram,
+    /// The GPU temperature pane (single °C series). Rendered with the
+    /// `GpuTemp` layout where both the left and right slot carry the same
+    /// reading so that the shared two-axis drawing path needs no change.
+    GpuTemp,
 }
 
 /// Configuration the chart needs to lay out its series, decoupled from the
@@ -509,6 +528,30 @@ pub fn cpu_mem_readout(cpu: f64, mem: f64, mem_max_mb: f64) -> String {
         "Cpu {cpu:.1}% \u{b7} Mem {}",
         gig_label(mem / 100.0 * mem_max_mb)
     )
+}
+
+/// The live readout for the GPU Use & VRAM pane header: `Use 12% · Vram 97%`.
+/// `use_pct`/`vram_pct` are percents (0–100) as stored in [`Sample`]; both
+/// are percents (not scaled to a byte axis) so the header is the literal
+/// `rocm-smi` values the user is looking at. `None` values (no GPU) read as
+/// `"-"` so a missing reading never reads as `0`.
+pub fn gpu_use_vram_readout(use_pct: Option<f64>, vram_pct: Option<f64>) -> String {
+    let use_lbl = use_pct
+        .map(|v| format!("{v:.0}%"))
+        .unwrap_or_else(|| "-".into());
+    let vram_lbl = vram_pct
+        .map(|v| format!("{v:.0}%"))
+        .unwrap_or_else(|| "-".into());
+    format!("Use {use_lbl} \u{b7} Vram {vram_lbl}")
+}
+
+/// The live readout for the GPU Temp pane header: `Temp 68.4 °C`. A `None`
+/// sensor reads as `"-"`.
+pub fn gpu_temp_readout(temp_c: Option<f64>) -> String {
+    let temp = temp_c
+        .map(|c| format!("{c:.1} °C"))
+        .unwrap_or_else(|| "-".into());
+    format!("Temp {temp}")
 }
 
 /// The live readout for the CPU Freq & Temp pane header:
@@ -655,14 +698,16 @@ pub fn paint_usage_chart(
     // `(min, max)` band that maps to the plot's bottom and top, axes on
     // opposite sides, one drawn in front of the other. Only *which* series is
     // on which side and the z-order differ per pane, so we pick them in the
-    // match and share the layout code below.
+    // match and share the layout code below. The right side may be `None`
+    // for a single-series pane (currently `GpuTemp`); in that case only the
+    // left axis + left series is drawn and the right gutter is zero.
     type Side = (
         Vec<Option<f64>>,
         (f64, f64),
         (u8, u8, u8),
         fn(f64) -> String,
     );
-    let (left, right, back_is_right): (Side, Side, bool) = match pane {
+    let (left, right, front_is_left): (Side, Option<Side>, bool) = match pane {
         // CpuMem: left = CPU (front, % axis 0–100); right = MEM (back, MB axis).
         // Both are 0-anchored: the CPU percent band and the RAM band (top = RAM).
         ChartPane::CpuMem => (
@@ -672,7 +717,7 @@ pub fn paint_usage_chart(
                 CPU_RGB,
                 axis_tick_percent,
             ),
-            (
+            Some((
                 samples
                     .iter()
                     .map(|s| Some(s.mem / 100.0 * cfg.mem_max_mb))
@@ -680,7 +725,7 @@ pub fn paint_usage_chart(
                 (0.0, cfg.mem_max_mb),
                 MEM_RGB,
                 axis_tick_mb,
-            ),
+            )),
             true,
         ),
         // FreqTemp: left = FREQ (back, MHz axis); right = TEMP (front, °C axis).
@@ -698,8 +743,31 @@ pub fn paint_usage_chart(
             let temp_dom = auto_domain(&temp, (0.0, 100.0), TEMP_MIN_SPAN, AUTO_DOMAIN_PAD);
             (
                 (freq, freq_dom, FREQ_RGB, axis_tick_mhz),
-                (temp, temp_dom, TEMP_RGB, axis_tick_celsius),
+                Some((temp, temp_dom, TEMP_RGB, axis_tick_celsius)),
                 false,
+            )
+        }
+        // GpuUseVram: left = GPU Use (front, % axis 0–100); right = GPU VRAM
+        // (back, % axis 0–100). Both are 0-anchored percents, exactly the
+        // `rocm-smi` numbers the user is looking at.
+        ChartPane::GpuUseVram => {
+            let use_vals: Vec<Option<f64>> = samples.iter().map(|s| s.gpu_use).collect();
+            let vram_vals: Vec<Option<f64>> = samples.iter().map(|s| s.gpu_vram).collect();
+            (
+                (use_vals, (0.0, 100.0), GPU_USE_RGB, axis_tick_percent),
+                Some((vram_vals, (0.0, 100.0), GPU_VRAM_RGB, axis_tick_percent)),
+                true,
+            )
+        }
+        // GpuTemp: single-series pane. The GPU reading auto-scales to the
+        // measured band (0–100 °C fallback when no sample has a reading).
+        ChartPane::GpuTemp => {
+            let temp: Vec<Option<f64>> = samples.iter().map(|s| s.gpu_temp).collect();
+            let temp_dom = auto_domain(&temp, (0.0, 100.0), TEMP_MIN_SPAN, AUTO_DOMAIN_PAD);
+            (
+                (temp, temp_dom, GPU_TEMP_RGB, axis_tick_celsius),
+                None,
+                true,
             )
         }
     };
@@ -713,26 +781,38 @@ pub fn paint_usage_chart(
         ]
     };
     let left_gutter = measure_gutter(ctx, &labels(&left));
-    let right_gutter = measure_gutter(ctx, &labels(&right));
+    let right_gutter = right
+        .as_ref()
+        .map(|r| measure_gutter(ctx, &labels(r)))
+        .unwrap_or(0.0);
     let plot = plot_rect(w, h, left_gutter, right_gutter);
     draw_gridlines(ctx, &plot);
-    let (back, front) = if back_is_right {
-        (&right, &left)
+    // Draw the back series first, the front over it. For a single-series pane
+    // (`right == None`) the left series is both the front and the back, so
+    // we draw it only once.
+    if let Some(r) = &right {
+        let (back, front) = if front_is_left {
+            (r, &left)
+        } else {
+            (&left, r)
+        };
+        draw_series(ctx, &plot, &back.0, cfg.fill, cfg.capacity, back.1, back.2);
+        draw_series(
+            ctx,
+            &plot,
+            &front.0,
+            cfg.fill,
+            cfg.capacity,
+            front.1,
+            front.2,
+        );
     } else {
-        (&left, &right)
-    };
-    draw_series(ctx, &plot, &back.0, cfg.fill, cfg.capacity, back.1, back.2);
-    draw_series(
-        ctx,
-        &plot,
-        &front.0,
-        cfg.fill,
-        cfg.capacity,
-        front.1,
-        front.2,
-    );
+        draw_series(ctx, &plot, &left.0, cfg.fill, cfg.capacity, left.1, left.2);
+    }
     draw_axis_ticks(ctx, &plot, left.1, left.2, left.3, AxisSide::Left);
-    draw_axis_ticks(ctx, &plot, right.1, right.2, right.3, AxisSide::Right);
+    if let Some(r) = &right {
+        draw_axis_ticks(ctx, &plot, r.1, r.2, r.3, AxisSide::Right);
+    }
 }
 
 #[cfg(test)]
@@ -936,6 +1016,29 @@ mod tests {
         #[case] expected: &str,
     ) {
         assert_eq!(freq_temp_readout(freq, temp), expected);
+    }
+
+    /// GPU Use/VRAM readout: both values are percents, no GB scaling; a
+    /// missing value renders as "-" rather than 0.
+    #[rstest]
+    #[case::both(Some(42.0), Some(97.0), "Use 42% \u{b7} Vram 97%")]
+    #[case::use_absent(None, Some(97.0), "Use - \u{b7} Vram 97%")]
+    #[case::vram_absent(Some(12.0), None, "Use 12% \u{b7} Vram -")]
+    #[case::neither(None, None, "Use - \u{b7} Vram -")]
+    fn test_gpu_use_vram_readout(
+        #[case] use_pct: Option<f64>,
+        #[case] vram_pct: Option<f64>,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(gpu_use_vram_readout(use_pct, vram_pct), expected);
+    }
+
+    /// GPU Temp readout: a °C label, "-" when the sensor is absent.
+    #[rstest]
+    #[case::present(Some(68.4), "Temp 68.4 \u{b0}C")]
+    #[case::absent(None, "Temp -")]
+    fn test_gpu_temp_readout(#[case] temp: Option<f64>, #[case] expected: &str) {
+        assert_eq!(gpu_temp_readout(temp), expected);
     }
 
     // ---- x/y mappings ---------------------------------------------------

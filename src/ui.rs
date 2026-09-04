@@ -291,6 +291,10 @@ fn build_graph_pane(
                     crate::usage_graph::cpu_mem_readout(last.cpu, last.mem, cfg.mem_max_mb)
                 }
                 ChartPane::FreqTemp => crate::usage_graph::freq_temp_readout(last.freq, last.temp),
+                ChartPane::GpuUseVram => {
+                    crate::usage_graph::gpu_use_vram_readout(last.gpu_use, last.gpu_vram)
+                }
+                ChartPane::GpuTemp => crate::usage_graph::gpu_temp_readout(last.gpu_temp),
             };
             header.set_text(&text);
         }
