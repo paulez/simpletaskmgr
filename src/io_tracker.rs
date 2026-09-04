@@ -135,37 +135,31 @@ mod tests {
         }
     }
 
-    /// A steady stream of 1024 read / 1536 write bytes per second.
-    #[test]
-    fn test_calculate_rates_steady_stream() {
-        let rates = IoTracker::calculate_rates(2048, 3072, baseline(0, 0, 1000.0), 1002.0);
-        assert_eq!(rates, Some((1024.0, 1536.0)));
-    }
-
-    /// No I/O between samples: both speeds zero, not unknown.
-    #[test]
-    fn test_calculate_rates_idle_process() {
-        let rates = IoTracker::calculate_rates(100, 200, baseline(100, 200, 1000.0), 1001.0);
-        assert_eq!(rates, Some((0.0, 0.0)));
-    }
-
-    /// A counter that decreased between samples (PID reuse) is detected, not
-    /// underflowed — regardless of whether it is the read or the write side.
+    /// `calculate_rates` = byte-delta / elapsed for each side over two samples.
+    /// Zero I/O yields `Some(0,0)` (not unknown); a counter that decreased
+    /// (PID reuse) or a non-positive elapsed time yields `None` (never a
+    /// borrow-checked underflow or divide by <= 0).
     #[rstest]
-    #[case::read_decreased(5, 10)]
-    #[case::write_decreased(999, 10)]
-    fn test_calculate_rates_pid_reuse_returns_none(#[case] new_read: u64, #[case] new_write: u64) {
-        let rates =
-            IoTracker::calculate_rates(new_read, new_write, baseline(100, 200, 1000.0), 1001.0);
-        assert_eq!(rates, None);
-    }
-
-    /// A non-positive time delta cannot yield a rate.
-    #[test]
-    fn test_calculate_rates_zero_time_delta_returns_none() {
-        let last = baseline(0, 0, 1000.0);
-        assert_eq!(IoTracker::calculate_rates(4096, 4096, last, 1000.0), None);
-        assert_eq!(IoTracker::calculate_rates(4096, 4096, last, 999.0), None);
+    #[case::steady_stream(0, 0, 1000.0, 2048, 3072, 1002.0, Some((1024.0, 1536.0)))]
+    #[case::idle_process(100, 200, 1000.0, 100, 200, 1001.0, Some((0.0, 0.0)))]
+    #[case::read_decreased(100, 200, 1000.0, 5, 10, 1001.0, None)]
+    #[case::write_decreased(100, 200, 1000.0, 999, 10, 1001.0, None)]
+    #[case::zero_elapsed(0, 0, 1000.0, 4096, 4096, 1000.0, None)]
+    #[case::negative_elapsed(0, 0, 1000.0, 4096, 4096, 999.0, None)]
+    fn test_calculate_rates(
+        #[case] last_read: u64,
+        #[case] last_write: u64,
+        #[case] last_ts: f64,
+        #[case] new_read: u64,
+        #[case] new_write: u64,
+        #[case] now_ts: f64,
+        #[case] expected: Option<(f64, f64)>,
+    ) {
+        let last = baseline(last_read, last_write, last_ts);
+        assert_eq!(
+            IoTracker::calculate_rates(new_read, new_write, last, now_ts),
+            expected
+        );
     }
 
     /// A newly-seen PID records a baseline and reports unknown speeds: a rate
