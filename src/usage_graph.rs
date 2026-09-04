@@ -88,8 +88,12 @@ fn iter_some_runs(values: &[Option<f64>]) -> Vec<std::ops::Range<usize>> {
 /// `fill` is the number of samples that span the full width at the end of the
 /// warm-up (≈ 10 s at the default 1.5 s refresh); `capacity` is the steady
 /// rolling-window width in samples (≈ 3 min at that cadence — the `MAX_HISTORY`
-/// cap the deque enforces). All output is clamped to `[0, w]` so an over-capacity
-/// history never spills past the left edge.
+/// cap the deque enforces). The newest sample is always at `w`; each older
+/// sample sits one slot to its left and reports a **negative** x once its slot
+/// offset exceeds `w` (it has scrolled off the left edge). The painter clips
+/// those off-edge samples to the plot rectangle — it must **not** clamp them
+/// onto the left edge, because that would stack the entire stale history into
+/// a single vertical line at `x = 0`.
 pub fn sample_x(i: usize, n: usize, fill: usize, capacity: usize, w: f64) -> f64 {
     if n == 0 {
         return 0.0;
@@ -111,7 +115,12 @@ pub fn sample_x(i: usize, n: usize, fill: usize, capacity: usize, w: f64) -> f64
     let t = ((n - fill) as f64 / ramp as f64).clamp(0.0, 1.0);
     let slot = warm_slot + t * (steady_slot - warm_slot);
     let steps_back = (n - 1 - i) as f64;
-    (w - steps_back * slot).clamp(0.0, w.max(0.0))
+    // No low clamp: once a sample's slot offset exceeds `w` it has scrolled off
+    // the left edge and reports a negative x. The painter (`draw_series`) clips
+    // the series to the plot rectangle and so discards these; clamping them to
+    // `0.0` here would instead stack the whole stale history into a vertical
+    // line at the left edge.
+    w - steps_back * slot
 }
 
 /// Maps a value in `0..=domain_max` to a normalized y position (0..=1) where
@@ -253,6 +262,16 @@ fn draw_series(
     let bottom = plot.oy + plot.h;
     for run in &runs {
         let (a, z) = (run.start, run.end);
+        // Clip the series body to the plot rectangle. `sample_x` reports a
+        // negative x for samples that have scrolled off the left edge during
+        // the settle/scroll ramp, so without a clip those segments would paint
+        // into the left gutter (and, before the fix, clamp into a vertical line
+        // at the left edge). The clip discards them so the trace fades out as
+        // it reaches the left edge.
+        let _ = ctx.save();
+        ctx.new_path();
+        ctx.rectangle(plot.ox, plot.oy, plot.w, plot.h);
+        ctx.clip();
         // 1) Area fill (low alpha) from the plot bottom up to the run's
         //    curve.
         ctx.new_path();
@@ -274,6 +293,7 @@ fn draw_series(
         ctx.set_source_rgb(r, g, b);
         ctx.set_line_width(LINE_WIDTH);
         let _ = ctx.stroke();
+        let _ = ctx.restore();
     }
     // 3) "Latest sample" marker on the newest run (the run ending at n-1),
     //    so the "now" value stays visible even before a second sample
@@ -883,19 +903,21 @@ mod tests {
                 (sample_x(n - 1, n, FILL, CAP, w) - w).abs() < 1e-9,
                 "newest of {n} settles to the right edge"
             );
-            // The window spans a growing time span: the oldest visible sample
-            // walks leftward as the slot compresses.
+            // The window spans a growing time span: the oldest sample reports a
+            // negative x once it scrolls off the left edge (the painter clips it),
+            // rather than clamping to the left edge where a cluster would stack.
             let x_oldest = sample_x(0, n, FILL, CAP, w);
             assert!(
-                (0.0..=w).contains(&x_oldest),
-                "n={n}: oldest stays in-bounds while the window stretches"
+                x_oldest <= w,
+                "n={n}: oldest x stays at or off the left edge (may be negative)"
             );
         }
-        // At the steady window the full capacity of samples spans the width.
-        assert_eq!(
-            sample_x(0, CAP, FILL, CAP, w),
-            0.0,
-            "oldest of a full window sits on the left edge"
+        // At the steady window the full capacity of samples spans the width
+        // (a float hair past 0 is fine: at the boundary the oldest just scrolls
+        // off the edge).
+        assert!(
+            (sample_x(0, CAP, FILL, CAP, w) - 0.0).abs() < 1e-6,
+            "oldest of a full window sits on (or off) the left edge"
         );
         assert_eq!(
             sample_x(CAP - 1, CAP, FILL, CAP, w),
@@ -905,17 +927,30 @@ mod tests {
     }
 
     #[test]
-    fn test_sample_x_scroll_clamps_within_bounds() {
-        // Beyond capacity (a history over cap) must not spill past the left
-        // edge: the oldest visible samples clamp to 0 and the newest to w.
+    fn test_sample_x_scroll_offs_the_left_edge() {
+        // Beyond capacity, samples that sit more than `w` behind the newest have
+        // scrolled off the left edge: `sample_x` reports a negative x for them
+        // (the painter clips them away) instead of clamping them onto the left
+        // edge, where the whole stale history would stack into one vertical line.
+        // The newest stays pinned to the right edge and the left half is in-bounds.
         let w = 400.0;
         for n in CAP..=CAP + 50 {
             for i in 0..n {
                 let x = sample_x(i, n, FILL, CAP, w);
-                assert!((0.0..=w).contains(&x), "n={n} i={i}: in [0, {w}]");
+                assert!(
+                    x <= w && x > -w * 2.0,
+                    "n={n} i={i}: x in (-{w2}, {w}] (negative = off the left edge)",
+                    w2 = w * 2.0
+                );
             }
-            assert!((sample_x(n - 1, n, FILL, CAP, w) - w).abs() < 1e-9);
-            assert!(sample_x(0, n, FILL, CAP, w) < 1e-9);
+            assert!(
+                (sample_x(n - 1, n, FILL, CAP, w) - w).abs() < 1e-9,
+                "newest at the right edge"
+            );
+            // At least the left half of the window is still in-bounds (the newest
+            // samples), so the trace still reaches the left edge rather than
+            // vanishing entirely.
+            assert!(sample_x(n / 2, n, FILL, CAP, w) >= 0.0);
         }
     }
 
