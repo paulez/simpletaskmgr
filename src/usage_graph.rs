@@ -626,6 +626,7 @@ pub fn paint_usage_chart(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn sample(v: f64) -> Sample {
         Sample {
@@ -698,24 +699,46 @@ mod tests {
 
     // ---- axis-tick labels ---------------------------------------------
 
-    #[test]
-    fn test_axis_tick_percent_format() {
-        assert_eq!(axis_tick_percent(100.0), "100%");
-        assert_eq!(axis_tick_percent(25.0), "25%");
-        assert_eq!(axis_tick_percent(0.0), "0%");
-        assert_eq!(axis_tick_percent(50.0), "50%");
+    /// Percent-axis tick labels: whole percentages, no unit separator.
+    #[rstest]
+    #[case::hundred(100.0, "100%")]
+    #[case::fifty(50.0, "50%")]
+    #[case::twentyfive(25.0, "25%")]
+    #[case::zero(0.0, "0%")]
+    fn test_axis_tick_percent(#[case] value: f64, #[case] expected: &str) {
+        assert_eq!(axis_tick_percent(value), expected);
     }
 
-    #[test]
-    fn test_axis_tick_mb_format() {
-        // A clean GiB multiple switches to GB.
-        assert_eq!(axis_tick_mb(16384.0), "16 GB");
-        assert_eq!(axis_tick_mb(2048.0), "2 GB");
-        // An odd MB value stays in MB (not a fractional GB).
-        assert_eq!(axis_tick_mb(4096.0), "4 GB");
-        assert_eq!(axis_tick_mb(1536.0), "1536 MB");
-        assert_eq!(axis_tick_mb(512.0), "512 MB");
-        assert_eq!(axis_tick_mb(0.0), "0 MB");
+    /// MB-axis tick labels switch to GB at whole-gig multiples.
+    #[rstest]
+    #[case::sixteen_gib(16384.0, "16 GB")]
+    #[case::two_gib(2048.0, "2 GB")]
+    #[case::four_gib(4096.0, "4 GB")]
+    #[case::odd_mb(1536.0, "1536 MB")]
+    #[case::sub_gib_mb(512.0, "512 MB")]
+    #[case::zero(0.0, "0 MB")]
+    fn test_axis_tick_mb(#[case] mb: f64, #[case] expected: &str) {
+        assert_eq!(axis_tick_mb(mb), expected);
+    }
+
+    /// MHz-axis tick labels render 1000+ as GHz.
+    #[rstest]
+    #[case::four_ghz(4000.0, "4 GHz")]
+    #[case::two_ghz(2000.0, "2 GHz")]
+    #[case::one_and_half_ghz(1500.0, "1.5 GHz")]
+    #[case::sub_ghz(550.0, "550 MHz")]
+    #[case::zero(0.0, "0 MHz")]
+    fn test_axis_tick_mhz(#[case] mhz: f64, #[case] expected: &str) {
+        assert_eq!(axis_tick_mhz(mhz), expected);
+    }
+
+    /// Celsius-axis tick labels.
+    #[rstest]
+    #[case::top(100.0, "100 °C")]
+    #[case::mid(50.0, "50 °C")]
+    #[case::zero(0.0, "0 °C")]
+    fn test_axis_tick_celsius(#[case] celsius: f64, #[case] expected: &str) {
+        assert_eq!(axis_tick_celsius(celsius), expected);
     }
 
     #[test]
@@ -749,39 +772,39 @@ mod tests {
 
     // ---- pane-header live readouts -------------------------------------
 
-    #[test]
-    fn test_cpu_mem_readout_format() {
-        // 24% of 64 GB = 15.36 GB, shown to one decimal.
-        assert_eq!(
-            cpu_mem_readout(4.5, 24.0, 65536.0),
-            "Cpu 4.5% \u{b7} Mem 15.4 GB"
-        );
-        // Sub-gigabyte memory amounts fall back to megabytes.
-        assert_eq!(cpu_mem_readout(0.0, 5.0, 100.0), "Cpu 0.0% \u{b7} Mem 5 MB");
+    /// `gig_label` formats a GiB-multiple as GB and everything else as MB.
+    #[rstest]
+    #[case::one_and_half_gib(1536.0, "1.5 GB")]
+    #[case::sub_gib(512.0, "512 MB")]
+    #[case::sixtyfour_gib(65536.0, "64.0 GB")]
+    fn test_gig_label(#[case] mb: f64, #[case] expected: &str) {
+        assert_eq!(gig_label(mb), expected);
     }
 
-    #[test]
-    fn test_freq_temp_readout_present_and_absent() {
-        assert_eq!(
-            freq_temp_readout(Some(3700.0), Some(56.0)),
-            "Freq 3.7 GHz \u{b7} Temp 56 \u{b0}C"
-        );
-        // A missing sensor reads as "-" instead of "0".
-        assert_eq!(
-            freq_temp_readout(None, Some(56.0)),
-            "Freq - \u{b7} Temp 56 \u{b0}C"
-        );
-        assert_eq!(
-            freq_temp_readout(Some(550.0), None),
-            "Freq 550 MHz \u{b7} Temp -"
-        );
+    /// Pane-header live readout: "Cpu x% · Mem y" with sub-GiB fallback to MB.
+    #[rstest]
+    #[case::gig(4.5, 24.0, 65536.0, "Cpu 4.5% \u{b7} Mem 15.4 GB")]
+    #[case::mbytes(0.0, 5.0, 100.0, "Cpu 0.0% \u{b7} Mem 5 MB")]
+    fn test_cpu_mem_readout(
+        #[case] cpu: f64,
+        #[case] mem_percent: f64,
+        #[case] mem_max_mb: f64,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(cpu_mem_readout(cpu, mem_percent, mem_max_mb), expected);
     }
 
-    #[test]
-    fn test_gig_label_mb_and_gb() {
-        assert_eq!(gig_label(1536.0), "1.5 GB");
-        assert_eq!(gig_label(512.0), "512 MB");
-        assert_eq!(gig_label(65536.0), "64.0 GB");
+    /// Freq/Temp readout: a missing sensor renders as "-" rather than "0".
+    #[rstest]
+    #[case::present(Some(3700.0), Some(56.0), "Freq 3.7 GHz \u{b7} Temp 56 \u{b0}C")]
+    #[case::freq_absent(None, Some(56.0), "Freq - \u{b7} Temp 56 \u{b0}C")]
+    #[case::temp_absent(Some(550.0), None, "Freq 550 MHz \u{b7} Temp -")]
+    fn test_freq_temp_readout(
+        #[case] freq: Option<f64>,
+        #[case] temp: Option<f64>,
+        #[case] expected: &str,
+    ) {
+        assert_eq!(freq_temp_readout(freq, temp), expected);
     }
 
     // ---- x/y mappings ---------------------------------------------------
