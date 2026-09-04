@@ -36,6 +36,19 @@ const GRID_ALPHA: f64 = 0.28;
 const GRID_RGB: (f64, f64, f64) = (0.55, 0.55, 0.55);
 const BASELINE_RGB: (f64, f64, f64) = (0.42, 0.42, 0.42);
 
+/// Fraction of the measured span padded above the max and below the min of the
+/// auto-scaled sensor axes (temperature + frequency), so the trace does not
+/// hug the top/bottom edges of the plot. Kept off the series it applies to so
+/// the fixed 0-anchored percent/MB axes are never padded.
+const AUTO_DOMAIN_PAD: f64 = 0.10;
+/// Minimum span (°C) the auto-scaled temperature axis will show, applied as a
+/// floor to the span before padding when the measured range is smaller. Keeps
+/// a near-constant reading from collapsing into a flat line with no context.
+const TEMP_MIN_SPAN: f64 = 15.0;
+/// Minimum span (MHz) the auto-scaled frequency axis will show, applied the
+/// same way as [`TEMP_MIN_SPAN`].
+const FREQ_MIN_SPAN: f64 = 500.0;
+
 /// Vertical padding above the plot, reserved for the topmost tick label so
 /// the max-value label is never clipped by the widget edge. (The pane title
 /// is rendered by a GTK label above the drawing area in `ui.rs`, so it does
@@ -155,6 +168,83 @@ pub fn sample_y_frac(value: f64) -> f64 {
     frac_of(value, 100.0)
 }
 
+/// Maps a value inside a measured `(min, max)` band to a normalized y
+/// position (0..=1), where `min` is the bottom (y=1) and `max` the top (y=0).
+/// Values are clamped to the band so they never spill off the chart.
+///
+/// This is the generalization of [`frac_of`] for axes that are not anchored
+/// at zero: the auto-scaled temperature and frequency panes pass their
+/// measured `(min, max)` so a 50–85 °C trace spans the full height rather
+/// than sitting in the middle of a 0–100 °C axis. A degenerate `min == max`
+/// maps everything to the bottom (a guard against a zero-span divisor), and a
+/// `max < min` (misused) also resolves to the bottom.
+pub fn frac_range(value: f64, min: f64, max: f64) -> f64 {
+    if max <= min {
+        return 1.0;
+    }
+    1.0 - ((value - min) / (max - min)).clamp(0.0, 1.0)
+}
+
+/// Computes the auto-scaled `(min, max)` domain for a hardware-sensor axis
+/// (temperature or frequency) from its measured samples.
+///
+/// The intent is to zoom the axis to the band the sensor is actually reading
+/// (e.g. 50–85 °C) so the trace spans the full pane height, rather than
+/// sitting in the middle of a fixed 0-anchored axis. The three inputs shape
+/// the result:
+///
+/// * **No measured values** (`values` all `None`, e.g. no sensor): the
+///   `fallback` band is returned verbatim. This is where the "sensor present
+///   but unknown" anchor lives — `0–100 °C` for temperature, the
+///   `scaling_max_freq` ceiling for frequency.
+/// * **`min_span` floor**: the span `max - min` is at least `min_span`, so a
+///   near-constant reading (an idle CPU pinned at 52 °C) does not collapse to
+///   a flat line. The band is widened symmetrically around the measured min
+///   and max.
+/// * **`pad_frac` headroom**: once the span is finalized, both ends are padded
+///   by `pad_frac * span` so the trace does not touch the top/bottom plot
+///   edges. Padding is applied *after* the `min_span` floor so a constant
+///   reading still reads as a band, not a dot.
+///
+/// A negative measured value (a sensor glitch below 0 °C) is clamped so the
+/// domain never runs backwards. Returned with `max > min` guaranteed.
+pub fn auto_domain(
+    values: &[Option<f64>],
+    fallback: (f64, f64),
+    min_span: f64,
+    pad_frac: f64,
+) -> (f64, f64) {
+    // The floor applies only when the measured band is narrower than the floor;
+    // the band is then widened around the measured extremes.
+    let (measured_min, measured_max) = {
+        let mut lo: Option<f64> = None;
+        let mut hi: Option<f64> = None;
+        for x in values.iter().flatten() {
+            lo = Some(lo.map_or(*x, |p| p.min(*x)));
+            hi = Some(hi.map_or(*x, |p| p.max(*x)));
+        }
+        match (lo, hi) {
+            (Some(l), Some(h)) => (l, h),
+            _ => return fallback,
+        }
+    };
+
+    let (lo, hi) = {
+        let width = (measured_max - measured_min).max(0.0).max(min_span);
+        // Center the `min_span`-wide band on the measured midpoint so the floor
+        // widens the band symmetrically instead of only pulling one end down.
+        let mid = (measured_min + measured_max) / 2.0;
+        (mid - width / 2.0, mid + width / 2.0)
+    };
+
+    // Headroom padding: push both ends out so the trace clears the plot edges.
+    let span = (hi - lo).max(0.0);
+    let pad = pad_frac * span;
+    let min = lo - pad;
+    let max = hi + pad;
+    (min.clamp(0.0, max), max)
+}
+
 /// The inner drawable rectangle of a pane. Everything outside (title band,
 /// top padding band, label gutters) is reserved chrome so the series and the
 /// axis labels never overlap.
@@ -243,17 +333,18 @@ fn draw_gridlines(ctx: &Context, plot: &Plot) {
 /// `capacity`-slot window.
 ///
 /// `values[i] = None` leaves a blank gap at that x (the run before and after
-/// it is drawn as its own connected path). `domain_max` is the value that
-/// maps to the top of the plot — each series passes its own domain
-/// (`100.0` for the percent series, the freq ceiling for the frequency
-/// series), so a series on a different scale still reads as a normal curve.
+/// it is drawn as its own connected path). `domain` is the `(min, max)` band
+/// that maps to the plot's bottom (`min`, y = plot bottom) and top (`max`,
+/// y = plot top): each series passes its own band (`0–100` for the percent
+/// series, the measured temperature/frequency band for the sensor series), so
+/// a series on a different scale still reads as a normal curve.
 fn draw_series(
     ctx: &Context,
     plot: &Plot,
     values: &[Option<f64>],
     fill: usize,
     capacity: usize,
-    domain_max: f64,
+    domain: (f64, f64),
     rgb: (u8, u8, u8),
 ) {
     if plot.w <= 0.0 || plot.h <= 0.0 {
@@ -263,7 +354,8 @@ fn draw_series(
     let n = values.len();
     let (r, g, b) = rgb_to_f64(rgb);
     let x_at = |i: usize| plot.ox + sample_x(i, n, fill, capacity, plot.w);
-    let y_at = |i: usize| plot.oy + frac_of(values[i].unwrap_or(0.0), domain_max) * plot.h;
+    let y_at =
+        |i: usize| plot.oy + frac_range(values[i].unwrap_or(0.0), domain.0, domain.1) * plot.h;
     let bottom = plot.oy + plot.h;
     for run in &runs {
         let (a, z) = (run.start, run.end);
@@ -441,18 +533,20 @@ pub fn axis_tick_mb(mb: f64) -> String {
     }
 }
 
-/// The three tick rows for a chart of a given domain — the domain top, the
-/// midpoint, and the bottom (0) — returned as `(fraction, label)` pairs where
+/// The three tick rows for a chart with a measured `(min, max)` band — the top,
+/// the midpoint, and the bottom — returned as `(fraction, label)` pairs where
 /// `fraction` is the normalized y offset (0 = top, 1 = bottom) within the
-/// plot.
-fn axis_ticks(domain_max: f64, format: fn(f64) -> String) -> Vec<(f64, String)> {
+/// plot. The top/bottom labels are the exact band edges and the midpoint label
+/// is their average, so an auto-scaled axis (e.g. a 40–90 °C band) reads as a
+/// real range rather than 0–100.
+fn axis_range_ticks(min: f64, max: f64, format: fn(f64) -> String) -> Vec<(f64, String)> {
     vec![
-        (frac_of(domain_max, domain_max), format(domain_max)),
+        (frac_range(max, min, max), format(max)),
         (
-            frac_of(domain_max * 0.5, domain_max),
-            format(domain_max * 0.5),
+            frac_range((min + max) / 2.0, min, max),
+            format((min + max) / 2.0),
         ),
-        (frac_of(0.0, domain_max), format(0.0)),
+        (frac_range(min, min, max), format(min)),
     ]
 }
 
@@ -470,7 +564,7 @@ enum AxisSide {
 fn draw_axis_ticks(
     ctx: &Context,
     plot: &Plot,
-    domain_max: f64,
+    domain: (f64, f64),
     rgb: (u8, u8, u8),
     label: fn(f64) -> String,
     side: AxisSide,
@@ -479,7 +573,7 @@ fn draw_axis_ticks(
         return;
     }
     let (r, g, b) = rgb_to_f64(rgb);
-    for (frac, text) in axis_ticks(domain_max, label) {
+    for (frac, text) in axis_range_ticks(domain.0, domain.1, label) {
         let y = plot.oy + frac * plot.h;
         let width = ctx.text_extents(&text).map(|e| e.width()).unwrap_or(0.0);
         let x = match side {
@@ -528,8 +622,12 @@ fn draw_axis_ticks(
 ///   pane) so a 10 GB / 16 GB trace reads near the top rather than 63% of the
 ///   way down.
 /// * [`ChartPane::FreqTemp`] — a left MHz axis (purple-tinted) + a right °C
-///   axis (red-tinted), and frequency (purple, domain `cfg.freq_max_mhz`) +
-///   temperature (red, 0–100 °C) series.
+///   axis (red-tinted), and frequency (purple) + temperature (red) series,
+///   each on its own **auto-scaled** axis zoomed to the measured band so a
+///   CPU idling at 50–85 °C spans the full pane height instead of sitting in
+///   the middle of a fixed 0–100 °C axis. When a sensor is absent (all samples
+///   `None`) the axis falls back to `0–` the series-wide ceiling (`cfg.freq_max_mhz`
+///   for MHz, `100 °C` for temperature).
 ///
 /// A series whose samples are all `None` (no sensor) is skipped. An empty
 /// history paints a blank, valid chart.
@@ -553,17 +651,24 @@ pub fn paint_usage_chart(
     // without crowding the narrow plot — 9pt read as thin/faint on screen.
     ctx.set_font_size(10.0);
     // Both panes are the same dual-axis layout: a left and a right series,
-    // each with its own `(values, domain, rgb, tick_fn)`, axes on opposite
-    // sides, one drawn in front of the other. Only *which* series is on
-    // which side and the z-order differ per pane, so we pick them in the
+    // each with its own `(values, domain, rgb, tick_fn)` where `domain` is the
+    // `(min, max)` band that maps to the plot's bottom and top, axes on
+    // opposite sides, one drawn in front of the other. Only *which* series is
+    // on which side and the z-order differ per pane, so we pick them in the
     // match and share the layout code below.
-    type Side = (Vec<Option<f64>>, f64, (u8, u8, u8), fn(f64) -> String);
+    type Side = (
+        Vec<Option<f64>>,
+        (f64, f64),
+        (u8, u8, u8),
+        fn(f64) -> String,
+    );
     let (left, right, back_is_right): (Side, Side, bool) = match pane {
         // CpuMem: left = CPU (front, % axis 0–100); right = MEM (back, MB axis).
+        // Both are 0-anchored: the CPU percent band and the RAM band (top = RAM).
         ChartPane::CpuMem => (
             (
                 samples.iter().map(|s| Some(s.cpu)).collect(),
-                100.0,
+                (0.0, 100.0),
                 CPU_RGB,
                 axis_tick_percent,
             ),
@@ -572,33 +677,40 @@ pub fn paint_usage_chart(
                     .iter()
                     .map(|s| Some(s.mem / 100.0 * cfg.mem_max_mb))
                     .collect(),
-                cfg.mem_max_mb,
+                (0.0, cfg.mem_max_mb),
                 MEM_RGB,
                 axis_tick_mb,
             ),
             true,
         ),
         // FreqTemp: left = FREQ (back, MHz axis); right = TEMP (front, °C axis).
-        ChartPane::FreqTemp => (
+        // Both are auto-scaled to the measured band (zooming to the live range)
+        // with a fallback band (freq ceiling / 0–100 °C) when a sensor is absent.
+        ChartPane::FreqTemp => {
+            let freq: Vec<Option<f64>> = samples.iter().map(|s| s.freq).collect();
+            let temp: Vec<Option<f64>> = samples.iter().map(|s| s.temp).collect();
+            let freq_dom = auto_domain(
+                &freq,
+                (0.0, cfg.freq_max_mhz),
+                FREQ_MIN_SPAN,
+                AUTO_DOMAIN_PAD,
+            );
+            let temp_dom = auto_domain(&temp, (0.0, 100.0), TEMP_MIN_SPAN, AUTO_DOMAIN_PAD);
             (
-                samples.iter().map(|s| s.freq).collect(),
-                cfg.freq_max_mhz,
-                FREQ_RGB,
-                axis_tick_mhz,
-            ),
-            (
-                samples.iter().map(|s| s.temp).collect(),
-                100.0,
-                TEMP_RGB,
-                axis_tick_celsius,
-            ),
-            false,
-        ),
+                (freq, freq_dom, FREQ_RGB, axis_tick_mhz),
+                (temp, temp_dom, TEMP_RGB, axis_tick_celsius),
+                false,
+            )
+        }
     };
     let labels = |s: &Side| {
         let tick: fn(f64) -> String = s.3;
-        let dom: f64 = s.1;
-        [tick(dom), tick(dom / 2.0), tick(0.0)]
+        let (dom_min, dom_max) = s.1;
+        [
+            tick(dom_max),
+            tick((dom_min + dom_max) / 2.0),
+            tick(dom_min),
+        ]
     };
     let left_gutter = measure_gutter(ctx, &labels(&left));
     let right_gutter = measure_gutter(ctx, &labels(&right));
@@ -741,9 +853,12 @@ mod tests {
         assert_eq!(axis_tick_celsius(celsius), expected);
     }
 
+    /// A 0-anchored band yields the same top/mid/bottom fractions as the old
+    /// 0-anchored axis, with the top/bottom/mid labels at max / (min+max)/2 /
+    /// min — here `4 GHz`, `2 GHz`, `0 MHz`.
     #[test]
-    fn test_axis_ticks_three_rows_evenly_spread() {
-        let ticks = axis_ticks(4000.0, axis_tick_mhz);
+    fn test_axis_range_ticks_zero_anchored() {
+        let ticks = axis_range_ticks(0.0, 4000.0, axis_tick_mhz);
         assert_eq!(ticks.len(), 3);
         assert_eq!(ticks[0].0, 0.0, "top tick at the ceiling");
         assert_eq!(ticks[1].0, 0.5, "midpoint tick sits half-way down");
@@ -753,9 +868,22 @@ mod tests {
         assert_eq!(ticks[2].1, "0 MHz");
     }
 
+    /// A non-zero band (e.g. an auto-scaled 40–70 °C reading) labels the exact
+    /// band edges and their average, keeping the top/mid/bottom at 0/0.5/1.
     #[test]
-    fn test_axis_tick_celsius_format() {
-        let ticks = axis_ticks(100.0, axis_tick_celsius);
+    fn test_axis_range_ticks_nonzero_band() {
+        let ticks = axis_range_ticks(40.0, 70.0, axis_tick_celsius);
+        assert_eq!(ticks[0].0, 0.0);
+        assert_eq!(ticks[1].0, 0.5);
+        assert_eq!(ticks[2].0, 1.0);
+        assert_eq!(ticks[0].1, "70 °C");
+        assert_eq!(ticks[1].1, "55 °C");
+        assert_eq!(ticks[2].1, "40 °C");
+    }
+
+    #[test]
+    fn test_axis_range_celsius_zero_anchored() {
+        let ticks = axis_range_ticks(0.0, 100.0, axis_tick_celsius);
         assert_eq!(ticks[0].1, "100 °C");
         assert_eq!(ticks[1].1, "50 °C");
         assert_eq!(ticks[2].1, "0 °C");
@@ -957,6 +1085,131 @@ mod tests {
         assert_eq!(frac_of(-10.0, 4000.0), 1.0, "under-domain clamps to bottom");
         assert_eq!(frac_of(500.0, 0.0), 1.0, "zero domain -> bottom");
         assert!((sample_y_frac(50.0) - frac_of(50.0, 100.0)).abs() < 1e-9);
+    }
+
+    // ---- measured-band mapping (frac_range + auto_domain) ---------------
+
+    #[test]
+    fn test_frac_range_maps_min_max_and_clamps() {
+        // min is the bottom (y=1), max is the top (y=0).
+        assert_eq!(frac_range(20.0, 20.0, 120.0), 1.0, "min maps to the bottom");
+        assert_eq!(frac_range(120.0, 20.0, 120.0), 0.0, "max maps to the top");
+        assert!(
+            (frac_range(70.0, 20.0, 120.0) - 0.5).abs() < 1e-9,
+            "midpoint"
+        );
+        // Out of band clamps to the edges rather than spilling off the plot.
+        assert_eq!(
+            frac_range(200.0, 20.0, 120.0),
+            0.0,
+            "over-band clamps to top"
+        );
+        assert_eq!(
+            frac_range(-5.0, 20.0, 120.0),
+            1.0,
+            "under-band clamps to bottom"
+        );
+        // A degenerate band (min == max) must not divide by zero -> bottom.
+        assert_eq!(
+            frac_range(50.0, 50.0, 50.0),
+            1.0,
+            "zero-span band -> bottom"
+        );
+    }
+
+    #[test]
+    fn test_auto_domain_no_samples_falls_back() {
+        // All `None` (no sensor present): the fallback band is returned intact,
+        // so an absent frequency still anchors to the `scaling_max_freq`
+        // ceiling and an absent temperature to 100 °C.
+        let none: Vec<Option<f64>> = vec![None, None, None];
+        assert_eq!(
+            auto_domain(&none, (0.0, 4000.0), FREQ_MIN_SPAN, AUTO_DOMAIN_PAD),
+            (0.0, 4000.0),
+            "freq fallback is returned verbatim"
+        );
+        assert_eq!(
+            auto_domain(&none, (0.0, 100.0), TEMP_MIN_SPAN, AUTO_DOMAIN_PAD),
+            (0.0, 100.0),
+            "temp fallback is returned verbatim"
+        );
+        assert_eq!(
+            auto_domain(&Vec::new(), (0.0, 100.0), TEMP_MIN_SPAN, AUTO_DOMAIN_PAD),
+            (0.0, 100.0),
+            "empty history falls back too"
+        );
+    }
+
+    #[test]
+    fn test_auto_domain_zooms_to_measured_band_with_padding() {
+        // A 50–85 °C reading should yield a band that contains the measured
+        // extremes with the `pad` headroom on each side (so the trace clears
+        // the top/bottom plot edges). The band is `[lo - pad, hi + pad]` where
+        // `pad = pad_frac * max(hi - lo, min_span)`.
+        let temps: Vec<Option<f64>> = vec![Some(50.0), Some(58.0), Some(85.0), Some(80.0)];
+        let (min, max) = auto_domain(&temps, (0.0, 100.0), TEMP_MIN_SPAN, AUTO_DOMAIN_PAD);
+        let (lo, hi) = (50.0, 85.0);
+        assert!(
+            min <= lo && max >= hi,
+            "band [{min}, {max}] must contain the measured [{lo}, {hi}]"
+        );
+        let width = (hi - lo).max(TEMP_MIN_SPAN);
+        let pad = AUTO_DOMAIN_PAD * width;
+        assert!(
+            (min - (lo - pad)).abs() < 1e-9,
+            "min {min} == lo {lo} minus pad {pad}"
+        );
+        assert!(
+            (max - (hi + pad)).abs() < 1e-9,
+            "max {max} == hi {hi} plus pad {pad}"
+        );
+        assert!(max > min, "band must be non-degenerate");
+    }
+
+    #[test]
+    fn test_auto_domain_constant_floors_to_min_span() {
+        // A near-constant reading (85,85) must not collapse: the band widens to
+        // at least `min_span` around the value, then gains the pad on each side.
+        let temps: Vec<Option<f64>> = vec![Some(85.0), Some(85.0)];
+        let (min, max) = auto_domain(&temps, (0.0, 100.0), TEMP_MIN_SPAN, AUTO_DOMAIN_PAD);
+        let span = max - min;
+        assert!(
+            span >= TEMP_MIN_SPAN,
+            "span {span} must be >= the {floor} °C floor",
+            floor = TEMP_MIN_SPAN
+        );
+        // Both ends contain the measured value.
+        assert!(min <= 85.0 && max >= 85.0, "value must sit inside the band");
+        assert!(
+            max > min,
+            "constant reading must still have a non-zero span"
+        );
+    }
+
+    #[test]
+    fn test_auto_domain_single_sample_floor() {
+        // A lone sample below the floor still yields a band of at least the
+        // min span (floored) plus pad, and never inverts.
+        let one: Vec<Option<f64>> = vec![Some(10.0)];
+        let (min, max) = auto_domain(&one, (0.0, 100.0), TEMP_MIN_SPAN, AUTO_DOMAIN_PAD);
+        assert!(
+            max > min,
+            "a single sample must produce a non-degenerate band"
+        );
+        assert!(min >= 0.0, "band must not run below zero after clamping");
+    }
+
+    #[test]
+    fn test_auto_domain_mixed_none_values() {
+        // `None` entries (sensor gaps) are ignored; present values still drive
+        // the band. The band reflects the observed range of the good readings.
+        let v: Vec<Option<f64>> = vec![Some(40.0), None, Some(90.0), None];
+        let (min, max) = auto_domain(&v, (0.0, 100.0), TEMP_MIN_SPAN, AUTO_DOMAIN_PAD);
+        assert!(
+            min <= 40.0 && max >= 90.0,
+            "good readings sit inside the band"
+        );
+        assert!(max > min, "non-degenerate band from the good readings");
     }
 
     // ---- run splitting --------------------------------------------------

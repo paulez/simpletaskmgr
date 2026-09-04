@@ -26,12 +26,16 @@
     - No process is selected on launch
 
      5. **CPU Status**
-     - The usage graph is split into two side-by-side panes: the left pane
-       ("CPU & Memory") plots CPU% (green, on the left 0-100% axis) + RAM in
-       MB (blue, on the right axis, top read from `/proc/meminfo` `MemTotal`,
-       e.g. "16 GB"); the right pane ("CPU Freq & Temp") plots frequency
-       (purple, on the left MHz axis, top read from `scaling_max_freq`) +
-       temperature (red, on the right 0-100 °C axis)
+      - The usage graph is split into two side-by-side panes: the left pane
+        ("CPU & Memory") plots CPU% (green, on the left 0-100% axis) + RAM in
+        MB (blue, on the right axis, top read from `/proc/meminfo` `MemTotal`,
+        e.g. "16 GB"); the right pane ("CPU Freq & Temp") plots frequency
+        (purple, on the left MHz axis) + temperature (red, on the right °C
+        axis) — both right-pane axes **auto-scale to the measured band** (the
+        rolling history's min/max, with a minimum span and headroom) so a 50–85
+        °C CPU spans the full pane height instead of sitting mid-pane, re-
+        fitting as the window slides; falling back to a `scaling_max_freq` /
+        `0-100 °C` ceiling when a sensor is absent
      - Each series has its own dedicated axis: CPU + RAM on the left pane,
        Freq + Temp on the right pane; every axis is colored to match its
        series for quick reading
