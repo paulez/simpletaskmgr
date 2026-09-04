@@ -147,15 +147,18 @@ pub(crate) fn build_task_mgr_process(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn proc(pid: i32, cpu: f64) -> TaskMgrProcess {
         crate::testutil::test_process(pid, cpu)
     }
 
-    #[test]
-    fn test_task_mgr_process_cpu_percent_str() {
-        assert_eq!(proc(1, 0.0).cpu_percent_str(), "0.0%");
-        assert_eq!(proc(1, 12.34).cpu_percent_str(), "12.3%");
+    /// `cpu_percent_str` rounds to one decimal with a `%` suffix.
+    #[rstest]
+    #[case::zero(0.0, "0.0%")]
+    #[case::partial(12.34, "12.3%")]
+    fn test_cpu_percent_str(#[case] percent: f64, #[case] expected: &str) {
+        assert_eq!(proc(1, percent).cpu_percent_str(), expected);
     }
 
     /// `mem_percent` starts unknown until a refresh has measured it, and a
@@ -200,29 +203,19 @@ mod tests {
         assert_eq!(p.disk_write_str(), "950 B/s");
     }
 
-    #[test]
-    fn test_format_disk_speed_units() {
-        assert_eq!(format_disk_speed(None), "");
-        assert_eq!(format_disk_speed(Some(0.0)), "0 B/s");
-        assert_eq!(format_disk_speed(Some(999.0)), "999 B/s");
-        assert_eq!(format_disk_speed(Some(1024.0 * 12.3)), "12.3 KiB/s");
-        assert_eq!(
-            format_disk_speed(Some(1024.0f64.powi(2) * 512.5)),
-            "512.5 MiB/s"
-        );
-        assert_eq!(
-            format_disk_speed(Some(1024.0f64.powi(3) * 9.99)),
-            "10.0 GiB/s"
-        );
-        assert_eq!(
-            format_disk_speed(Some(1024.0f64.powi(4) * 3.0)),
-            "3.0 TiB/s"
-        );
-        // Above the largest unit: value keeps growing, unit stays TiB/s.
-        assert_eq!(
-            format_disk_speed(Some(1024.0f64.powi(5) * 3.0)),
-            "3072.0 TiB/s"
-        );
+    /// `format_disk_speed` scales B → KiB → MiB → GiB → TiB and rounds to one
+    /// decimal; `None` renders an empty cell.
+    #[rstest]
+    #[case::none(None, "")]
+    #[case::zero(Some(0.0), "0 B/s")]
+    #[case::bytes(Some(999.0), "999 B/s")]
+    #[case::kib(Some(1024.0 * 12.3), "12.3 KiB/s")]
+    #[case::mib(Some(1024.0 * 1024.0 * 512.5), "512.5 MiB/s")]
+    #[case::gib(Some(1024.0 * 1024.0 * 1024.0 * 9.99), "10.0 GiB/s")]
+    #[case::tib(Some(1024.0 * 1024.0 * 1024.0 * 1024.0 * 3.0), "3.0 TiB/s")]
+    #[case::above_tib(Some(1024.0 * 1024.0 * 1024.0 * 1024.0 * 3072.0), "3072.0 TiB/s")]
+    fn test_format_disk_speed(#[case] bytes_per_sec: Option<f64>, #[case] expected: &str) {
+        assert_eq!(format_disk_speed(bytes_per_sec), expected);
     }
 
     /// A `ProcessItem` exposes its stable `pid` and a current snapshot.
