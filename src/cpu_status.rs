@@ -306,6 +306,7 @@ pub fn format_temp(celsius: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -320,20 +321,19 @@ mod tests {
         path
     }
 
-    #[test]
-    fn test_parse_freq_khz_happy() {
-        assert_eq!(parse_freq_khz("4050149\n"), Some(4050149));
-        assert_eq!(parse_freq_khz("1000"), Some(1000));
-        assert_eq!(parse_freq_khz("  42  "), Some(42));
-    }
-
-    #[test]
-    fn test_parse_freq_khz_rejects_invalid() {
-        assert_eq!(parse_freq_khz(""), None, "empty file has no value");
-        assert_eq!(parse_freq_khz("0"), None, "zero is not a real frequency");
-        assert_eq!(parse_freq_khz("4.5"), None, "kHz files are integers");
-        assert_eq!(parse_freq_khz("abc"), None, "non-numeric is ignored");
-        assert_eq!(parse_freq_khz("-100"), None, "negative is ignored");
+    /// Parses an integer kHz file, tolerating surrounding whitespace and a
+    /// trailing newline; rejects empty, zero, non-integer and negative values.
+    #[rstest]
+    #[case::with_newline("4050149\n", Some(4050149))]
+    #[case::bare("1000", Some(1000))]
+    #[case::padded("  42  ", Some(42))]
+    #[case::empty("", None)]
+    #[case::zero("0", None)]
+    #[case::float("4.5", None)]
+    #[case::alpha("abc", None)]
+    #[case::negative("-100", None)]
+    fn test_parse_freq_khz(#[case] input: &str, #[case] expected: Option<u64>) {
+        assert_eq!(parse_freq_khz(input), expected);
     }
 
     #[test]
@@ -356,12 +356,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 
-    #[test]
-    fn test_format_freq_units() {
-        assert_eq!(format_freq(980.0), "980 MHz");
-        assert_eq!(format_freq(1000.0), "1.00 GHz");
-        assert_eq!(format_freq(3450.149), "3.45 GHz");
-        assert_eq!(format_freq(0.0), "0 MHz");
+    /// `format_freq` renders sub-GHz values as MHz and 1 GHz+ as GHz.
+    #[rstest]
+    #[case::sub_ghz(980.0, "980 MHz")]
+    #[case::one_ghz(1000.0, "1.00 GHz")]
+    #[case::multi_ghz(3450.149, "3.45 GHz")]
+    #[case::zero(0.0, "0 MHz")]
+    fn test_format_freq(#[case] mhz: f64, #[case] expected: &str) {
+        assert_eq!(format_freq(mhz), expected);
     }
 
     /// On a real Linux host the `cpufreq` interface for core 0 is usually
@@ -404,22 +406,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_is_cpu_sensor_recognizes_cpu_drivers() {
-        assert!(is_cpu_sensor("cpu"), "generic cpu sensor");
-        assert!(is_cpu_sensor("coretemp"), "Intel coretemp");
-        assert!(is_cpu_sensor("k10temp"), "AMD k10temp");
-        assert!(is_cpu_sensor("zenpower"), "AMD zenpower");
-    }
-
-    #[test]
-    fn test_is_cpu_sensor_excludes_non_cpu() {
-        assert!(!is_cpu_sensor("nvme"), "disk is not a CPU");
-        assert!(!is_cpu_sensor("amdgpu"), "GPU is not a CPU");
-        assert!(
-            !is_cpu_sensor("pch_thermal"),
-            "motherboard chip is not a CPU"
-        );
+    /// Recognizes CPU sensor driver names and rejects disk/GPU/other drivers.
+    #[rstest]
+    #[case::cpu("cpu", true)]
+    #[case::coretemp("coretemp", true)]
+    #[case::k10temp("k10temp", true)]
+    #[case::zenpower("zenpower", true)]
+    #[case::nvme("nvme", false)]
+    #[case::amdgpu("amdgpu", false)]
+    #[case::pch_thermal("pch_thermal", false)]
+    fn test_is_cpu_sensor(#[case] name: &str, #[case] expected: bool) {
+        assert_eq!(is_cpu_sensor(name), expected, "{name}");
     }
 
     #[test]
@@ -643,20 +640,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[test]
-    fn test_is_cpu_label() {
-        assert!(is_cpu_label("CPU Core (Tdie)"), "explicit CPU core");
-        assert!(is_cpu_label("Tctl"), "AMD Tctl");
-        assert!(is_cpu_label("Package"), "package temp");
-        assert!(!is_cpu_label("Solid State Disk"), "a disk is not a CPU");
-        assert!(!is_cpu_label("GPU"), "a GPU is not a CPU");
+    /// Accepts CPU-core/temperature labels and rejects disk/GPU ones.
+    #[rstest]
+    #[case::cpu_core("CPU Core (Tdie)", true)]
+    #[case::tctl("Tctl", true)]
+    #[case::package("Package", true)]
+    #[case::disk("Solid State Disk", false)]
+    #[case::gpu("GPU", false)]
+    fn test_is_cpu_label(#[case] label: &str, #[case] expected: bool) {
+        assert_eq!(is_cpu_label(label), expected, "{label}");
     }
 
-    #[test]
-    fn test_format_temp() {
-        assert_eq!(format_temp(72.3456), "72.3 °C");
-        assert_eq!(format_temp(75.375), "75.4 °C");
-        assert_eq!(format_temp(0.0), "0.0 °C");
+    /// `format_temp` rounds a millidegree-reading-derived value to one decimal.
+    #[rstest]
+    #[case::round_down(72.3456, "72.3 °C")]
+    #[case::round_up(75.375, "75.4 °C")]
+    #[case::zero(0.0, "0.0 °C")]
+    fn test_format_temp(#[case] celsius: f64, #[case] expected: &str) {
+        assert_eq!(format_temp(celsius), expected);
     }
 
     /// On a real Linux host a CPU `hwmon` sensor is usually present; when it
