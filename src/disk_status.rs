@@ -27,10 +27,49 @@ use log::debug;
 /// sector size, so the byte conversion is always `sectors * 512`.
 const SECTOR_BYTES: u64 = 512;
 
-/// One physical disk's I/O reading for the interval since the previous sample.
-/// The `Option`s are `None` on the very first sample for a device (a rate
-/// needs two samples) and whenever a counter regressed (device reset /
-/// re-numbering) — in which case the whole row is *unknown* rather than a
+/// Reads `/proc/uptime` (first token, in seconds) and returns the system
+/// uptime, or `None` when the file is unreadable or its first token is not a
+/// number. Used for the since-boot lifetime rate on a device's first sample
+/// (see [`lifetime_rates`]).
+pub fn read_uptime_secs() -> Option<f64> {
+    let file = std::fs::read_to_string("/proc/uptime").ok()?;
+    file.split_whitespace().next()?.parse().ok()
+}
+
+/// Computes a since-boot lifetime `(read_bps, write_bps, util_pct)` for a
+/// freshly-seen device from its cumulative counters and the system uptime:
+///
+/// * `read_bps`  = `read_sectors * 512 / uptime`
+/// * `write_bps` = `write_sectors * 512 / uptime`
+/// * `util_pct`  = `100 * io_ms / (uptime * 1000)`, clamped to `0–100`
+///
+/// All three are `None` when `uptime` is zero or negative (an unreadable
+/// `/proc/uptime`, or a sandbox with no uptime file) — the first sample can't
+/// be computed without a denominator, so the whole row is *unknown* rather
+/// than a spurious zero. Mirrors `CpuTracker::lifetime_avg_percent`, which
+/// also returns `0.0` (here: `None`, to preserve the row's "unknown"
+/// semantics) when its lifetime denominator is non-positive.
+pub fn lifetime_rates(cur: &Counters, uptime: f64) -> (Option<f64>, Option<f64>, Option<f64>) {
+    if uptime <= 0.0 {
+        return (None, None, None);
+    }
+    let read_bps = cur.read_sectors as f64 * SECTOR_BYTES as f64 / uptime;
+    let write_bps = cur.write_sectors as f64 * SECTOR_BYTES as f64 / uptime;
+    let util_pct = (100.0 * cur.io_ms as f64 / (uptime * 1000.0)).clamp(0.0, 100.0);
+    (Some(read_bps), Some(write_bps), Some(util_pct))
+}
+
+/// One physical disk's I/O reading.
+///
+/// The first sample for a device reports a since-boot lifetime rate
+/// (accumulated counters / system uptime — the "first frame" idea behind
+/// `CpuTracker::lifetime_avg_percent`), so the graph series starts at the
+/// left edge instead of leaving a blank slot. Subsequent samples measure the
+/// interval since the previous one.
+///
+/// The `Option`s are `None` when a counter regressed (device reset /
+/// re-numbering) or, on the first sample only, when `/proc/uptime` is
+/// unreadable — in those cases the whole row is *unknown* rather than a
 /// spurious zero, so the UI can show a blank instead of a fake `0`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiskSample {
@@ -200,11 +239,14 @@ impl DiskStatus {
     /// Records `stats`' counters (taken at monotonic time `now`) and returns
     /// this interval's per-disk samples, most recently measured first.
     ///
-    /// A device seen for the first time records a baseline and reports
-    /// `None` rates (a rate needs two samples). A device whose counters
-    /// regressed reports `None` rates and refreshes its baseline. A device
-    /// that has disappeared is dropped from the baselines so it does not
-    /// linger and re-report later.
+    /// A device seen for the first time records a baseline and reports a
+    /// since-boot lifetime rate (accumulated counters / system uptime) so the
+    /// graph series starts at the left edge instead of leaving a blank slot —
+    /// the same "first frame" idea as `CpuTracker::lifetime_avg_percent`. If
+    /// `/proc/uptime` is unreadable the first sample falls back to `None`s.
+    /// A device whose counters regressed reports `None` rates and refreshes
+    /// its baseline. A device that has disappeared is dropped from the
+    /// baselines so it does not linger and re-report later.
     pub fn refresh(&mut self, stats: &[(String, Counters)], now: f64) -> Vec<DiskSample> {
         let mut samples = Vec::with_capacity(stats.len());
         let mut seen = HashSet::with_capacity(stats.len());
@@ -224,11 +266,12 @@ impl DiskStatus {
                     *occ.get_mut() = (*cur, now);
                 }
                 Entry::Vacant(vac) => {
+                    let first = lifetime_rates(cur, read_uptime_secs().unwrap_or(0.0));
                     samples.push(DiskSample {
                         name: name.clone(),
-                        read_bps: None,
-                        write_bps: None,
-                        util_pct: None,
+                        read_bps: first.0,
+                        write_bps: first.1,
+                        util_pct: first.2,
                     });
                     vac.insert((*cur, now));
                 }
@@ -273,6 +316,51 @@ mod tests {
             write_sectors: write,
             io_ms: io,
         }
+    }
+
+    // ---- lifetime_rates (first-sample helper) -----------------------
+
+    /// The first sample's lifetime rate is the counters divided by system
+    /// uptime: `sectors * 512 / uptime`, and `100 * io.ms / (uptime * 1000)`.
+    #[test]
+    fn test_lifetime_rates_steady() {
+        let cur = counters(1000, 2000, 5000);
+        assert_eq!(
+            lifetime_rates(&cur, 10.0),
+            (Some(51_200.0), Some(102_400.0), Some(50.0))
+        );
+    }
+
+    /// Zero counters -> zero rates on the first sample (valid: the device
+    /// has done no I/O since boot).
+    #[test]
+    fn test_lifetime_rates_idle_is_zero() {
+        let c = counters(0, 0, 0);
+        assert_eq!(lifetime_rates(&c, 1.0), (Some(0.0), Some(0.0), Some(0.0)));
+    }
+
+    /// Non-positive uptime (unreadable `/proc/uptime`) -> all `None`, so the
+    /// UI can show a blank instead of a fake zero.
+    #[rstest]
+    #[case::zero(0.0)]
+    #[case::negative(-1.0)]
+    fn test_lifetime_rates_non_positive_uptime(#[case] uptime: f64) {
+        assert_eq!(
+            lifetime_rates(&counters(1, 2, 4), uptime),
+            (None, None, None)
+        );
+    }
+
+    /// Utilization is clamped to 0–100 even when the raw math overshoots
+    /// (a since-boot `io_ms` can exceed the wall clock on multi-queue
+    /// devices), matching the clamp in [`calculate_rates`].
+    #[test]
+    fn test_lifetime_rates_clamps_util() {
+        let cur = counters(100, 200, 5000);
+        assert_eq!(
+            lifetime_rates(&cur, 1.0),
+            (Some(51200.0), Some(102400.0), Some(100.0))
+        );
     }
 
     // ---- is_physical_disk ---------------------------------------------
@@ -437,18 +525,26 @@ mod tests {
 
     // ---- DiskStatus.refresh (the delta core) ----------------------------
 
-    /// A device seen for the first time records a baseline and reports unknown
-    /// rates (a rate needs two samples).
+    /// A device seen for the first time records a baseline so the next
+    /// sample can measure against it. The first sample itself now also
+    /// reports a since-boot lifetime rate (a "real" value, not a blank)
+    /// whenever `/proc/uptime` is available; on a host without a readable
+    /// uptime (rare on a real Linux host, common in some sandboxes) it falls
+    /// back to `None` — both are acceptable. The *guaranteed* invariant is
+    /// that the baseline is recorded unconditionally, which is exactly the
+    /// regression that `test_second_sample_measures` verifies downstream.
     #[test]
-    fn test_refresh_first_sample_unknown() {
+    fn test_refresh_first_sample_records_baseline() {
         let mut ds = DiskStatus::default();
         let stats = vec![("nvme0n1".to_string(), counters(100, 200, 10))];
         let s = ds.refresh(&stats, 0.0);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].name, "nvme0n1");
-        assert!(s[0].read_bps.is_none());
-        assert!(s[0].write_bps.is_none());
-        assert!(s[0].util_pct.is_none());
+        assert!(
+            ds.baselines.contains_key("nvme0n1"),
+            "the first pass must record a baseline for the next interval to \
+             measure against"
+        );
     }
 
     /// A second sample measures against the first: sector deltas / elapsed →

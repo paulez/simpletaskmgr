@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use log::warn;
 
 use crate::cpu_status::{read_cpu0_freq_mhz, read_cpu_temp_c};
-use crate::disk_status::{DiskSample, DiskStatus};
+use crate::disk_status::{read_uptime_secs, DiskSample, DiskStatus};
 use crate::gpu_status::GpuSample;
 
 /// One system-wide usage sample.
@@ -39,8 +39,11 @@ pub struct Sample {
     pub gpu_temp: Option<f64>,
     /// Per-physical-disk read/write throughput and utilization for this
     /// interval, one entry per physical disk. Empty when no physical disk is
-    /// present; each field is `None` on the device's first sample (a rate
-    /// needs two samples).
+    /// present; each field is `None` (and the UI shows a blank) when the
+    /// reading is not measurable — a counter regression on any sample, or the
+    /// first sample on a host without a readable `/proc/uptime`. The first
+    /// sample otherwise reports a since-boot lifetime rate, so the series
+    /// starts at the left edge instead of leaving a blank slot.
     pub disks: Vec<DiskSample>,
 }
 
@@ -98,6 +101,29 @@ pub fn cpu_percent(last: &StatBaseline, total: u64, idle: u64) -> Option<f64> {
     }
     let non_idle = total_delta.checked_sub(idle_delta)?;
     Some((non_idle as f64 / total_delta as f64) * 100.0)
+}
+
+/// Computes a system-wide since-boot average CPU% for the very first sample:
+/// `(total - idle)` ticks divided by `uptime_secs * tps`. Mirrors
+/// `CpuTracker::lifetime_avg_percent` (the "first frame" idea) and the disk
+/// graph's `lifetime_rates`.
+///
+/// `None` when either input is `None` or non-positive — the first sample
+/// can't be computed without a denominator, so the whole thing is *unknown*
+/// rather than a spurious zero. The caller maps `None` to `0.0` for the
+/// graph (matching the old behavior) and to a blank readout for the label.
+pub fn lifetime_cpu_percent(
+    total: u64,
+    idle: u64,
+    tps: u64,
+    uptime_secs: Option<f64>,
+) -> Option<f64> {
+    let up = uptime_secs?;
+    if up <= 0.0 || tps == 0 {
+        return None;
+    }
+    let non_idle = total.checked_sub(idle)?;
+    Some(100.0 * non_idle as f64 / (up * tps as f64))
 }
 
 /// Returns the integer value (in kB) of one `Key:` field in `/proc/meminfo`
@@ -236,23 +262,30 @@ impl SystemMetrics {
     /// per-disk I/O reading, plus the last GPU reading (utilization, VRAM,
     /// temperature).
     ///
-    /// CPU% for this interval is computed from the delta since the last call;
-    /// the first call has no baseline, so its CPU value is 0.0. Memory% is
-    /// read directly from `/proc/meminfo`. Frequency and temperature are read
-    /// from `sysfs`; on a read failure the previous value (or `None` for the
-    /// first sample) is carried forward so the graph doesn't dip to zero
-    /// spuriously. The three GPU fields are likewise carried forward from the
-    /// previous sample when `gpu` is `None` — for the first call the value is
-    /// `None`, and the caller on a host with no GPU can keep skipping the
+    /// CPU% for this interval is computed from the delta since the last call.
+    /// The first call has no baseline, so instead of a flat `0.0` it returns
+    /// a since-boot lifetime average (`total - idle` ticks / uptime — the
+    /// "first frame" idea behind `CpuTracker::lifetime_avg_percent`) so the
+    /// graph series starts at the left edge with a real value; this maps to
+    /// `0.0` only when `/proc/uptime` is unreadable (rare on a real Linux
+    /// host), preserving the old behavior in that edge case.
+    /// Memory% is read directly from `/proc/meminfo`. Frequency and temperature
+    /// are read from `sysfs`; on a read failure the previous value (or `None`
+    /// for the first sample) is carried forward so the graph doesn't dip to
+    /// zero spuriously. The three GPU fields are likewise carried forward from
+    /// the previous sample when `gpu` is `None` — for the first call the value
+    /// is `None`, and the caller on a host with no GPU can keep skipping the
     /// `rocm-smi` spawn by passing `None` every tick (see
     /// [`crate::gpu_status::gpu_available`]).
     ///
     /// The per-disk reading (read/write bytes-per-second and utilization) is
     /// sampled from `/proc/diskstats` each call inside the tracker — there is
     /// no new `push_sample` parameter (unlike the GPU, whose source is a
-    /// process spawn the caller may skip). Its first sample for a device is
-    /// `None` (a rate needs two samples) and later samples measure the
-    /// interval since the last one.
+    /// process spawn the caller may skip). A device's first sample
+    /// reports a since-boot lifetime rate (accumulated counters / uptime);
+    /// subsequent samples measure the interval since the previous one. Both
+    /// fall back to `None` when `/proc/uptime` is unreadable, in which
+    /// case the UI shows a blank instead of a fake zero.
     pub fn push_sample(&mut self, gpu: Option<GpuSample>) {
         let cpu = self.sample_cpu().unwrap_or(0.0);
         let mem = self.sample_mem().unwrap_or(0.0);
@@ -312,14 +345,19 @@ impl SystemMetrics {
         if total == 0 {
             return None;
         }
-        // The *first* call has no prior baseline, so its percent is `None`
-        // (mapped to `0.0` by `push_sample`). Crucially the baseline is still
-        // recorded unconditionally above — the old code returned `None` via
-        // `?` *before* storing it, so `stat_baseline` stayed `None` forever and
-        // every subsequent sample collapsed to `0.0` ("CPU stuck at 0").
-        let percent = self
-            .stat_baseline
-            .and_then(|baseline| cpu_percent(&baseline, total, idle));
+        // The *first* call has no prior baseline. Rather than reporting a
+        // flat `0.0` (the old symptom of "CPU stuck at 0 on the first frame"),
+        // return a since-boot lifetime mean — the same "first frame" idea as
+        // `CpuTracker::lifetime_avg_percent` for a freshly-tracked process —
+        // so the graph series starts with a real value at the left edge.
+        // The baseline is recorded unconditionally so the next call measures
+        // a proper interval delta.
+        let percent = match self.stat_baseline {
+            Some(baseline) => cpu_percent(&baseline, total, idle),
+            None => {
+                lifetime_cpu_percent(total, idle, procfs::ticks_per_second(), read_uptime_secs())
+            }
+        };
         self.stat_baseline = Some(StatBaseline {
             last_total: total,
             last_idle: idle,
@@ -432,30 +470,34 @@ mod tests {
         assert_eq!(m.history().len(), 1);
     }
 
-    /// Regression test for "CPU stuck at 0": the baseline must be recorded on
-    /// the very first read even though that read has no prior interval to
-    /// measure. Before the fix, `sample_cpu` returned `None` on the first call
-    /// *and left `stat_baseline` empty*, so every call after it also returned
-    /// `None` (mapped to `0.0`) and the CPU series was permanently zero.
+    /// Regression test for "CPU stuck at 0": on the *first* read there is no
+    /// prior baseline, so the code must (a) record one for the next interval
+    /// and (b) return a usable value — historically it returned `None` and
+    /// the UI mapped that to `0.0`, looking like a permanent "CPU idle". The
+    /// fix returns a since-boot lifetime average (`total - idle` ticks /
+    /// uptime) so the first frame is a real measurement, mirroring the CPU
+    /// per-process `lifetime_avg_percent` already used for freshly-tracked
+    /// PIDs.
     ///
-    /// After the fix, the first call establishes the baseline and the second
-    /// call measures against it. On any machine with a readable
-    /// `/proc/stat` the second call must therefore return `Some` — an idle
-    /// interval legitimately yields `Some(0.0)`, but `None` (the old symptom)
-    /// no longer occurs.
+    /// The second read measures a proper interval delta against the recorded
+    /// baseline and must be `Some` on any host with a readable `/proc/stat`.
     #[test]
     fn test_second_cpu_sample_is_measured_not_stuck_zero() {
         let mut m = SystemMetrics::with_cap(10);
-        // First read: no baseline yet, so no percent — but it *must* record
-        // one, which is exactly what the bug failed to do.
+        // First read: no baseline yet, so the value comes from a since-boot
+        // lifetime average (never a flat 0.0). It *must* still record a
+        // baseline for the next interval to measure against — that is the
+        // exact step the original bug skipped.
         let first = m.sample_cpu();
         assert!(
             m.stat_baseline.is_some(),
             "the first read must record a baseline for the next interval"
         );
         assert!(
-            first.is_none() || first.unwrap() >= 0.0,
-            "first interval has no prior baseline -> None, or a valid percent"
+            first.is_some(),
+            "the first read must return Some (a since-boot lifetime \
+             average or a real percent) — None maps to 0.0 and reads as \
+             'CPU stuck at 0'"
         );
         // Second read: a baseline now exists, so a real measurement is
         // possible and the permanent-None / permanent-zero symptom is gone.
@@ -464,6 +506,41 @@ mod tests {
             second.is_some(),
             "the second read must return Some (some %), not None — the old \
              bug returned None forever after the first call"
+        );
+    }
+
+    /// `lifetime_cpu_percent` is `(total - idle)` ticks / (`uptime * tps`).
+    /// Equivalently: the fraction of the system's wall-clock time spent not
+    /// idle. `None` when `uptime_secs` is `None` or non-positive (missing or
+    /// bad `/proc/uptime`), when `tps` is `0`, or when `total < idle` (a
+    /// counter regression can't be measured). The `CpuTracker::
+    /// lifetime_avg_percent` analog is `(utime + stime) / elapsed_ticks *
+    /// 100` for a single process; we use `(total - idle)` here for the
+    /// system CPU, which is the same formula.
+    ///
+    /// All cases use `tps = 100` (the common Linux value) and `uptime = 10`:
+    /// a wall of `10 × 100 = 1000` ticks. `non_idle` must be `0.5 · 1000`
+    /// for 50%, `0.9 · 1000` for 90%, `0 · 1000` for 0%.
+    #[rstest]
+    #[case::fifty_percent(1000, 500, 100, Some(10.0), Some(50.0))]
+    #[case::busy(1000, 100, 100, Some(10.0), Some(90.0))]
+    #[case::idle(500, 500, 100, Some(10.0), Some(0.0))]
+    #[case::no_uptime(1000, 500, 100, None, None)]
+    #[case::zero_uptime(1000, 500, 100, Some(0.0), None)]
+    #[case::negative_uptime(1000, 500, 100, Some(-1.0), None)]
+    #[case::zero_tps(1000, 500, 0, Some(10.0), None)]
+    #[case::counter_regression(10, 20, 100, Some(10.0), None)]
+    fn test_lifetime_cpu_percent(
+        #[case] total: u64,
+        #[case] idle: u64,
+        #[case] tps: u64,
+        #[case] uptime: Option<f64>,
+        #[case] expected: Option<f64>,
+    ) {
+        let got = lifetime_cpu_percent(total, idle, tps, uptime);
+        assert_eq!(
+            got, expected,
+            "inputs total={total} idle={idle} tps={tps} uptime={uptime:?}"
         );
     }
 
@@ -531,23 +608,31 @@ mod tests {
         assert_eq!(last.gpu_temp, Some(61.0));
     }
 
-    /// A pushed sample records a per-disk reading. The first sample for a disk
-    /// reports `None` rates (a rate needs two samples); the second measures the
-    /// interval since the first. On a host with no physical disk the `disks`
-    /// field is simply empty — both are acceptable outcomes.
+    /// A pushed sample records a per-disk reading. The first sample now
+    /// reports a since-boot lifetime rate for each disk (counters / uptime),
+    /// so the graph series starts at the left edge instead of leaving a blank
+    /// slot. On a host with no physical disk (empty `disks`) or with an
+    /// unreadable `/proc/uptime` (`None` rates), both are acceptable outcomes —
+    /// the test asserts only the universally-valid invariants (>= 0 for rates,
+    /// 0–100 for utilization) that must hold regardless of which case fired.
     #[test]
     fn test_push_sample_carries_disks() {
         let mut m = SystemMetrics::with_cap(10);
         m.push_sample(None);
         let first = m.history().pop().unwrap();
         for d in &first.disks {
-            assert!(
-                d.read_bps.is_none() && d.write_bps.is_none() && d.util_pct.is_none(),
-                "the first sample has no prior baseline -> None rates"
-            );
+            if let Some(b) = d.read_bps {
+                assert!(b >= 0.0);
+            }
+            if let Some(w) = d.write_bps {
+                assert!(w >= 0.0);
+            }
+            if let Some(u) = d.util_pct {
+                assert!((0.0..=100.0).contains(&u));
+            }
         }
         // The second sample now has a baseline, so each disk reports real
-        // (>= 0) readings.
+        // (>= 0) readings against the previous one.
         std::thread::sleep(std::time::Duration::from_millis(50));
         m.push_sample(None);
         let second = m.history().pop().unwrap();
@@ -555,6 +640,9 @@ mod tests {
         for d in &second.disks {
             if let Some(b) = d.read_bps {
                 assert!(b >= 0.0);
+            }
+            if let Some(w) = d.write_bps {
+                assert!(w >= 0.0);
             }
             if let Some(u) = d.util_pct {
                 assert!((0.0..=100.0).contains(&u));

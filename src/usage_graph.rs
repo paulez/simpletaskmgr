@@ -529,9 +529,12 @@ pub fn axis_tick_percent(p: f64) -> String {
 
 /// Sums a per-disk rate (bytes/second) across `disks`, ignoring `None`
 /// entries. Returns `None` when no disk reports a value (e.g. no physical
-/// disk, or the first sample which has no baseline yet) — so the series paints
-/// a blank gap rather than a spurious zero. Shared by the two throughput
-/// series so the per-sample total is computed identically for read and write.
+/// disk, or a sample whose reading is not measurable) — so the series paints
+/// a blank gap rather than a spurious zero. The first sample now carries a
+/// since-boot lifetime rate (computed by `disk_status::lifetime_rates`) in
+/// the normal case, so a disk graph starts with a value on the left edge
+/// just like the CPU graph. The two throughput series share this helper so
+/// the per-sample total is computed identically for read and write.
 fn disks_total(
     disks: &[crate::disk_status::DiskSample],
     field: fn(&crate::disk_status::DiskSample) -> Option<f64>,
