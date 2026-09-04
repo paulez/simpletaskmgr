@@ -298,101 +298,68 @@ fn read_live_cpu_line() -> (u64, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn test_parse_cpu_line_happy() {
-        let s = "cpu  100 200 300 400 500 600 700 800 900 0";
-        let (total, idle) = parse_cpu_line(s).unwrap();
-        assert_eq!(total, 100 + 200 + 300 + 400 + 500 + 600 + 700 + 800 + 900);
-        assert_eq!(idle, 400 + 500);
+    /// `parse_cpu_line` sums the aggregate (non-idle + idle) fields of the
+    /// whole-system `cpu` line and rejects per-core (`cpu0`) or malformed lines.
+    #[rstest]
+    #[case::aggregate(
+        "cpu  100 200 300 400 500 600 700 800 900 0",
+        Some((4500, 900))
+    )]
+    #[case::rejects_per_core("cpu0 1 2 3 4 5 6 7 8 9 0", None)]
+    #[case::rejects_short("cpu 1 2 3", None)]
+    fn test_parse_cpu_line(#[case] line: &str, #[case] expected: Option<(u64, u64)>) {
+        assert_eq!(parse_cpu_line(line), expected);
     }
 
-    #[test]
-    fn test_parse_cpu_line_rejects_per_core() {
-        let s = "cpu0 1 2 3 4 5 6 7 8 9 0";
-        assert!(parse_cpu_line(s).is_none());
-    }
-
-    #[test]
-    fn test_parse_cpu_line_insufficient_fields() {
-        assert!(parse_cpu_line("cpu 1 2 3").is_none());
-    }
-
-    #[test]
-    fn test_cpu_percent_busy() {
+    /// `cpu_percent` from two counter samples: busy, idle, a counter reset
+    /// (underflow -> None) and no elapsed time (-> Some(0)).
+    #[rstest]
+    #[case::busy(1000, 800, 2000, 1300, Some(50.0))]
+    #[case::idle(1000, 900, 2000, 1900, Some(0.0))]
+    #[case::counters_reset(10_000, 9_000, 100, 90, None)]
+    #[case::no_time_elapsed(1000, 800, 1000, 800, Some(0.0))]
+    fn test_cpu_percent(
+        #[case] last_total: u64,
+        #[case] last_idle: u64,
+        #[case] total: u64,
+        #[case] idle: u64,
+        #[case] expected: Option<f64>,
+    ) {
         let last = StatBaseline {
-            last_total: 1000,
-            last_idle: 800,
+            last_total,
+            last_idle,
         };
-        // total grew by 1000, idle by 500 => half the interval was non-idle
-        assert_eq!(cpu_percent(&last, 2000, 1300), Some(50.0));
+        assert_eq!(cpu_percent(&last, total, idle), expected);
     }
 
-    #[test]
-    fn test_cpu_percent_idle() {
-        let last = StatBaseline {
-            last_total: 1000,
-            last_idle: 900,
-        };
-        assert_eq!(cpu_percent(&last, 2000, 1900), Some(0.0));
+    /// `meminfo_used_percent` = 1 - MemAvailable/MemTotal; `None` when a field
+    /// is missing or MemTotal is zero.
+    #[rstest]
+    #[case::fifty_percent(
+        "MemTotal:       16000000 kB\nMemFree:         1000000 kB\nMemAvailable:     8000000 kB\n",
+        Some(50.0)
+    )]
+    #[case::missing_fields("MemTotal: 100 kB\n", None)]
+    #[case::empty("", None)]
+    #[case::zero_total("MemTotal: 0 kB\nMemAvailable: 0 kB\n", None)]
+    fn test_meminfo_used_percent(#[case] meminfo: &str, #[case] expected: Option<f64>) {
+        assert_eq!(meminfo_used_percent(meminfo), expected);
     }
 
-    #[test]
-    fn test_cpu_percent_counters_reset_returns_none() {
-        let last = StatBaseline {
-            last_total: 10_000,
-            last_idle: 9_000,
-        };
-        // reboot: counters smaller than baseline -> underflow -> None (reset)
-        assert_eq!(cpu_percent(&last, 100, 90), None);
-    }
-
-    #[test]
-    fn test_cpu_percent_no_time_elapsed() {
-        let last = StatBaseline {
-            last_total: 1000,
-            last_idle: 800,
-        };
-        assert_eq!(cpu_percent(&last, 1000, 800), Some(0.0));
-    }
-
-    #[test]
-    fn test_meminfo_used_percent_happy() {
-        let m = "MemTotal:       16000000 kB\nMemFree:         1000000 kB\nMemAvailable:     8000000 kB\n";
-        assert_eq!(meminfo_used_percent(m), Some(50.0));
-    }
-
-    #[test]
-    fn test_meminfo_missing_fields() {
-        assert!(meminfo_used_percent("MemTotal: 100 kB\n").is_none());
-        assert!(meminfo_used_percent("").is_none());
-    }
-
-    #[test]
-    fn test_meminfo_zero_total() {
-        let m = "MemTotal: 0 kB\nMemAvailable: 0 kB\n";
-        assert!(meminfo_used_percent(m).is_none());
-    }
-
-    #[test]
-    fn test_meminfo_total_mb_happy() {
-        // 16 GiB host: MemTotal = 16384 * 1024 kB.
-        let m = "MemTotal:       16777216 kB\nMemFree:         1000000 kB\n";
-        assert_eq!(meminfo_total_mb(m), Some(16384.0));
-    }
-
-    #[test]
-    fn test_meminfo_total_mb_exact_value() {
-        // A value that doesn't divide evenly into a whole GB; we report exact MB.
-        let m = "MemTotal:       16000000 kB\nMemFree:         1000000 kB\n";
-        assert_eq!(meminfo_total_mb(m), Some(16000000.0 / 1024.0));
-    }
-
-    #[test]
-    fn test_meminfo_total_mb_missing_or_zero() {
-        assert!(meminfo_total_mb("MemFree: 100 kB\n").is_none());
-        assert!(meminfo_total_mb("").is_none());
-        assert!(meminfo_total_mb("MemTotal: 0 kB\n").is_none());
+    /// `meminfo_total_mb` reports MemTotal in MB; `None` if absent or zero.
+    #[rstest]
+    #[case::sixteen_gib(
+        "MemTotal:       16777216 kB\nMemFree:         1000000 kB\n",
+        Some(16384.0)
+    )]
+    #[case::exact_mb("MemTotal:       16000000 kB\nMemFree:         1000000 kB\n", Some(16000000.0 / 1024.0))]
+    #[case::missing("MemFree: 100 kB\n", None)]
+    #[case::empty("", None)]
+    #[case::zero_total("MemTotal: 0 kB\n", None)]
+    fn test_meminfo_total_mb(#[case] meminfo: &str, #[case] expected: Option<f64>) {
+        assert_eq!(meminfo_total_mb(meminfo), expected);
     }
 
     #[test]
