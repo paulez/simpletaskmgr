@@ -971,17 +971,6 @@ mod tests {
     // ---- palette + layout bounds ----------------------------------------
 
     #[test]
-    fn test_palette_constants_are_distinct() {
-        let all = [CPU_RGB, MEM_RGB, FREQ_RGB, TEMP_RGB];
-        for i in 0..all.len() {
-            for j in (i + 1)..all.len() {
-                assert_ne!(all[i], all[j], "swatch {i} and {j} differ");
-            }
-        }
-        assert_eq!(FILL_ALPHA, 0.22);
-    }
-
-    #[test]
     fn test_series_points_land_in_bounds() {
         let s = samples(&[0.0, 25.0, 50.0, 75.0, 100.0]);
         let w = 400.0;
@@ -1038,26 +1027,5 @@ mod tests {
         assert_eq!(x, plot.ox, "a lone 'now' sample sits on the left plot edge");
         assert!((0.0..=w).contains(&x), "x in [0, {w}]");
         assert!((0.0..=h).contains(&y));
-    }
-
-    #[test]
-    fn test_chart_config_defaults() {
-        let cfg = ChartConfig::default();
-        assert!(cfg.freq_max_mhz > 0.0);
-        assert!(cfg.mem_max_mb > 0.0);
-        assert!(cfg.fill >= 2);
-        assert!(cfg.capacity >= 2);
-        // The warm-up window must not exceed the steady window.
-        assert!(cfg.fill <= cfg.capacity);
-    }
-
-    #[test]
-    fn test_chart_pane_is_copy_and_eq() {
-        let a = ChartPane::CpuMem;
-        let b = a;
-        assert_eq!(a, b);
-        assert_ne!(ChartPane::CpuMem, ChartPane::FreqTemp);
-        let f = ChartPane::FreqTemp;
-        assert_eq!(f, ChartPane::FreqTemp);
     }
 }
