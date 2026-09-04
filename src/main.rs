@@ -44,40 +44,28 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    fn s(v: &str) -> String {
-        v.to_string()
+    /// `log_level_for` maps to Debug with `-v`, Warn otherwise (the default).
+    #[rstest]
+    #[case::default("simpletaskmgr", LevelFilter::Warn)]
+    #[case::empty("", LevelFilter::Warn)]
+    #[case::verbose("simpletaskmgr -v", LevelFilter::Debug)]
+    fn test_log_level_for(#[case] args_str: &str, #[case] expected: LevelFilter) {
+        let args: Vec<String> = args_str.split_whitespace().map(String::from).collect();
+        assert_eq!(log_level_for(&args), expected);
     }
 
-    #[test]
-    fn test_log_level_default_is_warn() {
-        assert_eq!(log_level_for(&[s("simpletaskmgr")]), LevelFilter::Warn);
-        assert_eq!(log_level_for(&[]), LevelFilter::Warn);
-    }
-
-    #[test]
-    fn test_log_level_verbose_is_debug() {
-        assert_eq!(
-            log_level_for(&[s("simpletaskmgr"), s("-v")]),
-            LevelFilter::Debug
-        );
-    }
-
-    #[test]
-    fn test_gtk_args_strips_verbose() {
-        let out = gtk_args(&[s("simpletaskmgr"), s("-v")]);
-        assert_eq!(out, vec![s("simpletaskmgr")]);
-    }
-
-    #[test]
-    fn test_gtk_args_preserves_other_args_and_order() {
-        let out = gtk_args(&[s("simpletaskmgr"), s("keepme"), s("-v"), s("also-keep")]);
-        assert_eq!(out, vec![s("simpletaskmgr"), s("keepme"), s("also-keep")]);
-    }
-
-    #[test]
-    fn test_gtk_args_without_verbose() {
-        let out = gtk_args(&[s("simpletaskmgr"), s("--version")]);
-        assert_eq!(out, vec![s("simpletaskmgr"), s("--version")]);
+    /// `gtk_args` strips any `-v` (kept for our own logger) and passes every
+    /// other argument through in order.
+    #[rstest]
+    #[case::strips_verbose("simpletaskmgr -v", "simpletaskmgr")]
+    #[case::preserves_order("simpletaskmgr keepme -v also-keep", "simpletaskmgr keepme also-keep")]
+    #[case::no_verbose("simpletaskmgr --version", "simpletaskmgr --version")]
+    fn test_gtk_args(#[case] input: &str, #[case] expected: &str) {
+        let args: Vec<String> = input.split_whitespace().map(String::from).collect();
+        let out = gtk_args(&args);
+        let expected_vec: Vec<String> = expected.split_whitespace().map(String::from).collect();
+        assert_eq!(out, expected_vec);
     }
 }
