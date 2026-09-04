@@ -69,43 +69,27 @@ mod tests {
         assert_eq!(Signal::Sigkill.name(), "SIGKILL");
     }
 
-    /// SIGKILL must terminate a live process.
+    /// SIGHUP (default disposition: terminate) and SIGKILL must both
+    /// terminate a live process, so the `kill(2)` delivery path is exercised
+    /// without depending on the target's handler.
     #[test]
-    fn test_sigkill_terminates_process() {
-        let mut child = spawn_sleeper();
-        let pid = child.id() as i32;
-
-        assert!(send_signal(pid, Signal::Sigkill).is_ok());
-
-        // `wait` returns the status; a death by SIGKILL is reported as
-        // `Signal(9)`.
-        let status = child.wait().expect("failed to wait on child");
-        assert_eq!(
-            status.code(),
-            None,
-            "process should die by signal, not exit"
-        );
-        #[cfg(unix)]
-        assert_eq!(status.signal(), Some(9));
-    }
-
-    /// SIGHUP by default terminates a process too (default disposition), so the
-    /// delivery path is exercised without depending on the target's handler.
-    #[test]
-    fn test_sighup_delivered_to_process() {
-        let mut child = spawn_sleeper();
-        let pid = child.id() as i32;
-
-        assert!(send_signal(pid, Signal::Sighup).is_ok());
-
-        let status = child.wait().expect("failed to wait on child");
-        assert_eq!(
-            status.code(),
-            None,
-            "process should die by signal, not exit"
-        );
-        #[cfg(unix)]
-        assert_eq!(status.signal(), Some(1));
+    fn test_signal_delivered_to_process() {
+        for (signal, expected) in [(Signal::Sigkill, 9), (Signal::Sighup, 1)] {
+            let mut child = spawn_sleeper();
+            let pid = child.id() as i32;
+            assert!(
+                send_signal(pid, signal).is_ok(),
+                "sending {signal:?} must succeed"
+            );
+            let status = child.wait().expect("failed to wait on child");
+            assert_eq!(status.code(), None, "should die by signal, not exit");
+            #[cfg(unix)]
+            assert_eq!(
+                status.signal(),
+                Some(expected),
+                "wrong signal for {signal:?}"
+            );
+        }
     }
 
     /// Sending a signal to an unknown pid must fail, not panic.

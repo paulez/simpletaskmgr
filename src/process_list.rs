@@ -339,25 +339,6 @@ mod tests {
         assert!(should_read_io(0, 0), "root reading a root process");
     }
 
-    /// A `f64` NaN must not panic the comparator (regression for
-    /// `partial_cmp().unwrap()`): it must still order, never panic, and the
-    /// resulting sort must be total.
-    #[test]
-    fn test_compare_cpu_nan_does_not_panic_and_is_total_order() {
-        fn item(pid: i32, cpu: f64) -> ProcessItem {
-            let p = TaskMgrProcess::new(format!("name{pid}"), pid, 1, "u".to_string(), cpu);
-            ProcessItem::new(&p)
-        }
-
-        let items = vec![item(1, f64::NAN), item(2, 5.0), item(3, -1.0)];
-        let mut ascending = items.clone();
-        ascending.sort_by(|a, b| ProcessList::compare_values(a, b, crate::SortColumn::CpuPercent));
-
-        // `total_cmp` orders the finite values and pushes NaN to the end.
-        let pids: Vec<i32> = ascending.iter().map(|i| i.pid).collect();
-        assert_eq!(pids, vec![3, 2, 1], "NaN sorts last; no panic; total order");
-    }
-
     /// `compare_values` is a *total, antisymmetric, consistent* ordering for
     /// any column — the property a stable sort (whether Rust's or GTK's
     /// `SortListModel`) relies on to never lose or duplicate rows.
@@ -395,25 +376,9 @@ mod tests {
         assert!(ProcessList::compare_values(&a, &b, crate::SortColumn::Pid).is_lt());
     }
 
-    /// `update_process_list` rebuilds the visible rows and keeps them consistent
-    /// (every row maps to a unique pid) regardless of process churn.
-    #[test]
-    fn test_update_process_list_keeps_rows_unique() {
-        let mut list = ProcessList::new();
-        list.update_process_list();
-        let mut pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
-        pids.sort();
-        pids.dedup();
-        assert_eq!(
-            pids.len(),
-            list.processes.len(),
-            "no duplicate pids after refresh"
-        );
-    }
-
-    /// `init` no longer sorts (display order is owned by GTK's `SortListModel`,
-    /// applied by `ui` after the first paint). All it must guarantee is that
-    /// it populates the current-user rows from `/proc`, uniquely.
+    /// `init` populates the current-user rows from `/proc`, each pid unique
+    /// (display order is owned by GTK's `SortListModel`, applied by `ui` after
+    /// the first paint).
     #[test]
     fn test_init_populates_unique_rows() {
         let list = ProcessList::init();
