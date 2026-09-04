@@ -16,13 +16,19 @@ time, and lets you inspect and signal individual processes.
   SIGHUP or SIGKILL to it.
 - **Resource graph**: always-on charts of system CPU & memory, and CPU
   frequency & temperature, over the last few minutes.
+- **Disk I/O tab**: a tab switch above the charts shows each physical disk's
+  read + write throughput and utilization (`%util`), sampled directly from
+  `/proc/diskstats` — no `iostat`/`sysstat` dependency. Partitions and virtual
+  devices are filtered out, and on a host with no physical disk the tab simply
+  reads empty rather than erroring.
 - **GPU tab**: when an AMD GPU is present and readable via `rocm-smi`,
   a tab switch above the charts shows GPU utilization, VRAM allocation,
   and edge temperature alongside the CPU readings (the tab is hidden
   entirely when no GPU is detected).
 - **Persistent settings**: filter and refresh interval survive restarts
   (Settings popover).
-- **Native & light**: GTK 4 UI; reads information directly from `/proc`.
+- **Native & light**: GTK 4 UI; CPU, memory, and disk I/O are read directly
+  from `/proc` — only the optional GPU tab needs `rocm-smi`.
 
 ## Requirements
 
