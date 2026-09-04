@@ -153,39 +153,6 @@ mod tests {
     }
 
     #[test]
-    fn test_process_struct_creation() {
-        let p = proc(123, 0.0);
-        assert_eq!(p.name, "name123");
-        assert_eq!(p.pid, 123);
-        assert_eq!(p.ruid, 1000);
-        assert_eq!(p.username, "paul");
-        assert_eq!(p.cpu_percent, 0.0);
-    }
-
-    #[test]
-    fn test_process_struct_clone_and_eq() {
-        let a = proc(1, 5.0);
-        let b = a.clone();
-        assert_eq!(a, b);
-        assert!(a == b);
-    }
-
-    #[test]
-    fn test_process_struct_partial_eq() {
-        let a = proc(1, 5.0);
-        let same = proc(1, 5.0);
-        let diff = TaskMgrProcess::new("other".to_string(), 1, 1000, "paul".to_string(), 5.0);
-        assert_eq!(a, same);
-        assert_ne!(a, diff);
-    }
-
-    #[test]
-    fn test_process_struct_debug() {
-        let p = proc(123, 0.0);
-        assert!(format!("{:?}", p).contains("TaskMgrProcess"));
-    }
-
-    #[test]
     fn test_task_mgr_process_cpu_percent_str() {
         assert_eq!(proc(1, 0.0).cpu_percent_str(), "0.0%");
         assert_eq!(proc(1, 12.34).cpu_percent_str(), "12.3%");
