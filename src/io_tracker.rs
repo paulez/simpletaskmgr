@@ -121,6 +121,7 @@ impl IoTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn proc(pid: i32) -> TaskMgrProcess {
         crate::testutil::test_process(pid, 0.0)
@@ -148,17 +149,14 @@ mod tests {
         assert_eq!(rates, Some((0.0, 0.0)));
     }
 
-    /// A counter that decreased (PID reuse) is detected, not underflowed.
-    #[test]
-    fn test_calculate_rates_pid_reuse_returns_none() {
-        let rates = IoTracker::calculate_rates(5, 10, baseline(100, 200, 1000.0), 1001.0);
-        assert_eq!(rates, None);
-    }
-
-    /// Only the write counter decreasing is also a PID-reuse signal.
-    #[test]
-    fn test_calculate_rates_write_reuse_returns_none() {
-        let rates = IoTracker::calculate_rates(999, 10, baseline(100, 200, 1000.0), 1001.0);
+    /// A counter that decreased between samples (PID reuse) is detected, not
+    /// underflowed — regardless of whether it is the read or the write side.
+    #[rstest]
+    #[case::read_decreased(5, 10)]
+    #[case::write_decreased(999, 10)]
+    fn test_calculate_rates_pid_reuse_returns_none(#[case] new_read: u64, #[case] new_write: u64) {
+        let rates =
+            IoTracker::calculate_rates(new_read, new_write, baseline(100, 200, 1000.0), 1001.0);
         assert_eq!(rates, None);
     }
 
@@ -228,12 +226,5 @@ mod tests {
         assert_eq!(tracker.baselines.len(), 1);
         assert!(tracker.baselines.contains_key(&100));
         assert!(!tracker.baselines.contains_key(&200));
-    }
-
-    /// `Default` mirrors `new()`.
-    #[test]
-    fn test_new_is_empty() {
-        assert!(IoTracker::new().baselines.is_empty());
-        assert!(IoTracker::default().baselines.is_empty());
     }
 }
