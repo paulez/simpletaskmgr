@@ -42,6 +42,16 @@ Or run with cargo directly:
 cargo run
 ```
 
+### Logging
+
+By default the app logs at **warning** level and above, so normal runs print
+nothing to stdout. To enable verbose (`debug`) logging for troubleshooting,
+pass `-v`:
+
+```bash
+cargo run --release -- -v
+```
+
 ## Dependencies
 
 The project uses the following Rust crates:
