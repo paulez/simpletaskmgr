@@ -79,26 +79,28 @@ pub fn cpu_percent(last: &StatBaseline, total: u64, idle: u64) -> Option<f64> {
     Some((non_idle as f64 / total_delta as f64) * 100.0)
 }
 
+/// Returns the integer value (in kB) of one `Key:` field in `/proc/meminfo`
+/// text, or `None` when the field is absent. Shared by the percent and total
+/// parsers below and by the per-row MEM% cell in `process_list`.
+pub fn meminfo_field_kb(meminfo: &str, key: &str) -> Option<u64> {
+    for line in meminfo.lines() {
+        let label = format!("{key}:");
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some(label.as_str()) {
+            continue;
+        }
+        return parts.next()?.parse().ok();
+    }
+    None
+}
+
 /// Parses `/proc/meminfo` text and returns memory utilization percent,
 /// `(MemTotal − MemAvailable) / MemTotal * 100`.
 ///
 /// Returns `None` if either field is missing or `MemTotal` is zero.
 pub fn meminfo_used_percent(meminfo: &str) -> Option<f64> {
-    fn field_kb(meminfo: &str, key: &str) -> Option<u64> {
-        for line in meminfo.lines() {
-            let label = format!("{key}:");
-            let mut parts = line.split_whitespace();
-            if parts.next() != Some(label.as_str()) {
-                continue;
-            }
-            if let Some(value) = parts.next() {
-                return value.parse::<u64>().ok();
-            }
-        }
-        None
-    }
-    let total = field_kb(meminfo, "MemTotal")?;
-    let available = field_kb(meminfo, "MemAvailable")?;
+    let total = meminfo_field_kb(meminfo, "MemTotal")?;
+    let available = meminfo_field_kb(meminfo, "MemAvailable")?;
     if total == 0 {
         return None;
     }
@@ -118,31 +120,29 @@ fn read_meminfo_percent() -> Option<f64> {
     }
 }
 
-/// Parses `/proc/meminfo` and returns the total physical memory in **MB**
-/// (`MemTotal kB / 1024`). Used as the top of the memory-axis domain,
-/// mirroring the role `read_max_freq_mhz` plays for the frequency axis.
-/// Returns `None` when the field is missing or `MemTotal` is zero.
-pub fn meminfo_total_mb(meminfo: &str) -> Option<f64> {
-    fn field_kb(meminfo: &str, key: &str) -> Option<u64> {
-        for line in meminfo.lines() {
-            let label = format!("{key}:");
-            let mut parts = line.split_whitespace();
-            if parts.next() != Some(label.as_str()) {
-                continue;
+/// Reads `MemTotal` from the live `/proc/meminfo`, in kB. Returns `None`
+/// (and logs a warning) if the file is unreadable or lacks the field; every
+/// row then shows a blank MEM% cell.
+pub fn read_mem_total_kb() -> Option<u64> {
+    match std::fs::read_to_string("/proc/meminfo") {
+        Ok(text) => match meminfo_field_kb(&text, "MemTotal") {
+            Some(kb) => Some(kb),
+            None => {
+                warn!("MemTotal: not found in /proc/meminfo");
+                None
             }
-            return parts.next()?.parse::<u64>().ok();
+        },
+        Err(e) => {
+            warn!("Can't read /proc/meminfo: {e:?}");
+            None
         }
-        None
     }
-    let kb = field_kb(meminfo, "MemTotal")?;
-    if kb == 0 {
-        return None;
-    }
-    Some(kb as f64 / 1024.0)
 }
 
-/// Reads the live `/proc/meminfo` and returns total memory in **MB**, or
-/// `None` (with a warning) if the file is unreadable or lacks `MemTotal`.
+/// Reads the live `/proc/meminfo` and returns total memory in **MB**
+/// (`MemTotal kB / 1024`), or `None` (with a warning) if the file is
+/// unreadable or lacks `MemTotal`. Used as the top of the memory-axis domain,
+/// mirroring the role `read_max_freq_mhz` plays for the frequency axis.
 pub fn read_mem_total_mb() -> Option<f64> {
     match std::fs::read_to_string("/proc/meminfo") {
         Ok(text) => meminfo_total_mb(&text),
@@ -151,6 +151,16 @@ pub fn read_mem_total_mb() -> Option<f64> {
             None
         }
     }
+}
+
+/// Total physical memory in **MB** (`MemTotal kB / 1024`), or `None` when
+/// the field is missing or `MemTotal` is zero.
+pub fn meminfo_total_mb(meminfo: &str) -> Option<f64> {
+    let kb = meminfo_field_kb(meminfo, "MemTotal")?;
+    if kb == 0 {
+        return None;
+    }
+    Some(kb as f64 / 1024.0)
 }
 
 /// Holds a rolling history of system-wide CPU/memory samples so the UI can

@@ -187,179 +187,51 @@ impl CpuTracker {
 mod tests {
     use super::*;
 
-    /// Test CPU percent calculation for 100% usage (maximum CPU usage)
+    /// Shorthand for `calculate_cpu_percent` with the tests' fixed `tps = 100`.
+    fn cpu(ru: u64, rs: u64, lt: (u64, u64), cur: f64, last: f64) -> Option<f64> {
+        CpuTracker::calculate_cpu_percent(ru, rs, lt, 100, cur, last)
+    }
+
+    /// Test CPU percent calculation for 100% usage (maximum across 2 cores)
     #[test]
     fn test_cpu_percent_100_percent() {
-        // Simulate a process using 100% CPU
-        let recent_utime = 200;
-        let recent_stime = 200;
-        let last_ticks = (100, 100);
-        let tps = 100;
-        let current_timestamp = 1001_f64;
-        let last_timestamp = 1000_f64;
-
-        let cpu_percent = CpuTracker::calculate_cpu_percent(
-            recent_utime,
-            recent_stime,
-            last_ticks,
-            tps,
-            current_timestamp,
-            last_timestamp,
-        );
-
-        assert_eq!(
-            cpu_percent,
-            Some(200.0),
-            "Should calculate CPU usage based on ticks"
-        );
+        assert_eq!(cpu(200, 200, (100, 100), 1001.0, 1000.0), Some(200.0));
     }
 
     /// Test CPU percent calculation for 0% usage (idle process)
     #[test]
     fn test_cpu_percent_0_percent() {
-        let recent_utime = 100;
-        let recent_stime = 100;
-        let last_ticks = (100, 100);
-        let tps = 100;
-        let current_timestamp = 1001_f64;
-        let last_timestamp = 1000_f64;
-
-        let cpu_percent = CpuTracker::calculate_cpu_percent(
-            recent_utime,
-            recent_stime,
-            last_ticks,
-            tps,
-            current_timestamp,
-            last_timestamp,
-        );
-
-        assert_eq!(
-            cpu_percent,
-            Some(0.0),
-            "Should calculate 0% CPU usage for idle process"
-        );
+        assert_eq!(cpu(100, 100, (100, 100), 1001.0, 1000.0), Some(0.0));
     }
 
     /// Test CPU percent calculation for partial usage
     #[test]
     fn test_cpu_percent_partial_usage() {
-        let recent_utime = 150;
-        let recent_stime = 150;
-        let last_ticks = (100, 100);
-        let tps = 100;
-        let current_timestamp = 1002_f64;
-        let last_timestamp = 1000_f64;
-
-        let cpu_percent = CpuTracker::calculate_cpu_percent(
-            recent_utime,
-            recent_stime,
-            last_ticks,
-            tps,
-            current_timestamp,
-            last_timestamp,
-        );
-
-        assert_eq!(cpu_percent, Some(50.0), "Should calculate 50% CPU usage");
+        assert_eq!(cpu(150, 150, (100, 100), 1002.0, 1000.0), Some(50.0));
     }
 
     /// Test CPU percent calculation with different time intervals
     #[test]
     fn test_cpu_percent_different_time_intervals() {
-        let recent_utime = 300;
-        let recent_stime = 300;
-        let last_ticks = (100, 100);
-        let tps = 100;
-        let current_timestamp = 1010_f64;
-        let last_timestamp = 1000_f64;
-
-        let cpu_percent = CpuTracker::calculate_cpu_percent(
-            recent_utime,
-            recent_stime,
-            last_ticks,
-            tps,
-            current_timestamp,
-            last_timestamp,
-        );
-
-        assert_eq!(
-            cpu_percent,
-            Some(40.0),
-            "Should handle different time intervals correctly"
-        );
+        assert_eq!(cpu(300, 300, (100, 100), 1010.0, 1000.0), Some(40.0));
     }
 
     /// Test CPU percent calculation with minimal history
     #[test]
     fn test_cpu_percent_minimal_history() {
-        let recent_utime = 200;
-        let recent_stime = 100;
-        let last_ticks = (100, 50);
-        let tps = 100;
-        let current_timestamp = 1001_f64;
-        let last_timestamp = 1000_f64;
-
-        let cpu_percent = CpuTracker::calculate_cpu_percent(
-            recent_utime,
-            recent_stime,
-            last_ticks,
-            tps,
-            current_timestamp,
-            last_timestamp,
-        );
-
-        assert_eq!(
-            cpu_percent,
-            Some(150.0),
-            "Should handle minimal history correctly"
-        );
+        assert_eq!(cpu(200, 100, (100, 50), 1001.0, 1000.0), Some(150.0));
     }
 
     /// Test that decreased ticks (PID reuse) returns None instead of underflowing
     #[test]
     fn test_cpu_percent_pid_reuse_returns_none() {
-        // New process inherited the PID and has fewer ticks than the old one
-        let recent_utime = 5;
-        let recent_stime = 5;
-        let last_ticks = (100, 100);
-        let tps = 100;
-        let current_timestamp = 1001_f64;
-        let last_timestamp = 1000_f64;
-
-        let cpu_percent = CpuTracker::calculate_cpu_percent(
-            recent_utime,
-            recent_stime,
-            last_ticks,
-            tps,
-            current_timestamp,
-            last_timestamp,
-        );
-
-        assert_eq!(
-            cpu_percent, None,
-            "Should detect PID reuse when ticks decrease"
-        );
+        assert_eq!(cpu(5, 5, (100, 100), 1001.0, 1000.0), None);
     }
 
-    /// Test CPU percent calculation when tick totals overflow u64 components sum
+    /// Test CPU percent calculation when tick totals overflow u64 component sum
     #[test]
     fn test_cpu_percent_ticks_overflow_returns_none() {
-        let recent_utime = u64::MAX;
-        let recent_stime = 1;
-        let last_ticks = (1, 1);
-        let tps = 100;
-        let current_timestamp = 1001_f64;
-        let last_timestamp = 1000_f64;
-
-        let cpu_percent = CpuTracker::calculate_cpu_percent(
-            recent_utime,
-            recent_stime,
-            last_ticks,
-            tps,
-            current_timestamp,
-            last_timestamp,
-        );
-
-        assert_eq!(cpu_percent, None, "Should handle tick overflow safely");
+        assert_eq!(cpu(u64::MAX, 1, (1, 1), 1001.0, 1000.0), None);
     }
 
     /// Test the since-start average used for a process's first sample.
@@ -414,25 +286,11 @@ mod tests {
     /// Test CPU percent calculation with sub-second precision
     #[test]
     fn test_cpu_percent_subsecond_precision() {
-        let recent_utime = 150;
-        let recent_stime = 150;
-        let last_ticks = (100, 100);
-        let tps = 100;
-        let current_timestamp = 1000.5_f64;
-        let last_timestamp = 1000.0_f64;
-
-        let cpu_percent = CpuTracker::calculate_cpu_percent(
-            recent_utime,
-            recent_stime,
-            last_ticks,
-            tps,
-            current_timestamp,
-            last_timestamp,
-        );
-
+        let percent =
+            cpu(150, 150, (100, 100), 1000.5, 1000.0).expect("sub-second should not be None");
         assert!(
-            (cpu_percent.unwrap() - 200.0).abs() < 0.01,
-            "Should handle sub-second precision correctly"
+            (percent - 200.0).abs() < 0.01,
+            "Should handle sub-second precision"
         );
     }
 }

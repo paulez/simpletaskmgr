@@ -2,6 +2,15 @@ use cairo::Context;
 
 use crate::metrics::Sample;
 
+/// Normalizes an `(r, g, b)` value in `0–255` to `0–1` for cairo drawing.
+fn rgb_to_f64(rgb: (u8, u8, u8)) -> (f64, f64, f64) {
+    (
+        rgb.0 as f64 / 255.0,
+        rgb.1 as f64 / 255.0,
+        rgb.2 as f64 / 255.0,
+    )
+}
+
 /// RGB triplet (0–255) for the CPU series — green, matching the old floem
 /// `CPU_COLOR = rgb8(76, 175, 80)` / SVG `#4CAF50`.
 pub const CPU_RGB: (u8, u8, u8) = (76, 175, 80);
@@ -252,11 +261,7 @@ fn draw_series(
     }
     let runs = iter_some_runs(values);
     let n = values.len();
-    let (r, g, b) = (
-        rgb.0 as f64 / 255.0,
-        rgb.1 as f64 / 255.0,
-        rgb.2 as f64 / 255.0,
-    );
+    let (r, g, b) = rgb_to_f64(rgb);
     let x_at = |i: usize| plot.ox + sample_x(i, n, fill, capacity, plot.w);
     let y_at = |i: usize| plot.oy + frac_of(values[i].unwrap_or(0.0), domain_max) * plot.h;
     let bottom = plot.oy + plot.h;
@@ -473,11 +478,7 @@ fn draw_axis_ticks(
     if plot.w <= 0.0 || plot.h <= 0.0 {
         return;
     }
-    let (r, g, b) = (
-        rgb.0 as f64 / 255.0,
-        rgb.1 as f64 / 255.0,
-        rgb.2 as f64 / 255.0,
-    );
+    let (r, g, b) = rgb_to_f64(rgb);
     for (frac, text) in axis_ticks(domain_max, label) {
         let y = plot.oy + frac * plot.h;
         let width = ctx.text_extents(&text).map(|e| e.width()).unwrap_or(0.0);
@@ -551,113 +552,75 @@ pub fn paint_usage_chart(
     // 10pt keeps the tick labels readable at the default 940px window width
     // without crowding the narrow plot — 9pt read as thin/faint on screen.
     ctx.set_font_size(10.0);
-    match pane {
-        ChartPane::CpuMem => {
-            // Each series has its own axis: CPU on the left in % (0–100), and
-            // RAM on the right in MB scaled to the installed RAM, so both read
-            // as full-height curves rather than sharing one % scale.
-            let cpu: Vec<Option<f64>> = samples.iter().map(|s| Some(s.cpu)).collect();
-            let mem: Vec<Option<f64>> = samples
-                .iter()
-                .map(|s| Some(s.mem / 100.0 * cfg.mem_max_mb))
-                .collect();
-            let left_gutter = measure_gutter(
-                ctx,
-                &[
-                    axis_tick_percent(100.0),
-                    axis_tick_percent(50.0),
-                    axis_tick_percent(0.0),
-                ],
-            );
-            let right_gutter = measure_gutter(
-                ctx,
-                &[
-                    axis_tick_mb(cfg.mem_max_mb),
-                    axis_tick_mb(cfg.mem_max_mb / 2.0),
-                    axis_tick_mb(0.0),
-                ],
-            );
-            let plot = plot_rect(w, h, left_gutter, right_gutter);
-            draw_gridlines(ctx, &plot);
-            // Draw order: memory (bottom), cpu (top).
-            draw_series(
-                ctx,
-                &plot,
-                &mem,
-                cfg.fill,
-                cfg.capacity,
-                cfg.mem_max_mb,
-                MEM_RGB,
-            );
-            draw_series(ctx, &plot, &cpu, cfg.fill, cfg.capacity, 100.0, CPU_RGB);
-            // CPU axis on the left (green, matching the CPU series), RAM axis
-            // on the right (blue, matching the memory series).
-            draw_axis_ticks(
-                ctx,
-                &plot,
+    // Both panes are the same dual-axis layout: a left and a right series,
+    // each with its own `(values, domain, rgb, tick_fn)`, axes on opposite
+    // sides, one drawn in front of the other. Only *which* series is on
+    // which side and the z-order differ per pane, so we pick them in the
+    // match and share the layout code below.
+    type Side = (Vec<Option<f64>>, f64, (u8, u8, u8), fn(f64) -> String);
+    let (left, right, back_is_right): (Side, Side, bool) = match pane {
+        // CpuMem: left = CPU (front, % axis 0–100); right = MEM (back, MB axis).
+        ChartPane::CpuMem => (
+            (
+                samples.iter().map(|s| Some(s.cpu)).collect(),
                 100.0,
                 CPU_RGB,
                 axis_tick_percent,
-                AxisSide::Left,
-            );
-            draw_axis_ticks(
-                ctx,
-                &plot,
+            ),
+            (
+                samples
+                    .iter()
+                    .map(|s| Some(s.mem / 100.0 * cfg.mem_max_mb))
+                    .collect(),
                 cfg.mem_max_mb,
                 MEM_RGB,
                 axis_tick_mb,
-                AxisSide::Right,
-            );
-        }
-        ChartPane::FreqTemp => {
-            let freq: Vec<Option<f64>> = samples.iter().map(|s| s.freq).collect();
-            let temp: Vec<Option<f64>> = samples.iter().map(|s| s.temp).collect();
-            let freq_labels = vec![
-                axis_tick_mhz(cfg.freq_max_mhz),
-                axis_tick_mhz(cfg.freq_max_mhz / 2.0),
-                axis_tick_mhz(0.0),
-            ];
-            let temp_labels = vec![
-                axis_tick_celsius(100.0),
-                axis_tick_celsius(50.0),
-                axis_tick_celsius(0.0),
-            ];
-            let left_gutter = measure_gutter(ctx, &freq_labels);
-            let right_gutter = measure_gutter(ctx, &temp_labels);
-            let plot = plot_rect(w, h, left_gutter, right_gutter);
-            draw_gridlines(ctx, &plot);
-            // Draw order: frequency, temperature (top).
-            draw_series(
-                ctx,
-                &plot,
-                &freq,
-                cfg.fill,
-                cfg.capacity,
-                cfg.freq_max_mhz,
-                FREQ_RGB,
-            );
-            draw_series(ctx, &plot, &temp, cfg.fill, cfg.capacity, 100.0, TEMP_RGB);
-            // Frequency axis on the left, temperature axis on the right — a
-            // conventional dual-axis layout where each non-percent series
-            // reads its own colored tick column outside the plot.
-            draw_axis_ticks(
-                ctx,
-                &plot,
+            ),
+            true,
+        ),
+        // FreqTemp: left = FREQ (back, MHz axis); right = TEMP (front, °C axis).
+        ChartPane::FreqTemp => (
+            (
+                samples.iter().map(|s| s.freq).collect(),
                 cfg.freq_max_mhz,
                 FREQ_RGB,
                 axis_tick_mhz,
-                AxisSide::Left,
-            );
-            draw_axis_ticks(
-                ctx,
-                &plot,
+            ),
+            (
+                samples.iter().map(|s| s.temp).collect(),
                 100.0,
                 TEMP_RGB,
                 axis_tick_celsius,
-                AxisSide::Right,
-            );
-        }
-    }
+            ),
+            false,
+        ),
+    };
+    let labels = |s: &Side| {
+        let tick: fn(f64) -> String = s.3;
+        let dom: f64 = s.1;
+        [tick(dom), tick(dom / 2.0), tick(0.0)]
+    };
+    let left_gutter = measure_gutter(ctx, &labels(&left));
+    let right_gutter = measure_gutter(ctx, &labels(&right));
+    let plot = plot_rect(w, h, left_gutter, right_gutter);
+    draw_gridlines(ctx, &plot);
+    let (back, front) = if back_is_right {
+        (&right, &left)
+    } else {
+        (&left, &right)
+    };
+    draw_series(ctx, &plot, &back.0, cfg.fill, cfg.capacity, back.1, back.2);
+    draw_series(
+        ctx,
+        &plot,
+        &front.0,
+        cfg.fill,
+        cfg.capacity,
+        front.1,
+        front.2,
+    );
+    draw_axis_ticks(ctx, &plot, left.1, left.2, left.3, AxisSide::Left);
+    draw_axis_ticks(ctx, &plot, right.1, right.2, right.3, AxisSide::Right);
 }
 
 #[cfg(test)]

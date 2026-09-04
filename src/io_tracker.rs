@@ -25,6 +25,16 @@ struct IoBaseline {
     last_timestamp: f64,
 }
 
+impl IoBaseline {
+    fn at(read: u64, write: u64, ts: f64) -> Self {
+        Self {
+            last_read_bytes: read,
+            last_write_bytes: write,
+            last_timestamp: ts,
+        }
+    }
+}
+
 impl Default for IoTracker {
     fn default() -> Self {
         Self::new()
@@ -91,20 +101,12 @@ impl IoTracker {
                         log::debug!("PID {} was reused, resetting I/O baseline", pid);
                     }
                 }
-                *occ.get_mut() = IoBaseline {
-                    last_read_bytes: read_bytes,
-                    last_write_bytes: write_bytes,
-                    last_timestamp: current_timestamp,
-                };
+                *occ.get_mut() = IoBaseline::at(read_bytes, write_bytes, current_timestamp);
             }
             Vacant(vac) => {
                 process.disk_read_speed = None;
                 process.disk_write_speed = None;
-                vac.insert(IoBaseline {
-                    last_read_bytes: read_bytes,
-                    last_write_bytes: write_bytes,
-                    last_timestamp: current_timestamp,
-                });
+                vac.insert(IoBaseline::at(read_bytes, write_bytes, current_timestamp));
             }
         }
     }

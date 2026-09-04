@@ -1,5 +1,6 @@
 use crate::cpu_tracker::CpuTracker;
 use crate::io_tracker::IoTracker;
+use crate::metrics::read_mem_total_kb;
 use crate::process::{build_task_mgr_process, ProcessItem, TaskMgrProcess};
 use anyhow::{Context, Result};
 use log::{debug, warn};
@@ -254,30 +255,6 @@ impl ProcessList {
                 .disk_write_speed
                 .unwrap_or(0.0)
                 .total_cmp(&b.value.disk_write_speed.unwrap_or(0.0)),
-        }
-    }
-}
-
-/// Reads `MemTotal` from `/proc/meminfo`, in KiB. Returns `None` (and logs a
-/// warning) if the file is unreadable or lacks the field; every row then shows
-/// a blank MEM% cell.
-fn read_mem_total_kb() -> Option<u64> {
-    match std::fs::read_to_string("/proc/meminfo") {
-        Ok(text) => {
-            for line in text.lines() {
-                let mut parts = line.split_whitespace();
-                if parts.next() == Some("MemTotal:") {
-                    if let Some(value) = parts.next() {
-                        return value.parse::<u64>().ok();
-                    }
-                }
-            }
-            warn!("MemTotal: not found in /proc/meminfo");
-            None
-        }
-        Err(e) => {
-            warn!("Can't read /proc/meminfo: {e:?}");
-            None
         }
     }
 }

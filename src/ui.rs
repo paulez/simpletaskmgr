@@ -503,14 +503,18 @@ fn build_detail_pane() -> DetailPane {
     let d_mem = mk_detail("MEM%: —");
     let d_disk_read = mk_detail("Disk read: —");
     let d_disk_write = mk_detail("Disk write: —");
-    detail_box.append(&d_pid);
-    detail_box.append(&d_name);
-    detail_box.append(&d_uid);
-    detail_box.append(&d_user);
-    detail_box.append(&d_cpu);
-    detail_box.append(&d_mem);
-    detail_box.append(&d_disk_read);
-    detail_box.append(&d_disk_write);
+    for w in [
+        &d_pid,
+        &d_name,
+        &d_uid,
+        &d_user,
+        &d_cpu,
+        &d_mem,
+        &d_disk_read,
+        &d_disk_write,
+    ] {
+        detail_box.append(w);
+    }
 
     let btn_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     btn_box.add_css_class("detail-buttons");
