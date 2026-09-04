@@ -16,6 +16,10 @@ time, and lets you inspect and signal individual processes.
   SIGHUP or SIGKILL to it.
 - **Resource graph**: always-on charts of system CPU & memory, and CPU
   frequency & temperature, over the last few minutes.
+- **GPU tab**: when an AMD GPU is present and readable via `rocm-smi`,
+  a tab switch above the charts shows GPU utilization, VRAM allocation,
+  and edge temperature alongside the CPU readings (the tab is hidden
+  entirely when no GPU is detected).
 - **Persistent settings**: filter and refresh interval survive restarts
   (Settings popover).
 - **Native & light**: GTK 4 UI; reads information directly from `/proc`.
@@ -26,6 +30,9 @@ time, and lets you inspect and signal individual processes.
 - Linux operating system (uses `/proc`)
 - GTK 4.18 or later (development headers required: `libgtk-4-dev`,
   `libglib2.0-dev`, `libpango1.0-dev`, `libcairo2-dev` on Debian/Ubuntu)
+- *(optional, for the GPU tab)* `rocm-smi` on `PATH` and an AMD GPU.
+  Without it the GPU tab simply doesn't appear; the rest of the app
+  works unchanged.
 
 ## Building
 
