@@ -3,10 +3,15 @@ use std::collections::VecDeque;
 use log::warn;
 
 use crate::cpu_status::{read_cpu0_freq_mhz, read_cpu_temp_c};
+use crate::gpu_status::GpuSample;
 
 /// One system-wide usage sample.
 ///
-/// `cpu` and `mem` are percentages (0–100), the same units the graph plots.
+/// `cpu`, `mem`, `gpu_use` and `gpu_vram` are percentages (0–100), the same
+/// units the graph plots. The GPU fields (and `freq`/`temp`) are `Option`
+/// because their source is platform-conditional — a host without a GPU or,
+/// respectively, the `cpufreq`/`hwmon` interface reports `None` and the UI
+/// reads those as a blank series.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sample {
     /// System CPU utilization percent (0–100) for the interval since the
@@ -21,6 +26,15 @@ pub struct Sample {
     /// CPU temperature in °C read from the CPU's `hwmon` sensor, or `None`
     /// when no CPU sensor is available.
     pub temp: Option<f64>,
+    /// GPU utilization percent (0–100) read from `rocm-smi` `card0`, or
+    /// `None` when no GPU is available.
+    pub gpu_use: Option<f64>,
+    /// GPU VRAM allocation percent (0–100) read from `rocm-smi` `card0`, or
+    /// `None` when no GPU is available.
+    pub gpu_vram: Option<f64>,
+    /// GPU edge temperature in °C read from `rocm-smi` `card0`, or `None`
+    /// when no GPU is available.
+    pub gpu_temp: Option<f64>,
 }
 
 /// Baseline state used to compute a CPU% from `/proc/stat` tick deltas between
@@ -208,15 +222,20 @@ impl SystemMetrics {
         self.history.iter().copied().collect()
     }
 
-    /// The current system CPU% / memory% / frequency / temperature.
+    /// The current system CPU% / memory% / frequency / temperature, plus the
+    /// last GPU reading (utilization, VRAM, temperature).
     ///
     /// CPU% for this interval is computed from the delta since the last call;
     /// the first call has no baseline, so its CPU value is 0.0. Memory% is
     /// read directly from `/proc/meminfo`. Frequency and temperature are read
     /// from `sysfs`; on a read failure the previous value (or `None` for the
     /// first sample) is carried forward so the graph doesn't dip to zero
-    /// spuriously.
-    pub fn push_sample(&mut self) {
+    /// spuriously. The three GPU fields are likewise carried forward from the
+    /// previous sample when `gpu` is `None` — for the first call the value is
+    /// `None`, and the caller on a host with no GPU can keep skipping the
+    /// `rocm-smi` spawn by passing `None` every tick (see
+    /// [`crate::gpu_status::gpu_available`]).
+    pub fn push_sample(&mut self, gpu: Option<GpuSample>) {
         let cpu = self.sample_cpu().unwrap_or(0.0);
         let mem = self.sample_mem().unwrap_or(0.0);
         log::debug!("cpu used {cpu:.1}% (mem {mem:.1}%)");
@@ -232,11 +251,25 @@ impl SystemMetrics {
             Some(t) => Some(t),
             None => prev.and_then(|s| s.temp),
         };
+        // GPU: same carry-over rule as freq/temp. On a host with no GPU the
+        // caller keeps passing `None` (and never spawns rocm-smi), so the
+        // fields stay `None` for the lifetime of the session.
+        let (gpu_use, gpu_vram, gpu_temp) = match gpu {
+            Some(g) => (Some(g.use_pct), Some(g.vram_pct), Some(g.temp_c)),
+            None => (
+                prev.and_then(|s| s.gpu_use),
+                prev.and_then(|s| s.gpu_vram),
+                prev.and_then(|s| s.gpu_temp),
+            ),
+        };
         self.history.push_back(Sample {
             cpu,
             mem,
             freq,
             temp,
+            gpu_use,
+            gpu_vram,
+            gpu_temp,
         });
         while self.history.len() > self.cap {
             self.history.pop_front();
@@ -366,7 +399,7 @@ mod tests {
     fn test_push_sample_caps_history() {
         let mut m = SystemMetrics::with_cap(3);
         for _ in 0..5 {
-            m.push_sample();
+            m.push_sample(None);
         }
         assert_eq!(m.history().len(), 3);
     }
@@ -375,7 +408,7 @@ mod tests {
     fn test_push_sample_updates_history_and_last() {
         let mut m = SystemMetrics::with_cap(10);
         assert!(m.history().is_empty());
-        m.push_sample();
+        m.push_sample(None);
         assert_eq!(m.history().len(), 1);
     }
 
@@ -423,7 +456,7 @@ mod tests {
     #[test]
     fn test_push_sample_carries_freq() {
         let mut m = SystemMetrics::with_cap(10);
-        m.push_sample();
+        m.push_sample(None);
         let last = m.history().pop().unwrap();
         if let Some(mhz) = last.freq {
             assert!(mhz > 0.0, "recorded freq must be positive");
@@ -433,11 +466,48 @@ mod tests {
             );
         }
         // A later sample with a successful live read also records a sane value.
-        m.push_sample();
+        m.push_sample(None);
         let last2 = m.history().pop().unwrap();
         if let Some(mhz) = last2.freq {
             assert!(mhz > 0.0, "second sample's freq must be positive");
             assert!(mhz < 1_000_000.0, "second sample's freq must be sane");
         }
+    }
+
+    /// A pushed sample records the GPU reading that was supplied to it. When
+    /// `None` was *first* passed (no GPU on this host), the GPU fields are
+    /// `None` and remain `None` on subsequent `None`-carrying samples — the
+    /// `Option` is carried forward, not reset to zero (a spurious `0` would
+    /// look like a live reading of "GPU idle").
+    #[test]
+    fn test_push_sample_carries_gpu() {
+        let mut m = SystemMetrics::with_cap(10);
+
+        // No GPU provided (typical on a non-AMD host).
+        m.push_sample(None);
+        let last = m.history().pop().unwrap();
+        assert_eq!(last.gpu_use, None);
+        assert_eq!(last.gpu_vram, None);
+        assert_eq!(last.gpu_temp, None);
+
+        // Passing a concrete GpuSample on the next tick records it.
+        m.push_sample(Some(GpuSample {
+            use_pct: 42.0,
+            vram_pct: 77.0,
+            temp_c: 61.0,
+        }));
+        let last = m.history().pop().unwrap();
+        assert_eq!(last.gpu_use, Some(42.0));
+        assert_eq!(last.gpu_vram, Some(77.0));
+        assert_eq!(last.gpu_temp, Some(61.0));
+
+        // A follow-up `None` (a failed spawn on a live GPU, or a GPU that
+        // dropped off the bus) carries the last reading forward rather than
+        // blanking to zero.
+        m.push_sample(None);
+        let last = m.history().pop().unwrap();
+        assert_eq!(last.gpu_use, Some(42.0), "carry-over must hold 42.0");
+        assert_eq!(last.gpu_vram, Some(77.0));
+        assert_eq!(last.gpu_temp, Some(61.0));
     }
 }

@@ -746,6 +746,9 @@ mod tests {
             mem: v,
             freq: None,
             temp: None,
+            gpu_use: None,
+            gpu_vram: None,
+            gpu_temp: None,
         }
     }
 

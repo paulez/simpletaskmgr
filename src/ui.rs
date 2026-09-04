@@ -85,6 +85,11 @@ struct State {
     /// launch from `/proc/meminfo` `MemTotal`. The fallback (16 GB) covers
     /// hosts where `/proc/meminfo` is unavailable.
     mem_max_mb: f64,
+    /// `true` when a GPU is present and readable via `rocm-smi` (probed once
+    /// at startup). When `false`, the UI hides its tab entirely and the
+    /// per-tick sampler skips the `rocm-smi` spawn, and `push_sample`
+    /// receives `None` to carry over the (never-set) GPU fields.
+    gpu_available: bool,
 }
 
 #[derive(Debug)]
@@ -107,8 +112,21 @@ impl State {
         let settings = UserSettings::load(&path);
         let mut process_list = ProcessList::init();
         process_list.set_show_all(settings.show_all);
+        // Probe for a GPU exactly once. The probe itself is one small
+        // `rocm-smi --showuse --showmemuse --showtemp --json` spawn, so it
+        // does not meaningfully affect startup time on non-GPU hosts either.
+        // When absent the UI hides the GPU tab and the sampler avoids a
+        // spawn-per-tick (see `refresh`).
+        let gpu_available = crate::gpu_status::gpu_available();
         let mut metrics = SystemMetrics::new();
-        metrics.push_sample();
+        // Initial sample: establish the /proc/stat baseline the same way the
+        // CPU path does today; pass the probe result so the first
+        // `Sample`'s GPU fields are populated if a GPU is present.
+        metrics.push_sample(
+            gpu_available
+                .then(crate::gpu_status::read_gpu_card)
+                .flatten(),
+        );
         Self {
             process_list,
             metrics,
@@ -118,6 +136,7 @@ impl State {
             timer_id: Cell::new(None),
             freq_max_mhz: crate::cpu_status::read_max_freq_mhz().unwrap_or(4000.0),
             mem_max_mb: crate::metrics::read_mem_total_mb().unwrap_or(16.0 * 1024.0),
+            gpu_available,
         }
     }
 
@@ -130,7 +149,18 @@ impl State {
 
     fn refresh(&mut self) {
         self.process_list.update_process_list();
-        self.metrics.push_sample();
+        // Per-tick GPU read. On non-GPU hosts (rocm-smi absent or no card0)
+        // the startup probe already determined `gpu_available == false`, so
+        // we skip the spawn entirely rather than burning a fork/exec we know
+        // will fail. On GPU hosts we spawn and pass the result; `push_sample`
+        // carries the previous reading forward when the spawn fails, so a
+        // momentary `rocm-smi` hiccup doesn't blank the series (same rule as
+        // `freq`/`temp`).
+        let gpu = self
+            .gpu_available
+            .then(crate::gpu_status::read_gpu_card)
+            .flatten();
+        self.metrics.push_sample(gpu);
     }
 
     fn find(&self, pid: i32) -> Option<&ProcessItem> {
