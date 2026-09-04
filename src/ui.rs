@@ -305,14 +305,14 @@ fn build_graph_pane(
     (box_v, drawing)
 }
 
-/// Builds the split usage-graph row — a horizontal strip of two panes
+/// Builds the CPU / Mem usage-graph row — a horizontal strip of two panes
 /// (each pane: a centered title label above a [`gtk4::DrawingArea`]),
 /// separated by a GTK default vertical `Separator`. The left pane draws the
 /// CPU + memory utilization series (percent); the right pane draws the CPU
 /// frequency + temperature series (MHz / °C), each on its own dedicated
 /// axis. Both panes read the same rolling history and are redrawn in
 /// lockstep on every refresh.
-fn build_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::DrawingArea>) {
+fn build_cpu_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::DrawingArea>) {
     let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     row.set_hexpand(true);
 
@@ -323,6 +323,28 @@ fn build_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::DrawingA
     row.append(&sep);
 
     let (pane_r, right) = build_graph_pane(state, "CPU Freq & Temp", ChartPane::FreqTemp);
+    row.append(&pane_r);
+
+    (row, vec![left, right])
+}
+
+/// Builds the GPU usage-graph row, following the same two-pane layout as
+/// [`build_cpu_graph_row`] but for `rocm-smi` readings. The left pane draws
+/// GPU utilization + VRAM (two percent series); the right pane draws the
+/// GPU's edge temperature (single auto-scaled °C series). Both read the same
+/// rolling history as the CPU tab and are redrawn in the same tick so the
+/// data is always fresh when the user switches between the two tabs.
+fn build_gpu_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::DrawingArea>) {
+    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    row.set_hexpand(true);
+
+    let (pane_l, left) = build_graph_pane(state, "GPU Use & VRAM", ChartPane::GpuUseVram);
+    row.append(&pane_l);
+
+    let sep = gtk4::Separator::new(gtk4::Orientation::Vertical);
+    row.append(&sep);
+
+    let (pane_r, right) = build_graph_pane(state, "GPU Temp", ChartPane::GpuTemp);
     row.append(&pane_r);
 
     (row, vec![left, right])
@@ -773,7 +795,29 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     window.set_child(Some(&root));
 
-    let (graph_row, graph_areas) = build_graph_row(&state);
+    let (cpu_row, mut graph_areas) = build_cpu_graph_row(&state);
+    let gpu_available = state.borrow().gpu_available;
+    if gpu_available {
+        let (gpu_row, gpu_areas) = build_gpu_graph_row(&state);
+        graph_areas.extend(gpu_areas);
+
+        // A `Stack` holds both graph rows (CPU / Mem and GPU) and a
+        // `StackSwitcher` above it is the tab bar the user clicks to pick
+        // which one to show. The stack starts on the CPU row — the GPU tab
+        // is only reachable when a GPU was actually detected — and we
+        // deliberately don't persist the user's choice, so a restart always
+        // lands on "CPU / Mem".
+        let stack = gtk4::Stack::new();
+        let switcher = gtk4::StackSwitcher::new();
+        switcher.set_stack(Some(&stack));
+        stack.add_titled(&cpu_row, Some("cpu"), "CPU / Mem");
+        stack.add_titled(&gpu_row, Some("gpu"), "GPU");
+        stack.set_visible_child_name("cpu");
+        root.append(&switcher);
+        root.append(&stack);
+    } else {
+        root.append(&cpu_row);
+    }
     let list = build_process_list();
     let detail = build_detail_pane();
     let settings = build_settings_popover();
@@ -792,9 +836,8 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // ---- Assemble root ---------------------------------------------------------
     // The graph row sits on top and the body (list | detail) directly below it;
     // the Settings control lives in the header bar, so nothing wedges a row
-    // between the graph and the list.
-    root.append(&graph_row);
-
+    // between the graph and the list. (When a GPU is present a `Stack` +
+    // `StackSwitcher` replace the bare row above.)
     root.append(&body);
 
     // ---- Shared closure: republish the store from state ------------------------
