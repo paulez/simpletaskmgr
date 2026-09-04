@@ -143,70 +143,52 @@ impl ProcessRow {
         *self.imp().data.borrow() == *item
     }
 
-    /// Replaces this row's data with a fresh copy. For each display property
-    /// whose text changed, a `notify` signal is emitted so any widget bound
-    /// to it re-renders — no object replacement, no store mutation, no
-    /// row-widget rebuild.
+    /// Replaces this row's data with a fresh copy. For each displayed property
+    /// whose text changed, a `notify` signal is emitted so the bound cell
+    /// re-renders — no object replacement, no store mutation, no row-widget
+    /// rebuild. A property whose text is unchanged is left alone, so a value
+    /// that only shifts below the displayed precision (e.g. 1.04% → 1.05%)
+    /// does not repaint its cell.
     pub fn set_item(&self, item: &ProcessItem) {
         let imp = self.imp();
-        if *imp.data.borrow() == *item {
-            return;
-        }
-        // Compute the per-field `changed` flags *under an immutable borrow*,
-        // so the diff never clones the old `ProcessItem` (two `String`
-        // copies). The flags are `Bool` (`Copy`), so they outlive the borrow
-        // safely; only after the borrow is dropped do we overwrite the cell.
-        let o = imp.data.borrow();
-        let p = &item.value;
-        let (
-            pid_changed,
-            username_changed,
-            name_changed,
-            cpu_changed,
-            mem_changed,
-            read_changed,
-            write_changed,
-        ) = {
-            let ov = &o.value;
-            (
-                ov.pid != p.pid,
-                ov.username != p.username,
-                ov.name != p.name,
-                ov.cpu_percent.total_cmp(&p.cpu_percent) != std::cmp::Ordering::Equal,
-                // `Option<f64>` needs an explicit `None` arm — two `None`s
-                // must not fire a notify — and `total_cmp` keeps the `Some`
-                // comparison NaN-safe like cpu.
-                match (ov.mem_percent, p.mem_percent) {
-                    (None, None) => false,
-                    (Some(a), Some(b)) => a.total_cmp(&b) != std::cmp::Ordering::Equal,
-                    (Some(_), None) | (None, Some(_)) => true,
-                },
-                ov.disk_read_speed != p.disk_read_speed,
-                ov.disk_write_speed != p.disk_write_speed,
-            )
+        // Compute the names of the properties whose displayed text changed,
+        // *under an immutable borrow*, so the diff never clones the old data.
+        // (`Bool` is `Copy`, and we keep only the property names, so nothing
+        // derived from the borrow outlives it.)
+        let changed = {
+            let o = imp.data.borrow();
+            if *o == *item {
+                return;
+            }
+            [
+                ("pid", o.pid != item.pid),
+                ("username", o.value.username != item.value.username),
+                ("name", o.value.name != item.value.name),
+                (
+                    "cpu",
+                    o.value.cpu_percent_str() != item.value.cpu_percent_str(),
+                ),
+                (
+                    "mem",
+                    o.value.mem_percent_str() != item.value.mem_percent_str(),
+                ),
+                (
+                    "disk-read",
+                    o.value.disk_read_str() != item.value.disk_read_str(),
+                ),
+                (
+                    "disk-write",
+                    o.value.disk_write_str() != item.value.disk_write_str(),
+                ),
+            ]
+            .into_iter()
+            .filter(|(_, changed)| *changed)
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>()
         };
-        drop(o);
         *imp.data.borrow_mut() = item.clone();
-        if pid_changed {
-            self.notify("pid");
-        }
-        if username_changed {
-            self.notify("username");
-        }
-        if name_changed {
-            self.notify("name");
-        }
-        if cpu_changed {
-            self.notify("cpu");
-        }
-        if mem_changed {
-            self.notify("mem");
-        }
-        if read_changed {
-            self.notify("disk-read");
-        }
-        if write_changed {
-            self.notify("disk-write");
+        for name in changed {
+            self.notify(name);
         }
     }
 }
