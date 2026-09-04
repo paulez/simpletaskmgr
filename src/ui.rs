@@ -354,6 +354,30 @@ fn build_gpu_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::Draw
     (row, vec![left, right])
 }
 
+/// Builds the Disk I/O usage-graph row, following the same two-pane layout as
+/// [`build_cpu_graph_row`]. The left pane draws the physical disks' read +
+/// write throughput (two auto-scaled bytes/s series); the right pane draws the
+/// busiest disk's utilization (a single 0–100% series). Both read the same
+/// rolling history as the other tabs and are redrawn in the same tick, so the
+/// data is always fresh when the user switches tabs. Present on every host
+/// (no GPU-style availability gate) — a host with no physical disk simply
+/// paints a blank pane with a `"no disk"` header.
+fn build_disk_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::DrawingArea>) {
+    let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+    row.set_hexpand(true);
+
+    let (pane_l, left) = build_graph_pane(state, "Disk Throughput", ChartPane::DiskThroughput);
+    row.append(&pane_l);
+
+    let sep = gtk4::Separator::new(gtk4::Orientation::Vertical);
+    row.append(&sep);
+
+    let (pane_r, right) = build_graph_pane(state, "Disk Utilization", ChartPane::DiskUtil);
+    row.append(&pane_r);
+
+    (row, vec![left, right])
+}
+
 /// One shared `SignalListItemFactory` for a text column: a single `Label`
 /// whose `label` is property-bound to the row's `ProcessRow` string property
 /// (`prop_name`). Re-texting a cell on refresh is a pure `g_object_notify`.
@@ -799,29 +823,31 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
     window.set_child(Some(&root));
 
+    // A `Stack` holds every graph row (CPU / Mem, Disk I/O, and — when a GPU
+    // is present — GPU) and a `StackSwitcher` above it is the tab bar the
+    // user clicks to pick which one to show. The stack always starts on the
+    // CPU / Mem row; we deliberately don't persist the user's choice, so a
+    // restart always lands there. The GPU tab is added only when a GPU was
+    // actually detected (see `gpu_available`); the other two are present on
+    // every host.
     let (cpu_row, mut graph_areas) = build_cpu_graph_row(&state);
+    let (disk_row, disk_areas) = build_disk_graph_row(&state);
+    graph_areas.extend(disk_areas);
     let gpu_available = state.borrow().gpu_available;
+
+    let stack = gtk4::Stack::new();
+    let switcher = gtk4::StackSwitcher::new();
+    switcher.set_stack(Some(&stack));
+    stack.add_titled(&cpu_row, Some("cpu"), "CPU / Mem");
+    stack.add_titled(&disk_row, Some("disk"), "Disk I/O");
+    stack.set_visible_child_name("cpu");
     if gpu_available {
         let (gpu_row, gpu_areas) = build_gpu_graph_row(&state);
         graph_areas.extend(gpu_areas);
-
-        // A `Stack` holds both graph rows (CPU / Mem and GPU) and a
-        // `StackSwitcher` above it is the tab bar the user clicks to pick
-        // which one to show. The stack starts on the CPU row — the GPU tab
-        // is only reachable when a GPU was actually detected — and we
-        // deliberately don't persist the user's choice, so a restart always
-        // lands on "CPU / Mem".
-        let stack = gtk4::Stack::new();
-        let switcher = gtk4::StackSwitcher::new();
-        switcher.set_stack(Some(&stack));
-        stack.add_titled(&cpu_row, Some("cpu"), "CPU / Mem");
         stack.add_titled(&gpu_row, Some("gpu"), "GPU");
-        stack.set_visible_child_name("cpu");
-        root.append(&switcher);
-        root.append(&stack);
-    } else {
-        root.append(&cpu_row);
     }
+    root.append(&switcher);
+    root.append(&stack);
     let list = build_process_list();
     let detail = build_detail_pane();
     let settings = build_settings_popover();
@@ -838,10 +864,9 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     body.append(&detail.scroll);
 
     // ---- Assemble root ---------------------------------------------------------
-    // The graph row sits on top and the body (list | detail) directly below it;
-    // the Settings control lives in the header bar, so nothing wedges a row
-    // between the graph and the list. (When a GPU is present a `Stack` +
-    // `StackSwitcher` replace the bare row above.)
+    // The graph `Stack` (CPU / Mem, Disk I/O, and GPU when present) sits on top
+    // and the body (list | detail) directly below it; the Settings control lives
+    // in the header bar, so nothing wedges a row between the graph and the list.
     root.append(&body);
 
     // ---- Shared closure: republish the store from state ------------------------
