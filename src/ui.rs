@@ -268,12 +268,21 @@ fn build_graph_pane(
     box_v.append(&label);
 
     let drawing = gtk4::DrawingArea::new();
-    drawing.set_content_height(80);
+    // Disk panes carry a colour+name legend band below the plot
+    // (`usage_graph::LEGEND_PAD` worth), so they need a taller widget than the
+    // other panes or the plot would shrink to make room. `104` = `80` + `20`
+    // leaves the plot the same height and gives the legend its own band.
+    let height = if matches!(pane, ChartPane::DiskThroughput | ChartPane::DiskUtil) {
+        80 + crate::usage_graph::LEGEND_PAD as i32
+    } else {
+        80
+    };
+    drawing.set_content_height(height);
     drawing.set_hexpand(true);
     drawing.add_css_class("graph-area");
     let st = state.clone();
     let header = label.clone();
-    drawing.set_draw_func(move |_da, cr: &gtk4::cairo::Context, w: i32, h: i32| {
+    drawing.set_draw_func(move |da, cr: &gtk4::cairo::Context, w: i32, h: i32| {
         let samples = st.borrow().metrics.history();
         let cfg = ChartConfig {
             freq_max_mhz: st.borrow().freq_max_mhz,
@@ -283,6 +292,23 @@ fn build_graph_pane(
             fill: 7,
             capacity: SystemMetrics::MAX_HISTORY,
         };
+        // Theme foreground (text) colour for the disk-legend device *names*,
+        // so they read on both light and dark themes. The swatch carries each
+        // disk's colour; the name itself stays in the theme's normal text
+        // colour. Falls back to a mid-grey if the lookup is unavailable.
+        // `style_context()` and `lookup_color` were deprecated in GTK 4.10 in
+        // favour of `gtk::CSS::resolve`, but `resolve` only works on values
+        // set by us, not on the theme's built-in `theme_fg_color` — so we
+        // allow the deprecation here (it is the sanctioned way to read a
+        // theme-defined colour) and pull the RGBA out with the `.red()`
+        // accessor (not a field — the field accessors on `gdk::RGBA` were
+        // removed in 0.11).
+        #[allow(deprecated)]
+        let text_rgba = da
+            .style_context()
+            .lookup_color("theme_fg_color")
+            .map(|c| (c.red() as f64, c.green() as f64, c.blue() as f64))
+            .unwrap_or((0.5, 0.5, 0.5));
         // Keep the pane header in sync with the newest sample so the current
         // values are always readable even when a low/flat line is hard to see.
         if let Some(last) = samples.last() {
@@ -302,7 +328,7 @@ fn build_graph_pane(
             };
             header.set_text(&text);
         }
-        paint_usage_chart(cr, w as f64, h as f64, &samples, &cfg, pane);
+        paint_usage_chart(cr, w as f64, h as f64, &samples, &cfg, pane, text_rgba);
     });
     box_v.append(&drawing);
 

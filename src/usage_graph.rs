@@ -12,6 +12,20 @@ fn rgb_to_f64(rgb: (u8, u8, u8)) -> (f64, f64, f64) {
     )
 }
 
+/// The colour of the `index`-th disk: [`DISK_PALETTE`] wrapped by length, so
+/// more disks than palette entries reuse colours (never out of range) and the
+/// first `DISK_PALETTE.len()` disks are always distinct. Pure, so the legend
+/// and the series agree on a disk's colour from the same index.
+pub fn disk_color(index: usize) -> (u8, u8, u8) {
+    DISK_PALETTE[index % DISK_PALETTE.len()]
+}
+
+/// RGB triplet in `0–1` used to paint the legend text (device *names*).
+/// Callers pass the theme's foreground colour so the name reads on both
+/// light and dark themes; a fixed neutral `(0.5, 0.5, 0.5)` is a reasonable
+/// fallback where no widget is available.
+pub type Rgba = (f64, f64, f64);
+
 /// RGB triplet (0–255) for the CPU series — green, matching the old floem
 /// `CPU_COLOR = rgb8(76, 175, 80)` / SVG `#4CAF50`.
 pub const CPU_RGB: (u8, u8, u8) = (76, 175, 80);
@@ -34,17 +48,22 @@ pub const GPU_VRAM_RGB: (u8, u8, u8) = MEM_RGB;
 /// the CPU-temperature series, so "temperature" reads the same colour
 /// regardless of which device it belongs to.
 pub const GPU_TEMP_RGB: (u8, u8, u8) = TEMP_RGB;
-/// RGB triplet (0–255) for the disk read series — green, shared with the CPU
-/// series so "the busy colour" stays consistent. Read is the left/front side
-/// of the throughput pane, mirroring how CPU (front) and memory (back) pair.
-pub const DISK_READ_RGB: (u8, u8, u8) = CPU_RGB;
-/// RGB triplet (0–255) for the disk write series — blue, shared with the
-/// memory series for the same reason.
-pub const DISK_WRITE_RGB: (u8, u8, u8) = MEM_RGB;
-/// RGB triplet (0–255) for the disk-utilization series — amber, distinct from
-/// the green read / blue write / red temperature swatches so a busy % bar
-/// reads as its own thing.
-pub const DISK_UTIL_RGB: (u8, u8, u8) = (255, 152, 0);
+/// Fixed colour palette for per-disk series (0–255 RGB), one distinct colour
+/// per physical disk so a multi-disk host reads as several differently-coloured
+/// lines on a shared axis rather than one. Ordered so neighbours contrast
+/// (a green/blue/red trio first, then the cooler/odd hues). [`disk_color`]
+/// indexes it (wrapping) so the i-th disk — by stable `/proc/diskstats` order —
+/// always gets the same colour.
+pub const DISK_PALETTE: [(u8, u8, u8); 8] = [
+    (76, 175, 80),  // green
+    (33, 150, 243), // blue
+    (229, 57, 53),  // red
+    (171, 71, 189), // purple
+    (255, 152, 0),  // amber
+    (0, 150, 136),  // teal
+    (233, 30, 99),  // pink
+    (255, 87, 34),  // orange
+];
 /// Translucent fill alpha so overlapping series areas read as distinct bands.
 pub const FILL_ALPHA: f64 = 0.22;
 /// Line width of each series (in pixels at the draw-time scale). Thicker than
@@ -80,6 +99,11 @@ pub const TOP_PAD: f64 = 14.0;
 /// Whitespace between a label gutter and the plot boundary, so tick labels
 /// don't hug the axis line.
 pub const GUTTER_PAD: f64 = 4.0;
+/// Bottom band reserved for the per-disk legend (a coloured swatch + the
+/// device name per disk) in the disk panes. Sized for one line of 10pt text
+/// plus a small top/bottom margin so the swatch+label never clips the bottom
+/// edge.
+pub const LEGEND_PAD: f64 = 20.0;
 /// Baseline offset from a tick row, so the top tick (y = plot top) stays
 /// inside the widget and the bottom tick (y = plot bottom) is drawn just
 /// above it.
@@ -457,14 +481,15 @@ pub enum ChartPane {
     /// `GpuTemp` layout where both the left and right slot carry the same
     /// reading so that the shared two-axis drawing path needs no change.
     GpuTemp,
-    /// The disk-throughput pane: total read + write bytes/second across the
-    /// physical disks, drawn as two auto-scaled series (read green front,
-    /// write blue back) on a shared byte-rate axis. Mirrors `CpuMem`, where
-    /// both series are percent — here both are bytes/s.
+    /// The disk-throughput pane: **one coloured line per physical disk**
+    /// (read + write bytes/s), all drawn on a **single** shared bytes/s axis.
+    /// A colour + device name legend sits below the plot. The i-th disk
+    /// (stable `/proc/diskstats` order) has a fixed colour from
+    /// [`DISK_PALETTE`].
     DiskThroughput,
-    /// The disk-utilization pane: the busiest disk's share of each interval
-    /// spent in I/O (0–100%), drawn as a single series on a fixed 0-anchored
-    /// percent axis.
+    /// The disk-utilization pane: one coloured line per physical disk
+    /// (0–100 % of the interval spent in I/O), drawn on a **single** shared
+    /// 0–100 % axis. Same legend layout as [`ChartPane::DiskThroughput`].
     DiskUtil,
 }
 
@@ -548,6 +573,73 @@ fn disks_total(
         }
     }
     any.then_some(sum)
+}
+
+/// Device names to legend + plot, in the newest sample's `/proc/diskstats`
+/// order. Each disk's *colour* is derived from its position here, by
+/// [`disk_color`]. Using the newest non-empty sample (not merely
+/// `samples.last()`) means a sample whose disk read happened to come back
+/// empty still legends the disks the host did have measured; a host with no
+/// disk at all (every sample's `disks` empty) draws a blank pane with no
+/// legend.
+pub fn disk_names(samples: &[Sample]) -> Vec<String> {
+    samples
+        .iter()
+        .rev()
+        .find(|s| !s.disks.is_empty())
+        .map(|s| s.disks.iter().map(|d| d.name.clone()).collect())
+        .unwrap_or_default()
+}
+
+/// The per-sample value (read + write, bytes/s) for the disk `name`, for each
+/// sample in order (oldest first). A sample that does not contain the disk
+/// (a hot-unplug/re-plug or `disks` empty) is `None` there — `iter_some_runs`
+/// then leaves a blank gap rather than a spurious zero, and `draw_series`
+/// never touches a `None`. `None` fields on a *present* disk (a counter
+/// regression) also read as a gap.
+pub fn per_disk_throughput(samples: &[Sample], name: &str) -> Vec<Option<f64>> {
+    samples
+        .iter()
+        .map(|s| match s.disks.iter().find(|d| d.name == name) {
+            None => None,
+            Some(d) => {
+                if d.read_bps.is_none() && d.write_bps.is_none() {
+                    None
+                } else {
+                    Some(d.read_bps.unwrap_or(0.0) + d.write_bps.unwrap_or(0.0))
+                }
+            }
+        })
+        .collect()
+}
+
+/// The per-sample utilization (0–100%) for the disk `name`, same `None`-gap
+/// semantics as [`per_disk_throughput`] for a sample lacking the disk.
+pub fn per_disk_util(samples: &[Sample], name: &str) -> Vec<Option<f64>> {
+    samples
+        .iter()
+        .map(|s| {
+            s.disks
+                .iter()
+                .find(|d| d.name == name)
+                .and_then(|d| d.util_pct)
+        })
+        .collect()
+}
+
+/// Zero-anchored `(min, max)` domain for a set of series, floored at `floor`
+/// so an idle host still reads as a real axis rather than a flat 0 line. The
+/// top is `max(floor, the series' maximum)`, the bottom always `0.0`. All
+/// disks share the returned band, so a slow disk sits low on the same axis as
+/// a fast one (the "one y axis" layout) rather than each getting its own.
+/// An all-`None` set (no disk in any sample) yields the floored band.
+pub fn shared_floor_domain(series: &[Vec<Option<f64>>], floor: f64) -> (f64, f64) {
+    let max = series
+        .iter()
+        .flat_map(|v| v.iter().copied())
+        .map(|v| v.unwrap_or(0.0))
+        .fold(0.0f64, f64::max);
+    (0.0, max.max(floor))
 }
 
 /// Formats a byte/second axis tick as a compact label: `"16 GB/s"`,
@@ -770,14 +862,111 @@ fn draw_axis_ticks(
     let _ = ctx.stroke();
 }
 
-/// Paints one pane of the split rolling-window usage chart into `ctx`,
-/// spanning `(w, h)`.
+/// Paints one disk pane (throughput or utilization) into `ctx`, spanning
+/// `(w, h)`, with a **legend of colour + device name below the plot**.
 ///
-/// The pane is laid out top-to-bottom as: a top padding band (`TOP_PAD`),
-/// reserved for the topmost tick label so it is never clipped by the widget
-/// edge, and finally the plot. Left and right gutters hold the pane's tick
-/// labels outside the plot, sized at draw time from `ctx.text_extents` so
-/// even the widest label (e.g. `"100 °C"`) never clips.
+/// Layout, top to bottom:
+/// * the plot, reserving `TOP_PAD` above (for the top tick label) and a
+///   **left gutter** for the byte/percent tick labels — there is no right
+///   gutter: every disk series shares this single left axis (`"same y axis"`);
+/// * a `LEGEND_PAD` band at the bottom holding, per disk, a small filled
+///   colour swatch followed by the device name in the theme's foreground
+///   colour (`text_rgba`) — the swatch carries the colour, the name stays
+///   readable in whatever theme is active.
+///
+/// One series per disk, drawn back-to-front in `names` order using
+/// [`disk_color`]. The name index is the single source of both the colour and
+/// the series, so the legend and the series agree by construction.
+///
+/// An empty `names` slice (no disk in any sample) paints a blank pane.
+#[allow(clippy::too_many_arguments)]
+fn paint_disk_pane(
+    ctx: &Context,
+    w: f64,
+    h: f64,
+    cfg: &ChartConfig,
+    names: &[String],
+    series: &[Vec<Option<f64>>],
+    domain: (f64, f64),
+    tick: fn(f64) -> String,
+    text_rgba: Rgba,
+) {
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    // Left gutter for the (single) shared axis, sized from the widest of the
+    // three tick labels. Right gutter is zero: there is no second axis.
+    let left_labels = [
+        tick(domain.1),
+        tick((domain.0 + domain.1) / 2.0),
+        tick(domain.0),
+    ];
+    let left_gutter = measure_gutter(ctx, &left_labels);
+    // The plot keeps the top padding band and the bottom legend band. A widget
+    // too small to host both clamps to a zero-height plot (draws nothing).
+    let plot = Plot {
+        ox: left_gutter.max(0.0),
+        oy: TOP_PAD.max(0.0),
+        w: (w - left_gutter).max(0.0),
+        h: (h - TOP_PAD - LEGEND_PAD).max(0.0),
+    };
+    debug_assert!(plot.non_negative());
+    draw_gridlines(ctx, &plot);
+    // One series per disk, back-to-front in legend order, all on the shared
+    // domain. The ordinal i (legend order) is the single source of the colour,
+    // so the drawn line and the legend swatch agree by construction.
+    for (i, s) in series.iter().enumerate() {
+        draw_series(ctx, &plot, s, cfg.fill, cfg.capacity, domain, disk_color(i));
+    }
+    // Shared left axis (ticks + faint edge guide), tinted toward the first
+    // (busiest) series' colour so the axis reads as "the" axis, not a
+    // neutral decoration.
+    draw_axis_ticks(ctx, &plot, domain, disk_color(0), tick, AxisSide::Left);
+    // Legend band below the plot: one colour swatch + the device name per
+    // disk, laid out left-to-right, wrapping to a second line if the names
+    // overflow the pane width. The swatch carries the disk's colour; the name
+    // is drawn in the theme's foreground colour so it reads on any background.
+    if names.is_empty() || plot.w <= 0.0 {
+        return;
+    }
+    let swatch = 10.0; // swatch square edge (px)
+    let swatch_to_text = 5.0; // gap between swatch and name (px)
+    let item_gap = 12.0; // gap between one disk's item and the next (px)
+    let row_step = swatch + 4.0; // vertical advance when wrapping (px)
+    let band_top = plot.oy + plot.h;
+    let band_h = h - band_top;
+    let right_edge = w - GUTTER_PAD;
+    let mut x = GUTTER_PAD;
+    // First row's text baseline, centred within the `LEGEND_PAD` band.
+    let mut baseline = band_top + band_h / 2.0;
+    for (i, name) in names.iter().enumerate() {
+        let (r, g, b) = rgb_to_f64(disk_color(i));
+        let text_w = ctx.text_extents(name).map(|e| e.width()).unwrap_or(0.0);
+        let item_w = swatch + swatch_to_text + text_w;
+        // Wrap before drawing this item if it would overflow the pane width.
+        if x + item_w > right_edge && x > GUTTER_PAD {
+            x = GUTTER_PAD;
+            baseline += row_step;
+        }
+        let swatch_top = baseline - swatch / 2.0;
+        // Filled colour swatch.
+        ctx.set_source_rgb(r, g, b);
+        ctx.rectangle(x, swatch_top, swatch, swatch);
+        let _ = ctx.fill();
+        // Device name in the theme's foreground colour (`text_rgba`) so it
+        // reads on any background; the swatch carries the disk's colour.
+        ctx.set_source_rgba(text_rgba.0, text_rgba.1, text_rgba.2, 1.0);
+        ctx.move_to(x + swatch + swatch_to_text, baseline);
+        let _ = ctx.show_text(name);
+        x += item_w + item_gap;
+    }
+}
+
+/// Paints one pane of the split rolling-window usage chart into `ctx`,
+/// spanning `(w, h)`. The plot keeps a `TOP_PAD` band above for the topmost
+/// tick label (so it is never clipped by the widget edge) and a left/right
+/// gutter for tick labels, sized at draw time from `ctx.text_extents` so even
+/// the widest label (e.g. `"100 °C"`) never clips.
 ///
 /// The pane title (e.g. `"CPU & Memory"`) is drawn by the GTK layer as a
 /// standard centered `Label` *above* this widget, using the theme's font and
@@ -793,8 +982,13 @@ fn draw_axis_ticks(
 ///   each on its own **auto-scaled** axis zoomed to the measured band so a
 ///   CPU idling at 50–85 °C spans the full pane height instead of sitting in
 ///   the middle of a fixed 0–100 °C axis. When a sensor is absent (all samples
-///   `None`) the axis falls back to `0–` the series-wide ceiling (`cfg.freq_max_mhz`
-///   for MHz, `100 °C` for temperature).
+///   `None`) the axis falls back to `0–` the series-wide ceiling
+///   (`cfg.freq_max_mhz` for MHz, `100 °C` for temperature).
+/// * [`ChartPane::DiskThroughput`] / [`ChartPane::DiskUtil`] — the **per-disk**
+///   panes: one series per physical disk on a single shared y axis, with a
+///   colour-plus-name legend below the plot. The `text_rgba` argument supplies
+///   the theme foreground colour for the legend *names*; the swatch carries
+///   each disk's colour (via [`disk_color`]).
 ///
 /// A series whose samples are all `None` (no sensor) is skipped. An empty
 /// history paints a blank, valid chart.
@@ -805,6 +999,9 @@ pub fn paint_usage_chart(
     samples: &[Sample],
     cfg: &ChartConfig,
     pane: ChartPane,
+    // Theme's foreground (text) colour in `0–1` RGB for the disk legend text
+    // (device *names*). Only the disk panes use it; other panes ignore it.
+    text_rgba: Rgba,
 ) {
     if w <= 0.0 || h <= 0.0 {
         return;
@@ -817,6 +1014,42 @@ pub fn paint_usage_chart(
     // 10pt keeps the tick labels readable at the default 940px window width
     // without crowding the narrow plot — 9pt read as thin/faint on screen.
     ctx.set_font_size(10.0);
+
+    // Disk panes (throughput + utilization) share a special layout: one line
+    // per disk on a **single** bytes/s (or %) axis, with a colour+name legend
+    // below the plot. They do not fit the two-side dual-axis model used by the
+    // other panes, so they short-circuit here with their own painter. The
+    // font is already set above so `measure_gutter` + text extents match the
+    // other panes' sizing.
+    if matches!(pane, ChartPane::DiskThroughput | ChartPane::DiskUtil) {
+        let names = disk_names(samples);
+        if names.is_empty() {
+            // No disk in any sample → blank pane, no series, no legend.
+            return;
+        }
+        let series: Vec<Vec<Option<f64>>> = if matches!(pane, ChartPane::DiskThroughput) {
+            names
+                .iter()
+                .map(|n| per_disk_throughput(samples, n))
+                .collect()
+        } else {
+            names.iter().map(|n| per_disk_util(samples, n)).collect()
+        };
+        const MIN_SPAN_BYTES: f64 = 1_000_000.0;
+        let domain = if matches!(pane, ChartPane::DiskThroughput) {
+            shared_floor_domain(&series, MIN_SPAN_BYTES)
+        } else {
+            (0.0, 100.0)
+        };
+        let tick = if matches!(pane, ChartPane::DiskThroughput) {
+            axis_tick_bytes
+        } else {
+            axis_tick_percent
+        };
+        paint_disk_pane(ctx, w, h, cfg, &names, &series, domain, tick, text_rgba);
+        return;
+    }
+
     // Both panes are the same dual-axis layout: a left and a right series,
     // each with its own `(values, domain, rgb, tick_fn)` where `domain` is the
     // `(min, max)` band that maps to the plot's bottom and top, axes on
@@ -894,57 +1127,23 @@ pub fn paint_usage_chart(
                 true,
             )
         }
-        // DiskUtil: single-series pane on a fixed 0–100% axis. Each sample
-        // reports the busiest disk's utilization (time in I/O, 0–100). A
-        // sample with no physical disk — or with only `None` util values — is
-        // a gap in the series (`iter_some_runs` leaves it blank).
-        ChartPane::DiskUtil => {
-            let util: Vec<Option<f64>> = samples
-                .iter()
-                .map(|s| {
-                    s.disks
-                        .iter()
-                        .filter_map(|d| d.util_pct)
-                        .fold(None, |acc: Option<f64>, u: f64| {
-                            Some(acc.map_or(u, |p| p.max(u)))
-                        })
-                })
-                .collect();
+        // Disk panes are handled in the short-circuit above (one series per
+        // disk on a single shared axis, with a legend below the plot), so they
+        // do not participate in the two-side dual-axis layout below. If one
+        // reaches this point the caller passed a disk pane without the
+        // short-circuit — treat it as no-op (return the CpuMem layout as a
+        // safe default) but do not paint.
+        ChartPane::DiskThroughput | ChartPane::DiskUtil => {
+            // This branch is unreachable because paint_usage_chart early-
+            // returns for disk panes. Provide a safe fallback for exhaustiveness.
             (
-                (util, (0.0, 100.0), DISK_UTIL_RGB, axis_tick_percent),
+                (
+                    samples.iter().map(|s| Some(s.cpu)).collect(),
+                    (0.0, 100.0),
+                    CPU_RGB,
+                    axis_tick_percent,
+                ),
                 None,
-                true,
-            )
-        }
-        // DiskThroughput: two series (read front, write back) on a shared
-        // byte-rate axis, mirroring `CpuMem` (percent) but scaled to a byte
-        // domain. The domain auto-scales to the measured band of both series
-        // (floored at 1 MiB/s so an idle disk still has a readable axis rather
-        // than collapsing to a flat 0 line). A `None` series point (first
-        // sample / no disk) is a blank gap.
-        ChartPane::DiskThroughput => {
-            const MIN_SPAN_BYTES: f64 = 1_000_000.0; // ~1 MiB/s floor
-            let read: Vec<Option<f64>> = samples
-                .iter()
-                .map(|s| disks_total(&s.disks, |d| d.read_bps))
-                .collect();
-            let write: Vec<Option<f64>> = samples
-                .iter()
-                .map(|s| disks_total(&s.disks, |d| d.write_bps))
-                .collect();
-            let dom = auto_domain(
-                &read,
-                (0.0, MIN_SPAN_BYTES),
-                MIN_SPAN_BYTES,
-                AUTO_DOMAIN_PAD,
-            );
-            let dom2 = auto_domain(&write, dom, MIN_SPAN_BYTES, AUTO_DOMAIN_PAD);
-            // Both series share the wider of the two domains so their lines
-            // are comparable on the same axis.
-            let shared = (dom2.0.max(dom.0), dom2.1.max(dom.1));
-            (
-                (read, shared, DISK_READ_RGB, axis_tick_bytes),
-                Some((write, shared, DISK_WRITE_RGB, axis_tick_bytes)),
                 true,
             )
         }
@@ -1282,6 +1481,105 @@ mod tests {
     #[test]
     fn test_disk_throughput_readout_empty() {
         assert_eq!(disk_throughput_readout(&[]), "no disk");
+    }
+
+    fn disk(name: &str, rbps: Option<f64>, wbps: Option<f64>, util: Option<f64>) -> DiskSample {
+        DiskSample {
+            name: name.into(),
+            read_bps: rbps,
+            write_bps: wbps,
+            util_pct: util,
+        }
+    }
+
+    #[test]
+    fn test_disk_color_wraps_and_is_stable() {
+        // First palette.len() disks are distinct and in order; the next wraps
+        // back to the first colour (mod semantics, never out-of-range).
+        for (i, expected) in DISK_PALETTE.iter().enumerate() {
+            assert_eq!(disk_color(i), *expected);
+        }
+        assert_eq!(disk_color(DISK_PALETTE.len()), DISK_PALETTE[0]);
+        assert_eq!(disk_color(DISK_PALETTE.len() + 1), DISK_PALETTE[1]);
+        // 666 disks: pure wrap, no panic.
+        assert_eq!(disk_color(666), DISK_PALETTE[666 % DISK_PALETTE.len()]);
+    }
+
+    #[test]
+    fn test_disk_names_picks_newest_nonempty() {
+        // Oldest sample has no disk; newest has two → the two disk names.
+        let a = sample(0.0);
+        let mut b = sample(1.0);
+        b.disks = vec![disk("sda", None, None, None), disk("sdb", None, None, None)];
+        let hist = vec![a, b];
+        assert_eq!(
+            disk_names(&hist),
+            vec!["sda".to_string(), "sdb".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_disk_names_empty_when_none() {
+        assert_eq!(disk_names(&[]), Vec::<String>::new());
+        assert_eq!(disk_names(&[sample(0.0)]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_per_disk_throughput_sums_and_gaps() {
+        let mut a = sample(0.0);
+        a.disks = vec![disk("sda", Some(1.0), Some(2.0), None)];
+        // A sample with a *different* disk — sda is a gap here.
+        let mut b = sample(1.0);
+        b.disks = vec![disk("sdb", Some(10.0), Some(10.0), None)];
+        let series = vec![a, b];
+        assert_eq!(per_disk_throughput(&series, "sda"), vec![Some(3.0), None]);
+        assert_eq!(per_disk_throughput(&series, "sdb"), vec![None, Some(20.0)]);
+        // A disk absent from every sample reads all gaps.
+        assert_eq!(per_disk_throughput(&series, "sdc"), vec![None, None]);
+    }
+
+    #[test]
+    fn test_per_disk_util_propagates_none() {
+        let mut a = sample(0.0);
+        a.disks = vec![disk("sda", None, None, Some(42.0))];
+        let mut b = sample(1.0);
+        b.disks = vec![disk("sda", None, None, None)];
+        let series = vec![a, b];
+        assert_eq!(per_disk_util(&series, "sda"), vec![Some(42.0), None]);
+        // A third empty sample: sda is a gap, sdc (absent everywhere) too.
+        let c = sample(2.0);
+        let all = vec![series[0].clone(), series[1].clone(), c];
+        assert_eq!(per_disk_util(&all, "sda"), vec![Some(42.0), None, None]);
+        assert_eq!(per_disk_util(&all, "sdc"), vec![None, None, None]);
+    }
+
+    #[test]
+    fn test_shared_floor_domain_floors_low_values() {
+        let series = vec![vec![Some(1.0), Some(2.0)], vec![Some(3.0), Some(4.0)]];
+        assert_eq!(
+            shared_floor_domain(&series, 1_000_000.0),
+            (0.0, 1_000_000.0)
+        );
+    }
+
+    #[test]
+    fn test_shared_floor_domain_uses_max_value() {
+        let series = vec![
+            vec![Some(2_000_000.0), Some(20_000_000.0)],
+            vec![Some(5_000_000.0)],
+        ];
+        assert_eq!(
+            shared_floor_domain(&series, 1_000_000.0),
+            (0.0, 20_000_000.0)
+        );
+    }
+
+    #[test]
+    fn test_shared_floor_domain_all_none_floor() {
+        assert_eq!(
+            shared_floor_domain(&[vec![None, None]], 1_000_000.0),
+            (0.0, 1_000_000.0)
+        );
     }
 
     /// `disk_util_readout` shows the busiest disk's percent (not a sum), and
