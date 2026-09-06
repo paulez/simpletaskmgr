@@ -399,9 +399,86 @@ fn build_disk_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::Dra
     (row, vec![left, right])
 }
 
+/// Qdata key under which we park the `glib::Binding` we create in
+/// [`bind_cell_binding`]. One live binding per (label, property) is the
+/// invariant the factory maintains; the key lets [`make_cell_factory`]'s
+/// `connect_unbind` handler find and disconnect the binding before GTK
+/// re-uses the cell widget for a different `ProcessRow`.
+///
+/// `&'static str` (not a `Quark`) is sufficient — the key is only ever
+/// passed through `set_data`/`steal_data` in this crate.
+const CELL_BINDING_KEY: &str = "simpletaskmgr::cell-binding";
+
+/// Extracted out of [`make_cell_factory`] so the bind/unbind lifecycle can be
+/// unit-tested in isolation, without a full `ColumnView` in flight.
+///
+/// The factory creates a `glib::Binding` between a (recycled-per-row)
+/// [`gtk4::Label`] on the cell and the [`ProcessRow`] `glib::Object` the
+/// cell now shows. GTK4 reuses list-item widgets across rows (this is the
+/// whole "anti-flicker" contract documented in `refresh_list.rs` — the row
+/// object survives across sort passes and its `GtkListItemManager` slot is
+/// re-bound to a *different* `ProcessRow`). If the binding is not explicitly
+/// disconnected when the cell slot is unbound, the *old* binding stays active
+/// on the same label property as the new one. A subsequent
+/// `set_item` → `notify("<prop>")` on the old row (which is still alive
+/// because the binding holds a strong ref to it) can then win the last-writer
+/// race on the label and display the wrong row's value — that is the
+/// "kworker/ on firefox's pid" incoherence reported by users.
+///
+/// So: we (a) build the binding, (b) park it on the target via qdata so we
+/// can find and disconnect it when the factory fires `unbind`, and (c)
+/// defensively retire any prior binding the label is still holding (this
+/// should be unreachable on the happy path because the factory's
+/// `connect_unbind` already cleaned it up — the guard exists to keep the
+/// code correct even if a caller skips the factory or future GTK re-orders
+/// the lifecycle signals).
+///
+/// Returns the `glib::Binding` handle so tests can assert on it. The
+/// binding is also stored on `label` under [`CELL_BINDING_KEY`]; callers
+/// that do not need the handle can simply drop it (its qdata slot keeps it
+/// alive until [`make_cell_factory`]'s `connect_unbind` steals and
+/// disconnects it).
+fn bind_cell_binding(label: &gtk4::Label, row: &ProcessRow, prop_name: &str) -> glib::Binding {
+    // SAFETY: `label` is a live `GtkWidget` (built in the factory's
+    // `setup` and re-used by GTK). `glib::Binding` is the only type we
+    // ever store under `CELL_BINDING_KEY` in this crate, and we are the
+    // sole writer — GTK's single main-loop thread serialises access.
+    let stale = unsafe { label.steal_data::<glib::Binding>(CELL_BINDING_KEY) };
+    if let Some(prev) = stale {
+        // This is the diagnostic the plan asked for: on the old (buggy)
+        // code path this never ran, so the leak was silent. In the fixed
+        // flow the factory's `connect_unbind` has already stolen and
+        // disconnected the previous binding, so `stale` is `None` here and
+        // this warn never fires in normal operation. If it ever does, the
+        // root cause is back and the log is the first signal of it.
+        log::warn!(
+            "cell label still held a live binding for `{prop_name}` when a new one \
+             was requested — retiring the old one (leaked-binding guard)"
+        );
+        prev.unbind();
+    }
+    let binding = row
+        .bind_property(prop_name, label, "label")
+        .sync_create()
+        .build();
+    // SAFETY: same rationale as above — single main thread, one writer,
+    // and `glib::Binding` is the type parked under this key. The qdata
+    // slot keeps the binding alive (and holds the source `ProcessRow` ref)
+    // until `connect_unbind` steals it out and calls `unbind()` on it.
+    unsafe { label.set_data::<glib::Binding>(CELL_BINDING_KEY, binding.clone()) };
+    binding
+}
+
 /// One shared `SignalListItemFactory` for a text column: a single `Label`
 /// whose `label` is property-bound to the row's `ProcessRow` string property
 /// (`prop_name`). Re-texting a cell on refresh is a pure `g_object_notify`.
+///
+/// The `connect_unbind` handler is the critical part of the fix: GTK emits
+/// `unbind` when the cell slot is detached from its item — either before it
+/// is re-bound to a different item (recycle on sort) or before it is
+/// destroyed entirely. We steal and disconnect the binding parked on the
+/// label in `bind_cell_binding` so the next `bind` starts from a clean state
+/// and no stale `notify` from an old row can overwrite the new cell.
 fn make_cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
     let f = gtk4::SignalListItemFactory::new();
     f.connect_setup(move |_f, li| {
@@ -409,6 +486,28 @@ fn make_cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
         let label = gtk4::Label::new(None);
         label.set_xalign(0.0);
         li.set_child(Some(&label));
+    });
+    f.connect_unbind(move |_f, li| {
+        let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
+        let Some(child) = li.child() else {
+            return;
+        };
+        let Ok(label) = child.downcast::<gtk4::Label>() else {
+            return;
+        };
+        // SAFETY: same rationale as in `bind_cell_binding` — the label is
+        // live (still parented on the list item), `glib::Binding` is the
+        // sole type stored under `CELL_BINDING_KEY`, and we are the only
+        // writer on GTK's main-loop thread. `steal_data` removes the value
+        // from the qdata slot so the binding is no longer referenced by the
+        // label; we then own the sole external reference and drop it after
+        // disconnecting.
+        if let Some(prev) = unsafe { label.steal_data::<glib::Binding>(CELL_BINDING_KEY) } {
+            // `unbind()` disconnects the property binding and lets glib drop
+            // its internal handle. We drop the Rust wrapper last so that the
+            // C ref and the signal connection are both released.
+            prev.unbind();
+        }
     });
     f.connect_bind(move |_f, li| {
         let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
@@ -422,14 +521,7 @@ fn make_cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
             .expect("a row object")
             .downcast::<ProcessRow>()
             .expect("a ProcessRow");
-        // `g_object_bind_property` auto-drops the binding when either the
-        // row object or this cell widget is destroyed. `sync_create`
-        // copies the current value into the label immediately (the
-        // factory may run its `setup`/`bind` in either order, so we do
-        // not rely on the `notify` order).
-        row.bind_property(prop_name, &label, "label")
-            .sync_create()
-            .build();
+        bind_cell_binding(&label, &row, prop_name);
     });
     f
 }
