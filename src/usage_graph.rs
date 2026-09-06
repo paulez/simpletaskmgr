@@ -12,49 +12,19 @@ fn rgb_to_f64(rgb: (u8, u8, u8)) -> (f64, f64, f64) {
     )
 }
 
-/// The colour of the `index`-th disk: [`DISK_PALETTE`] wrapped by length, so
-/// more disks than palette entries reuse colours (never out of range) and the
-/// first `DISK_PALETTE.len()` disks are always distinct. Pure, so the legend
-/// and the series agree on a disk's colour from the same index.
-pub fn disk_color(index: usize) -> (u8, u8, u8) {
-    DISK_PALETTE[index % DISK_PALETTE.len()]
-}
-
-/// RGB triplet in `0–1` used to paint the legend text (device *names*).
-/// Callers pass the theme's foreground colour so the name reads on both
+/// RGB triplet in `0–1` used to paint the legend text (series *labels*).
+/// Callers pass the theme's foreground colour so the label reads on both
 /// light and dark themes; a fixed neutral `(0.5, 0.5, 0.5)` is a reasonable
 /// fallback where no widget is available.
 pub type Rgba = (f64, f64, f64);
 
-/// RGB triplet (0–255) for the CPU series — green, matching the old floem
-/// `CPU_COLOR = rgb8(76, 175, 80)` / SVG `#4CAF50`.
-pub const CPU_RGB: (u8, u8, u8) = (76, 175, 80);
-/// RGB triplet (0–255) for the memory series — blue, matching the old floem
-/// `MEM_COLOR = rgb8(33, 150, 243)` / SVG `#2196F3`.
-pub const MEM_RGB: (u8, u8, u8) = (33, 150, 243);
-/// RGB triplet (0–255) for the CPU-frequency series — purple, distinct from
-/// the green CPU and blue memory swatches and the red temperature swatch.
-pub const FREQ_RGB: (u8, u8, u8) = (171, 71, 189);
-/// RGB triplet (0–255) for the CPU-temperature series — red.
-pub const TEMP_RGB: (u8, u8, u8) = (229, 57, 53);
-/// RGB triplet (0–255) for the GPU-utilization series — green, shared with
-/// the CPU series so the "busy" colour stays consistent across the two
-/// tabs.
-pub const GPU_USE_RGB: (u8, u8, u8) = CPU_RGB;
-/// RGB triplet (0–255) for the GPU-VRAM series — blue, shared with the
-/// memory series for the same reason.
-pub const GPU_VRAM_RGB: (u8, u8, u8) = MEM_RGB;
-/// RGB triplet (0–255) for the GPU-temperature reading — same red used for
-/// the CPU-temperature series, so "temperature" reads the same colour
-/// regardless of which device it belongs to.
-pub const GPU_TEMP_RGB: (u8, u8, u8) = TEMP_RGB;
-/// Fixed colour palette for per-disk series (0–255 RGB), one distinct colour
-/// per physical disk so a multi-disk host reads as several differently-coloured
-/// lines on a shared axis rather than one. Ordered so neighbours contrast
-/// (a green/blue/red trio first, then the cooler/odd hues). [`disk_color`]
-/// indexes it (wrapping) so the i-th disk — by stable `/proc/diskstats` order —
-/// always gets the same colour.
-pub const DISK_PALETTE: [(u8, u8, u8); 8] = [
+/// Fixed colour palette (0–255 RGB) that every series in the window draws
+/// from — the CPU, memory, frequency, temperature, GPU, and per-disk lines
+/// alike. Ordered so neighbours contrast (a green/blue/red/purple quartet
+/// first, then the cooler/odd hues). Every series' colour is
+/// [`palette_color`] of a fixed index, so the drawn line, its axis tick
+/// colour, and its legend swatch all agree by construction.
+pub const PALETTE: [(u8, u8, u8); 8] = [
     (76, 175, 80),  // green
     (33, 150, 243), // blue
     (229, 57, 53),  // red
@@ -64,6 +34,23 @@ pub const DISK_PALETTE: [(u8, u8, u8); 8] = [
     (233, 30, 99),  // pink
     (255, 87, 34),  // orange
 ];
+
+/// Conventional palette indices each named metric series uses, so a bare
+/// number at the use site reads as a word. These are the colours the
+/// pre-rework `CPU_RGB`/`MEM_RGB`/… constants carried.
+pub const SERIES_CPU: usize = 0; // green
+pub const SERIES_MEM: usize = 1; // blue
+pub const SERIES_TEMP: usize = 2; // red
+pub const SERIES_FREQ: usize = 3; // purple
+
+/// The colour of the `index`-th item in a per-disk pane (or a fixed
+/// `SERIES_*` index for the named metric series): [`PALETTE`] wrapped by
+/// length, so more items than palette entries reuse colours (never out of
+/// range) and the first `PALETTE.len()` are always distinct. Pure, so the
+/// legend and the series agree on an item's colour from the same index.
+pub fn palette_color(index: usize) -> (u8, u8, u8) {
+    PALETTE[index % PALETTE.len()]
+}
 /// Translucent fill alpha so overlapping series areas read as distinct bands.
 pub const FILL_ALPHA: f64 = 0.22;
 /// Line width of each series (in pixels at the draw-time scale). Thicker than
@@ -485,7 +472,7 @@ pub enum ChartPane {
     /// (read + write bytes/s), all drawn on a **single** shared bytes/s axis.
     /// A colour + device name legend sits below the plot. The i-th disk
     /// (stable `/proc/diskstats` order) has a fixed colour from
-    /// [`DISK_PALETTE`].
+    /// [`PALETTE`].
     DiskThroughput,
     /// The disk-utilization pane: one coloured line per physical disk
     /// (0–100 % of the interval spent in I/O), drawn on a **single** shared
@@ -577,7 +564,7 @@ fn disks_total(
 
 /// Device names to legend + plot, in the newest sample's `/proc/diskstats`
 /// order. Each disk's *colour* is derived from its position here, by
-/// [`disk_color`]. Using the newest non-empty sample (not merely
+/// [`palette_color`]. Using the newest non-empty sample (not merely
 /// `samples.last()`) means a sample whose disk read happened to come back
 /// empty still legends the disks the host did have measured; a host with no
 /// disk at all (every sample's `disks` empty) draws a blank pane with no
@@ -640,6 +627,38 @@ pub fn shared_floor_domain(series: &[Vec<Option<f64>>], floor: f64) -> (f64, f64
         .map(|v| v.unwrap_or(0.0))
         .fold(0.0f64, f64::max);
     (0.0, max.max(floor))
+}
+
+/// One entry in a pane's legend band. Both the swatch it draws and the
+/// colour of the series' line/tick are `color`, so swatch and series agree
+/// by construction. `label` is what the user sees in the band.
+///
+/// Legends are the observable, testable part of a pane (the cairo drawing
+/// around them is not), so this pure function is the single source of the
+/// list `paint_disk_pane` and the dual-axis path both render — both the disk
+/// and the metric panes draw their series from the same palette and expose
+/// the same labels, so the tab reads as one coherent set of graphs.
+pub fn legend_items_for_pane(pane: ChartPane, samples: &[Sample]) -> Vec<(String, (u8, u8, u8))> {
+    match pane {
+        ChartPane::CpuMem => vec![
+            ("CPU".to_string(), palette_color(SERIES_CPU)),
+            ("Memory".to_string(), palette_color(SERIES_MEM)),
+        ],
+        ChartPane::FreqTemp => vec![
+            ("Freq".to_string(), palette_color(SERIES_FREQ)),
+            ("Temp".to_string(), palette_color(SERIES_TEMP)),
+        ],
+        ChartPane::GpuUseVram => vec![
+            ("Use".to_string(), palette_color(SERIES_CPU)),
+            ("VRAM".to_string(), palette_color(SERIES_MEM)),
+        ],
+        ChartPane::GpuTemp => vec![("GPU Temp".to_string(), palette_color(SERIES_TEMP))],
+        ChartPane::DiskThroughput | ChartPane::DiskUtil => disk_names(samples)
+            .into_iter()
+            .enumerate()
+            .map(|(i, label)| (label, palette_color(i)))
+            .collect(),
+    }
 }
 
 /// Formats a byte/second axis tick as a compact label: `"16 GB/s"`,
@@ -862,6 +881,61 @@ fn draw_axis_ticks(
     let _ = ctx.stroke();
 }
 
+/// Paints a horizontal **legend band** at the bottom of a chart widget:
+/// one filled colour swatch + the series label per item, laid out
+/// left-to-right and wrapping to a second row if the items overflow the
+/// pane width. The swatch carries each series' colour; the label is drawn
+/// in the theme's foreground colour (`text_rgba`) so it reads on any
+/// background.
+///
+/// `band_top` is the top y-coordinate of the band (usually `plot.oy +
+/// plot.h`, i.e. immediately below the series), and `band_h` its height
+/// (usually `h - band_top` — the `LEGEND_PAD` band reserved at the bottom
+/// of the pane). An empty `items` slice paints nothing, and a band with no
+/// vertical space is likewise a no-op.
+fn paint_legend(
+    ctx: &Context,
+    w: f64,
+    band_top: f64,
+    band_h: f64,
+    items: &[(String, (u8, u8, u8))],
+    text_rgba: Rgba,
+) {
+    if items.is_empty() || band_h <= 0.0 {
+        return;
+    }
+    let swatch = 10.0; // swatch square edge (px)
+    let swatch_to_text = 5.0; // gap between swatch and label (px)
+    let item_gap = 12.0; // gap between one item and the next (px)
+    let row_step = swatch + 4.0; // vertical advance when wrapping (px)
+    let right_edge = w - GUTTER_PAD;
+    let mut x = GUTTER_PAD;
+    // First row's text baseline, centred within the band so the swatch sits
+    // on the same visual line as the label.
+    let mut baseline = band_top + band_h / 2.0;
+    for (label, rgb) in items {
+        let (r, g, b) = rgb_to_f64(*rgb);
+        let text_w = ctx.text_extents(label).map(|e| e.width()).unwrap_or(0.0);
+        let item_w = swatch + swatch_to_text + text_w;
+        // Wrap before drawing this item if it would overflow the pane width.
+        if x + item_w > right_edge && x > GUTTER_PAD {
+            x = GUTTER_PAD;
+            baseline += row_step;
+        }
+        let swatch_top = baseline - swatch / 2.0;
+        // Filled colour swatch.
+        ctx.set_source_rgb(r, g, b);
+        ctx.rectangle(x, swatch_top, swatch, swatch);
+        let _ = ctx.fill();
+        // Label in the theme's foreground colour (`text_rgba`) so it reads
+        // on any background; the swatch carries the series' colour.
+        ctx.set_source_rgba(text_rgba.0, text_rgba.1, text_rgba.2, 1.0);
+        ctx.move_to(x + swatch + swatch_to_text, baseline);
+        let _ = ctx.show_text(label);
+        x += item_w + item_gap;
+    }
+}
+
 /// Paints one disk pane (throughput or utilization) into `ctx`, spanning
 /// `(w, h)`, with a **legend of colour + device name below the plot**.
 ///
@@ -872,11 +946,11 @@ fn draw_axis_ticks(
 /// * a `LEGEND_PAD` band at the bottom holding, per disk, a small filled
 ///   colour swatch followed by the device name in the theme's foreground
 ///   colour (`text_rgba`) — the swatch carries the colour, the name stays
-///   readable in whatever theme is active.
+///   readable in whatever theme is active (see [`paint_legend`]).
 ///
 /// One series per disk, drawn back-to-front in `names` order using
-/// [`disk_color`]. The name index is the single source of both the colour and
-/// the series, so the legend and the series agree by construction.
+/// [`palette_color`] of the disk's ordinal, so the legend and the series
+/// agree by construction.
 ///
 /// An empty `names` slice (no disk in any sample) paints a blank pane.
 #[allow(clippy::too_many_arguments)]
@@ -916,50 +990,38 @@ fn paint_disk_pane(
     // domain. The ordinal i (legend order) is the single source of the colour,
     // so the drawn line and the legend swatch agree by construction.
     for (i, s) in series.iter().enumerate() {
-        draw_series(ctx, &plot, s, cfg.fill, cfg.capacity, domain, disk_color(i));
+        draw_series(
+            ctx,
+            &plot,
+            s,
+            cfg.fill,
+            cfg.capacity,
+            domain,
+            palette_color(i),
+        );
     }
     // Shared left axis (ticks + faint edge guide), tinted toward the first
     // (busiest) series' colour so the axis reads as "the" axis, not a
     // neutral decoration.
-    draw_axis_ticks(ctx, &plot, domain, disk_color(0), tick, AxisSide::Left);
-    // Legend band below the plot: one colour swatch + the device name per
-    // disk, laid out left-to-right, wrapping to a second line if the names
-    // overflow the pane width. The swatch carries the disk's colour; the name
-    // is drawn in the theme's foreground colour so it reads on any background.
+    draw_axis_ticks(ctx, &plot, domain, palette_color(0), tick, AxisSide::Left);
+    // Legend band below the plot: swatch+name per disk, drawn by the shared
+    // painter.
     if names.is_empty() || plot.w <= 0.0 {
         return;
     }
-    let swatch = 10.0; // swatch square edge (px)
-    let swatch_to_text = 5.0; // gap between swatch and name (px)
-    let item_gap = 12.0; // gap between one disk's item and the next (px)
-    let row_step = swatch + 4.0; // vertical advance when wrapping (px)
-    let band_top = plot.oy + plot.h;
-    let band_h = h - band_top;
-    let right_edge = w - GUTTER_PAD;
-    let mut x = GUTTER_PAD;
-    // First row's text baseline, centred within the `LEGEND_PAD` band.
-    let mut baseline = band_top + band_h / 2.0;
-    for (i, name) in names.iter().enumerate() {
-        let (r, g, b) = rgb_to_f64(disk_color(i));
-        let text_w = ctx.text_extents(name).map(|e| e.width()).unwrap_or(0.0);
-        let item_w = swatch + swatch_to_text + text_w;
-        // Wrap before drawing this item if it would overflow the pane width.
-        if x + item_w > right_edge && x > GUTTER_PAD {
-            x = GUTTER_PAD;
-            baseline += row_step;
-        }
-        let swatch_top = baseline - swatch / 2.0;
-        // Filled colour swatch.
-        ctx.set_source_rgb(r, g, b);
-        ctx.rectangle(x, swatch_top, swatch, swatch);
-        let _ = ctx.fill();
-        // Device name in the theme's foreground colour (`text_rgba`) so it
-        // reads on any background; the swatch carries the disk's colour.
-        ctx.set_source_rgba(text_rgba.0, text_rgba.1, text_rgba.2, 1.0);
-        ctx.move_to(x + swatch + swatch_to_text, baseline);
-        let _ = ctx.show_text(name);
-        x += item_w + item_gap;
-    }
+    let items: Vec<(String, (u8, u8, u8))> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.clone(), palette_color(i)))
+        .collect();
+    paint_legend(
+        ctx,
+        w,
+        plot.oy + plot.h,
+        h - TOP_PAD - plot.h,
+        &items,
+        text_rgba,
+    );
 }
 
 /// Paints one pane of the split rolling-window usage chart into `ctx`,
@@ -988,7 +1050,7 @@ fn paint_disk_pane(
 ///   panes: one series per physical disk on a single shared y axis, with a
 ///   colour-plus-name legend below the plot. The `text_rgba` argument supplies
 ///   the theme foreground colour for the legend *names*; the swatch carries
-///   each disk's colour (via [`disk_color`]).
+///   each disk's colour (via [`palette_color`]).
 ///
 /// A series whose samples are all `None` (no sensor) is skipped. An empty
 /// history paints a blank, valid chart.
@@ -1050,41 +1112,55 @@ pub fn paint_usage_chart(
         return;
     }
 
-    // Both panes are the same dual-axis layout: a left and a right series,
-    // each with its own `(values, domain, rgb, tick_fn)` where `domain` is the
-    // `(min, max)` band that maps to the plot's bottom and top, axes on
-    // opposite sides, one drawn in front of the other. Only *which* series is
-    // on which side and the z-order differ per pane, so we pick them in the
-    // match and share the layout code below. The right side may be `None`
-    // for a single-series pane (currently `GpuTemp`); in that case only the
-    // left axis + left series is drawn and the right gutter is zero.
-    type Side = (
-        Vec<Option<f64>>,
-        (f64, f64),
-        (u8, u8, u8),
-        fn(f64) -> String,
-    );
-    let (left, right, front_is_left): (Side, Option<Side>, bool) = match pane {
+    // The dual-axis layout used by every non-disk pane: a left and a right
+    // series, each with its own label, colour, unit-tick formatter, and
+    // `(min, max)` band. Only *which* series is on which side, their z-order,
+    // and their units differ per pane — the layout code below is shared.
+    // The right side is `None` for a single-series pane (`GpuTemp`); in that
+    // case only the left axis + left series is drawn.
+    //
+    // Each series' colour comes from [`PALETTE`] (via `SERIES_*` indices for
+    // the named metric series), so the drawn line, its tick colour, and the
+    // legend swatch all agree by construction.
+    struct PaneSeries {
+        /// Per-sample values (oldest first); `None` for a sample without a reading.
+        values: Vec<Option<f64>>,
+        /// `(min, max)` band that maps to the plot's bottom and top.
+        domain: (f64, f64),
+        /// Colour (0–255); the series' line, tick, and legend swatch use this.
+        color: (u8, u8, u8),
+        /// Unit-tick formatter (percent, GB, MHz, °C, …).
+        tick: fn(f64) -> String,
+    }
+    struct PaneModel {
+        /// The left series (always present).
+        left: PaneSeries,
+        /// The right series, if any.
+        right: Option<PaneSeries>,
+        /// Whether the *front* (top z-order) series is the left one.
+        front_is_left: bool,
+    }
+    let model: PaneModel = match pane {
         // CpuMem: left = CPU (front, % axis 0–100); right = MEM (back, MB axis).
         // Both are 0-anchored: the CPU percent band and the RAM band (top = RAM).
-        ChartPane::CpuMem => (
-            (
-                samples.iter().map(|s| Some(s.cpu)).collect(),
-                (0.0, 100.0),
-                CPU_RGB,
-                axis_tick_percent,
-            ),
-            Some((
-                samples
+        ChartPane::CpuMem => PaneModel {
+            left: PaneSeries {
+                values: samples.iter().map(|s| Some(s.cpu)).collect(),
+                domain: (0.0, 100.0),
+                color: palette_color(SERIES_CPU),
+                tick: axis_tick_percent,
+            },
+            right: Some(PaneSeries {
+                values: samples
                     .iter()
                     .map(|s| Some(s.mem / 100.0 * cfg.mem_max_mb))
                     .collect(),
-                (0.0, cfg.mem_max_mb),
-                MEM_RGB,
-                axis_tick_mb,
-            )),
-            true,
-        ),
+                domain: (0.0, cfg.mem_max_mb),
+                color: palette_color(SERIES_MEM),
+                tick: axis_tick_mb,
+            }),
+            front_is_left: true,
+        },
         // FreqTemp: left = FREQ (back, MHz axis); right = TEMP (front, °C axis).
         // Both are auto-scaled to the measured band (zooming to the live range)
         // with a fallback band (freq ceiling / 0–100 °C) when a sensor is absent.
@@ -1098,11 +1174,21 @@ pub fn paint_usage_chart(
                 AUTO_DOMAIN_PAD,
             );
             let temp_dom = auto_domain(&temp, (0.0, 100.0), TEMP_MIN_SPAN, AUTO_DOMAIN_PAD);
-            (
-                (freq, freq_dom, FREQ_RGB, axis_tick_mhz),
-                Some((temp, temp_dom, TEMP_RGB, axis_tick_celsius)),
-                false,
-            )
+            PaneModel {
+                left: PaneSeries {
+                    values: freq,
+                    domain: freq_dom,
+                    color: palette_color(SERIES_FREQ),
+                    tick: axis_tick_mhz,
+                },
+                right: Some(PaneSeries {
+                    values: temp,
+                    domain: temp_dom,
+                    color: palette_color(SERIES_TEMP),
+                    tick: axis_tick_celsius,
+                }),
+                front_is_left: false,
+            }
         }
         // GpuUseVram: left = GPU Use (front, % axis 0–100); right = GPU VRAM
         // (back, % axis 0–100). Both are 0-anchored percents, exactly the
@@ -1110,22 +1196,37 @@ pub fn paint_usage_chart(
         ChartPane::GpuUseVram => {
             let use_vals: Vec<Option<f64>> = samples.iter().map(|s| s.gpu_use).collect();
             let vram_vals: Vec<Option<f64>> = samples.iter().map(|s| s.gpu_vram).collect();
-            (
-                (use_vals, (0.0, 100.0), GPU_USE_RGB, axis_tick_percent),
-                Some((vram_vals, (0.0, 100.0), GPU_VRAM_RGB, axis_tick_percent)),
-                true,
-            )
+            PaneModel {
+                left: PaneSeries {
+                    values: use_vals,
+                    domain: (0.0, 100.0),
+                    color: palette_color(SERIES_CPU),
+                    tick: axis_tick_percent,
+                },
+                right: Some(PaneSeries {
+                    values: vram_vals,
+                    domain: (0.0, 100.0),
+                    color: palette_color(SERIES_MEM),
+                    tick: axis_tick_percent,
+                }),
+                front_is_left: true,
+            }
         }
         // GpuTemp: single-series pane. The GPU reading auto-scales to the
         // measured band (0–100 °C fallback when no sample has a reading).
         ChartPane::GpuTemp => {
             let temp: Vec<Option<f64>> = samples.iter().map(|s| s.gpu_temp).collect();
             let temp_dom = auto_domain(&temp, (0.0, 100.0), TEMP_MIN_SPAN, AUTO_DOMAIN_PAD);
-            (
-                (temp, temp_dom, GPU_TEMP_RGB, axis_tick_celsius),
-                None,
-                true,
-            )
+            PaneModel {
+                left: PaneSeries {
+                    values: temp,
+                    domain: temp_dom,
+                    color: palette_color(SERIES_TEMP),
+                    tick: axis_tick_celsius,
+                },
+                right: None,
+                front_is_left: true,
+            }
         }
         // Disk panes are handled in the short-circuit above (one series per
         // disk on a single shared axis, with a legend below the plot), so they
@@ -1134,62 +1235,101 @@ pub fn paint_usage_chart(
         // short-circuit — treat it as no-op (return the CpuMem layout as a
         // safe default) but do not paint.
         ChartPane::DiskThroughput | ChartPane::DiskUtil => {
-            // This branch is unreachable because paint_usage_chart early-
-            // returns for disk panes. Provide a safe fallback for exhaustiveness.
-            (
-                (
-                    samples.iter().map(|s| Some(s.cpu)).collect(),
-                    (0.0, 100.0),
-                    CPU_RGB,
-                    axis_tick_percent,
-                ),
-                None,
-                true,
-            )
+            // Unreachable: `paint_usage_chart` early-returns for disk panes
+            // before this match. Provide a safe fallback for exhaustiveness.
+            PaneModel {
+                left: PaneSeries {
+                    values: samples.iter().map(|s| Some(s.cpu)).collect(),
+                    domain: (0.0, 100.0),
+                    color: palette_color(SERIES_CPU),
+                    tick: axis_tick_percent,
+                },
+                right: None,
+                front_is_left: true,
+            }
         }
     };
-    let labels = |s: &Side| {
-        let tick: fn(f64) -> String = s.3;
-        let (dom_min, dom_max) = s.1;
+    let left = &model.left;
+    let right = &model.right;
+    let front_is_left = model.front_is_left;
+    let labels = |s: &PaneSeries| {
+        let tick: fn(f64) -> String = s.tick;
+        let (dom_min, dom_max) = s.domain;
         [
             tick(dom_max),
             tick((dom_min + dom_max) / 2.0),
             tick(dom_min),
         ]
     };
-    let left_gutter = measure_gutter(ctx, &labels(&left));
+    let left_gutter = measure_gutter(ctx, &labels(left));
     let right_gutter = right
         .as_ref()
         .map(|r| measure_gutter(ctx, &labels(r)))
         .unwrap_or(0.0);
-    let plot = plot_rect(w, h, left_gutter, right_gutter);
+    let mut plot = plot_rect(w, h, left_gutter, right_gutter);
+    // Reserve the bottom `LEGEND_PAD` band for the swatch+label legend (see
+    // [`paint_legend`]). The disk painter clamps its plot the same way; we
+    // keep `plot_rect` a generic primitive and shrink the height here.
+    plot.h = (plot.h - LEGEND_PAD).max(0.0);
+    debug_assert!(plot.non_negative());
     draw_gridlines(ctx, &plot);
     // Draw the back series first, the front over it. For a single-series pane
     // (`right == None`) the left series is both the front and the back, so
     // we draw it only once.
-    if let Some(r) = &right {
-        let (back, front) = if front_is_left {
-            (r, &left)
-        } else {
-            (&left, r)
-        };
-        draw_series(ctx, &plot, &back.0, cfg.fill, cfg.capacity, back.1, back.2);
+    if let Some(r) = right {
+        let (back, front) = if front_is_left { (r, left) } else { (left, r) };
         draw_series(
             ctx,
             &plot,
-            &front.0,
+            &back.values,
             cfg.fill,
             cfg.capacity,
-            front.1,
-            front.2,
+            back.domain,
+            back.color,
+        );
+        draw_series(
+            ctx,
+            &plot,
+            &front.values,
+            cfg.fill,
+            cfg.capacity,
+            front.domain,
+            front.color,
         );
     } else {
-        draw_series(ctx, &plot, &left.0, cfg.fill, cfg.capacity, left.1, left.2);
+        draw_series(
+            ctx,
+            &plot,
+            &left.values,
+            cfg.fill,
+            cfg.capacity,
+            left.domain,
+            left.color,
+        );
     }
-    draw_axis_ticks(ctx, &plot, left.1, left.2, left.3, AxisSide::Left);
-    if let Some(r) = &right {
-        draw_axis_ticks(ctx, &plot, r.1, r.2, r.3, AxisSide::Right);
+    draw_axis_ticks(
+        ctx,
+        &plot,
+        left.domain,
+        left.color,
+        left.tick,
+        AxisSide::Left,
+    );
+    if let Some(r) = right {
+        draw_axis_ticks(ctx, &plot, r.domain, r.color, r.tick, AxisSide::Right);
     }
+    // Legend band below the plot, drawn by the shared painter and produced by
+    // the single pure [`legend_items_for_pane`] so the list we draw and the
+    // list the tests observe are the same thing.
+    let items = legend_items_for_pane(pane, samples);
+    paint_legend(
+        ctx,
+        w,
+        plot.oy + plot.h,
+        h - plot.oy - plot.h,
+        &items,
+        text_rgba,
+    );
 }
 
 #[cfg(test)]
@@ -1493,16 +1633,70 @@ mod tests {
     }
 
     #[test]
-    fn test_disk_color_wraps_and_is_stable() {
-        // First palette.len() disks are distinct and in order; the next wraps
+    fn test_palette_color_wraps_and_is_stable() {
+        // First PALETTE.len() indices are distinct and in order; the next wraps
         // back to the first colour (mod semantics, never out-of-range).
-        for (i, expected) in DISK_PALETTE.iter().enumerate() {
-            assert_eq!(disk_color(i), *expected);
+        for (i, expected) in PALETTE.iter().enumerate() {
+            assert_eq!(palette_color(i), *expected);
         }
-        assert_eq!(disk_color(DISK_PALETTE.len()), DISK_PALETTE[0]);
-        assert_eq!(disk_color(DISK_PALETTE.len() + 1), DISK_PALETTE[1]);
+        assert_eq!(palette_color(PALETTE.len()), PALETTE[0]);
+        assert_eq!(palette_color(PALETTE.len() + 1), PALETTE[1]);
         // 666 disks: pure wrap, no panic.
-        assert_eq!(disk_color(666), DISK_PALETTE[666 % DISK_PALETTE.len()]);
+        assert_eq!(palette_color(666), PALETTE[666 % PALETTE.len()]);
+    }
+
+    #[test]
+    fn test_legend_items_cpu_mem() {
+        let s = sample(0.0);
+        let items = legend_items_for_pane(ChartPane::CpuMem, &[s]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].0, "CPU");
+        assert_eq!(items[0].1, palette_color(SERIES_CPU));
+        assert_eq!(items[1].0, "Memory");
+        assert_eq!(items[1].1, palette_color(SERIES_MEM));
+    }
+
+    #[test]
+    fn test_legend_items_freq_temp() {
+        let s = sample(0.0);
+        let items = legend_items_for_pane(ChartPane::FreqTemp, &[s]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].0, "Freq");
+        assert_eq!(items[0].1, palette_color(SERIES_FREQ));
+        assert_eq!(items[1].0, "Temp");
+        assert_eq!(items[1].1, palette_color(SERIES_TEMP));
+    }
+
+    #[test]
+    fn test_legend_items_gpu_use_vram() {
+        let s = sample(0.0);
+        let items = legend_items_for_pane(ChartPane::GpuUseVram, &[s]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].0, "Use");
+        assert_eq!(items[0].1, palette_color(SERIES_CPU));
+        assert_eq!(items[1].0, "VRAM");
+        assert_eq!(items[1].1, palette_color(SERIES_MEM));
+    }
+
+    #[test]
+    fn test_legend_items_gpu_temp() {
+        let s = sample(0.0);
+        let items = legend_items_for_pane(ChartPane::GpuTemp, &[s]);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0, "GPU Temp");
+        assert_eq!(items[0].1, palette_color(SERIES_TEMP));
+    }
+
+    #[test]
+    fn test_legend_items_disk() {
+        let mut s = sample(0.0);
+        s.disks = vec![disk("sda", None, None, None), disk("sdb", None, None, None)];
+        let items = legend_items_for_pane(ChartPane::DiskThroughput, &[s]);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].0, "sda");
+        assert_eq!(items[0].1, palette_color(0));
+        assert_eq!(items[1].0, "sdb");
+        assert_eq!(items[1].1, palette_color(1));
     }
 
     #[test]

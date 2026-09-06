@@ -268,16 +268,11 @@ fn build_graph_pane(
     box_v.append(&label);
 
     let drawing = gtk4::DrawingArea::new();
-    // Disk panes carry a colour+name legend band below the plot
-    // (`usage_graph::LEGEND_PAD` worth), so they need a taller widget than the
-    // other panes or the plot would shrink to make room. `104` = `80` + `20`
-    // leaves the plot the same height and gives the legend its own band.
-    let height = if matches!(pane, ChartPane::DiskThroughput | ChartPane::DiskUtil) {
-        80 + crate::usage_graph::LEGEND_PAD as i32
-    } else {
-        80
-    };
-    drawing.set_content_height(height);
+    // Every pane carries a colour+label legend band below the plot, so every
+    // pane is `80 + LEGEND_PAD` tall. `80` keeps the plot visually the same
+    // size as before; `LEGEND_PAD` is the band reserved for the swatch+label
+    // row (see `usage_graph::paint_legend`).
+    drawing.set_content_height(80 + crate::usage_graph::LEGEND_PAD as i32);
     drawing.set_hexpand(true);
     drawing.add_css_class("graph-area");
     let st = state.clone();

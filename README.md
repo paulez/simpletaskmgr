@@ -15,7 +15,9 @@ time, and lets you inspect and signal individual processes.
 - **Detail view**: click a process to see live metrics in a side pane and send
   SIGHUP or SIGKILL to it.
 - **Resource graph**: always-on charts of system CPU & memory, and CPU
-  frequency & temperature, over the last few minutes.
+  frequency & temperature, over the last few minutes. Every pane carries a
+  colour swatch + label legend below its plot so each series is identified
+  without ambiguity.
 - **Disk I/O tab**: a tab switch above the charts shows each physical disk's
   read + write throughput and utilization (`%util`), sampled directly from
   `/proc/diskstats` — no `iostat`/`sysstat` dependency. Partitions and virtual
