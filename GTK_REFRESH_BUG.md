@@ -19,11 +19,42 @@ the app never hits the `unbind` path for.
 
 ## Symptom
 
-In the process `ColumnView`, a row's cell text goes out of sync with its
-row: a PID that belongs to one process (e.g. firefox) displays the name of
-another process (e.g. "kworker/2:1"). This appears after list refreshes
-that reorder/splice rows (column sort, CPU/MEM churn), i.e. when GTK4
-recycles list-item widgets across different `ProcessRow` objects.
+Three interrelated symptoms appear in the process `ColumnView` (sorted by
+CPU% descending) during automatic refresh cycles, and resolve on the next
+refresh:
+
+1. **Blank rows at the top of the list.** A gap of empty space appears
+   between the column header and the first visible data row. The user
+   reports "blank lines at the top of the process list" that disappear on
+   the next refresh. (Screenshot: `gtk-refresh-bug/Capture d'écran du
+   2026-09-06 22-07-32.png` shows the gap above PID 5523.)
+
+2. **Stale sort order.** The row sequence does not match the CPU% column:
+   a row showing 61.9% appears *below* one showing 2.7%, and a row showing
+   12.6% appears *below* a 0.7% row. The SortListModel's comparator reads
+   the *current* `ProcessRow` data, so the visual order must be
+   pre-stale (a leftover from an earlier sort pass) rather than a live
+   comparator disagreement. (Screenshot: `gtk-refresh-bug/Capture d'écran
+   du 2026-09-06 22-08-25.png` shows 2.7% → 61.9% → 0.0% → 12.6% in that
+   order; `gtk-refresh-bug/Capture d'écran du 2026-09-06 16-40-09.png`
+   shows 12.7% → 0.0% → 5.3% → 2.7% → 1.3% …)
+
+3. **Cell text desync across columns.** A row's PID / User / Name cells
+   reflect one process while its CPU% / MEM% cells reflect another — for
+   example a PID that belongs to "firefox" displays "kworker/u64:3-btrfs-
+   endio-meta" as its Name cell, while the PID column still shows the
+   original PID. This is the most severe variant of the desync (screenshot
+   `22-08-25` also shows this: row 2 = PID 5523 · name "gnome-shell" ·
+   CPU 61.9%, but the row sequence does not match a CPU-descending sort).
+
+All three symptoms are transient: they appear immediately after a refresh
+(splice + re-sort) and clear on the next one. The root-cause chain
+suspected is: a recycled `GtkListItem`'s cell `Label` retains a live
+`glib::Binding` to an old `ProcessRow`, and after the `SortListModel`
+re-orders rows the stale binding lets the old row's `notify` overwrite the
+cell text — while the `SortListModel`'s comparator (which reads
+`ProcessRow` properties directly, not the cell label) sees fresh data and
+has already ordered the list by the *old* pre-refresh values.
 
 ## Root-cause hypothesis (verified in isolation)
 
@@ -163,8 +194,27 @@ Possible remaining holes (not yet confirmed):
    common on any Linux box).
 2. Sort the process list by CPU (or MEM) and trigger multiple refresh
    cycles (the app auto-refreshes).
-3. Observe a firefox (or other large app) PID row whose NAME cell shows
-   "kworker/2:1" (or similar) instead of "firefox".
+3. Observe any of:
+   - a **blank gap** at the top of the list (empty space above the first
+     row) that clears on the next refresh,
+   - a **stale sort order** where the CPU% values are not strictly
+     decreasing (e.g. a 61.9% row below a 2.7% row),
+   - a **cell desync** where a PID that belongs to one process displays
+     the name of another (e.g. "kworker/" on firefox's PID).
+
+Screenshots captured at `gtk-refresh-bug/`:
+
+- `Capture d'écran du 2026-09-06 16-40-09.png` — stale sort order (12.7%
+  → 0.0% → 5.3% → 2.7% → 1.3%).
+- `Capture d'écran du 2026-09-06 22-07-32.png` — **blank rows at the top**
+  (gap above PID 5523) *and* the otherwise well-ordered list immediately
+  below (a "recovery" refresh that has re-bound the recycled widget).
+- `Capture d'écran du 2026-09-06 22-08-25.png` — **cell desync**: PID 5523
+  (gnome-shell) shows 61.9% CPU, but row order is 2.7% → 61.9% → 0.0% →
+  12.6% → … which is not CPU-descending.
+- `Capture d'écran du 2026-09-06 22-08-52.png` — a subsequent refresh
+  re-sorting the same data (13.4% → 9.3% → 6.7% → 1.3% → 0.7% → 0.7%),
+  confirming the desync is transient.
 
 ## Notes
 
