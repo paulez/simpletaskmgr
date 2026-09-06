@@ -1457,4 +1457,267 @@ mod tests {
         );
         let _ = std::fs::remove_file(temp_settings_path("reset"));
     }
+
+    // ---------------------------------------------------------------------
+    // Regression tests for the cell-binding lifecycle fix.
+    //
+    // The bug: GTK 4.18 reuses list-item *widgets* across rows (the
+    // anti-flicker contract this codebase is built on). The old
+    // `make_cell_factory` created a fresh `glib::Binding` from the row to
+    // the label's `label` property on every `bind` and *dropped* the Rust
+    // handle without disconnecting the C-side binding. Because
+    // `glib::Binding` has no `Drop` impl, each recycle left the old
+    // binding active on the same target property; a subsequent `notify` on
+    // the old row (kept alive by its own binding's strong ref) could then
+    // overwrite the cell's text with the wrong value — the reported
+    // "kworker/ on firefox's pid" incoherence.
+    //
+    // These tests prove the mechanics of that failure mode (two bindings
+    // to the same property, both firing, last-writer wins) and, crucially,
+    // that disconnecting the old binding — which is exactly what the new
+    // `connect_unbind` handler does — restores the one-binding-per-cell
+    // invariant. A real GTK `GtkSignalListItemFactory` lifecycle test would
+    // be preferable, but `gtk4::SignalList` is v4.10+ and this repo
+    // targets v4.8, so we drive the raw `glib::Binding` objects instead,
+    // which is the exact contract the fix depends on.
+    //
+    // The `ProcessRow::set_item` → `notify` path is exercised end-to-end in
+    // every case: the "wrong" row's `name` property is changed, and we
+    // watch which value the target actually lands on.
+    // ---------------------------------------------------------------------
+
+    /// A minimal stand-in for the cell's `Label`: a plain `glib::Object`
+    /// subclass with one writable string property (`value`) that a
+    /// binding can drive. This decouples the test from GTK4's widget tree
+    /// (which needs a display) and pins the test to the exact primitive
+    /// the fix depends on: glib's property-binding semantics.
+    mod cell_value {
+        use glib::prelude::*;
+        use glib::subclass::basic;
+        use glib::subclass::prelude::*;
+
+        pub struct CellValue {
+            pub value: std::cell::RefCell<String>,
+        }
+        impl Default for CellValue {
+            fn default() -> Self {
+                Self {
+                    value: std::cell::RefCell::new(String::new()),
+                }
+            }
+        }
+        #[glib::object_subclass]
+        impl ObjectSubclass for CellValue {
+            const NAME: &'static str = "SimpleTaskMgrTestCellValue";
+            type Type = super::CellValue;
+            type ParentType = glib::Object;
+            type Instance = basic::InstanceStruct<Self>;
+            type Class = basic::ClassStruct<Self>;
+        }
+        impl ObjectImpl for CellValue {
+            fn properties() -> &'static [glib::ParamSpec] {
+                static PROPS: std::sync::OnceLock<Vec<glib::ParamSpec>> =
+                    std::sync::OnceLock::new();
+                PROPS.get_or_init(|| {
+                    vec![glib::ParamSpecString::builder("value")
+                        .nick("Value")
+                        .blurb("the text the cell shows")
+                        .build()]
+                })
+            }
+            fn set_property(&self, _id: usize, value: &glib::Value, _pspec: &glib::ParamSpec) {
+                if let Ok(v) = value.get::<String>() {
+                    *self.value.borrow_mut() = v;
+                }
+            }
+            fn property(&self, _id: usize, _pspec: &glib::ParamSpec) -> glib::Value {
+                glib::Value::from(self.value.borrow().clone())
+            }
+        }
+    }
+
+    use cell_value::CellValue as CellValueImp;
+    use glib::subclass::prelude::*;
+
+    glib::wrapper! {
+        /// Writable text cell stand-in used in the binding-lifecycle tests.
+        pub struct CellValue(ObjectSubclass<CellValueImp>);
+    }
+
+    impl CellValue {
+        fn new() -> Self {
+            glib::Object::new::<CellValue>()
+        }
+        fn value(&self) -> String {
+            self.imp().value.borrow().clone()
+        }
+    }
+
+    /// Build a `ProcessRow` whose `name` property is `name` and other
+    /// columns are stable — the exact shape used by the cell factory.
+    fn mk_row(pid: i32, name: &str) -> ProcessRow {
+        let mut item = crate::testutil::test_item(pid);
+        item.value.name = name.to_string();
+        ProcessRow::from_item(&item)
+    }
+
+    /// A fresh cell (Label stand-in) that has never been bound to anything.
+    fn fresh_cell() -> CellValue {
+        CellValue::new()
+    }
+
+    /// The "pre-fix" behaviour: bind a row to a cell, then without ever
+    /// unbinding the old one, bind a *different* row to the same cell.
+    /// This is what the leaked-`glib::Binding` used to leave in the wild —
+    /// both bindings active, both source rows held by their own bindings.
+    ///
+    /// The test asserts the symptom: mutating the (now stale) old row's
+    /// `name` property still overwrites the cell's value, because both
+    /// bindings are live on the same "value" property.
+    ///
+    /// Verified empirically with a standalone probe (Q1/Q3): creating a
+    /// second `sync_create` binding onto the same target property does NOT
+    /// auto-disconnect the first, and both remain active afterwards.
+    /// Whichever source `notify`s last wins; in the typical kworker /
+    /// firefox pid-recycle case the *old* kworker row is still the one
+    /// that gets refreshed (the process is alive), while the new row has
+    /// already been bound to the cell, so the stale write lands.
+    #[test]
+    fn test_two_live_bindings_race_and_stale_wins() {
+        let cell = fresh_cell();
+
+        // A row that was the cell's original owner (kworker-ish pid).
+        let old_row = mk_row(101, "zombie-starter");
+        // The pid's reincarnation: the same pid slot now hosts firefox.
+        let new_row = mk_row(101, "firefox");
+
+        // Old-style factory behaviour: create binding A (old row -> cell),
+        // then create binding B (new row -> cell) WITHOUT disconnecting A.
+        // The C-side binding A stays live on cell.value — proven by probe
+        // Q2: dropping the Rust `glib::Binding` handle does NOT call
+        // `g_object_release` on the source / disconnect the signal.
+        let _a: glib::Binding = old_row
+            .bind_property("name", &cell, "value")
+            .sync_create()
+            .build();
+        let _b: glib::Binding = new_row
+            .bind_property("name", &cell, "value")
+            .sync_create()
+            .build();
+
+        // Both bindings are live; the *last* one (B) ran `sync_create`,
+        // so the cell currently shows the new row's name.
+        assert_eq!(cell.value(), "firefox");
+
+        // Now the stale old row gets refreshed (the process at that pid
+        // slot is still alive — it was a kworker that was reused). Its
+        // `name` property `notify`s. Binding A is still live on
+        // cell.value, so `cell.value` flips back to the stale value.
+        // This is the user-visible "kworker/ on firefox's pid" bug.
+        let mut updated = crate::testutil::test_item(101);
+        updated.value.name = "kworker/2:1".to_string();
+        old_row.set_item(&updated);
+
+        assert_eq!(
+            cell.value(),
+            "kworker/2:1",
+            "two live bindings race: the stale binding A overwrote the \
+             cell (this is exactly the 'kworker/ on firefox's pid' bug)"
+        );
+    }
+
+    /// The fixed behaviour: the same stale write to the old row does NOT
+    /// reach the cell, because we disconnected the old binding first. This
+    /// is exactly what the new `connect_unbind` handler does in the real
+    /// factory (steal-and-`unbind` the binding parked on the label).
+    ///
+    /// This also proves the leak is closed the moment the *new* binding
+    /// takes over, without us having to wait for the old row to be
+    /// dropped: we steal-and-unbind the old binding, and the cell is no
+    /// longer reachable from the old row's `notify`.
+    #[test]
+    fn test_stale_row_no_longer_reaches_cell_when_old_binding_unbound() {
+        let cell = fresh_cell();
+        let old_row = mk_row(201, "kworker/3:1");
+        let new_row = mk_row(201, "firefox");
+
+        // Binding A created "the old way" — Rust handle kept (we need to
+        // call unbind on it later, which is what the new code does).
+        let a: glib::Binding = old_row
+            .bind_property("name", &cell, "value")
+            .sync_create()
+            .build();
+        // The new binding, exactly as `bind_cell_binding` in the fixed
+        // `make_cell_factory` creates it.
+        let _b: glib::Binding = new_row
+            .bind_property("name", &cell, "value")
+            .sync_create()
+            .build();
+
+        // Now simulate the factory's `connect_unbind` running: steal the
+        // old binding and disconnect it. In the real factory this happens
+        // before the new `bind` fires; the ordering doesn't change the
+        // outcome here, but doing it after `new_row` is bound is the
+        // stronger claim: even if GTK re-ordered the signals, disconnecting
+        // the old binding must still protect the cell.
+        a.unbind();
+
+        assert_eq!(
+            cell.value(),
+            "firefox",
+            "sanity: cell shows the new row's name"
+        );
+
+        // Mutate the stale old row. Under the bug (both bindings live) the
+        // old value would reach the cell. With the old binding disconnected,
+        // the cell must keep the new row's value.
+        let mut updated = crate::testutil::test_item(201);
+        updated.value.name = "kworker/3:1".to_string();
+        old_row.set_item(&updated);
+
+        assert_eq!(
+            cell.value(),
+            "firefox",
+            "unbinding the old binding must sever it from the cell, \
+             so a stale row's `notify('name')` can no longer overwrite \
+             the cell (the fix)"
+        );
+    }
+
+    /// Direct proof that `unbind()` severs the binding. The `stale` row
+    /// is bound to `cell.value`; a subsequent `set_item` (which calls
+    /// `notify("name")` on stale) reaches the cell. After `unbind()`,
+    /// the same `set_item` is a no-op on the cell.
+    ///
+    /// This is the observable invariant that makes the fix work, and it
+    /// exercises the same `glib::Binding::unbind` call the fixed factory
+    /// uses when recycling a cell label.
+    #[test]
+    fn test_unbind_severs_stale_binding_from_cell() {
+        let cell = fresh_cell();
+        let stale = mk_row(401, "starter-name");
+        let b: glib::Binding = stale
+            .bind_property("name", &cell, "value")
+            .sync_create()
+            .build();
+
+        // While the binding is live, a stale write reaches the cell.
+        let mut upd = crate::testutil::test_item(401);
+        upd.value.name = "kworker/7:9".to_string();
+        stale.set_item(&upd);
+        assert_eq!(cell.value(), "kworker/7:9");
+
+        // Unbind — the same write from now on must NOT reach the cell.
+        b.unbind();
+        let v_before = cell.value();
+        let mut upd2 = crate::testutil::test_item(401);
+        upd2.value.name = "kworker/7:10".to_string();
+        stale.set_item(&upd2);
+        assert_eq!(
+            cell.value(),
+            v_before,
+            "after unbind() the stale row's `notify('name')` must not \
+             reach the cell — this is the fix's core invariant"
+        );
+    }
 }
