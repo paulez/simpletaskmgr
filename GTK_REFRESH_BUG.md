@@ -1,60 +1,116 @@
 # GTK Cell-Recycle Refresh Bug — Investigation Log
 
-Status: **NOT RESOLVED.** Two fixes have been attempted, both unit-tested or
-reasoned about, but manual testing by the user shows the incoherent cell
-values (e.g. "kworker/" shown on firefox's PID) still occur in the running
-app:
+Status: **NOT RESOLVED.** There are **two** distinct, differently-persistent
+defects, and neither is resolved:
+
+- **Blank rows at the top** — *cosmetic & transient*. Takes *several*
+  refreshes to clear and is **reliably cleared by scrolling down and back
+  up**. Points at a render / row-manager staleness, not a binding leak.
+- **Wrong process name on a row (cell desync)** — *persistent data
+  corruption*. **Never fixes itself** for a broken row; later refreshes do
+  not repopulate it. Points at a live binding holding the wrong `ProcessRow`
+  source, or a `ProcessRow` object reused for a different PID.
+
+Two fixes have been attempted, both unit-tested or reasoned about, but manual
+testing by the user shows the desync still occurs in the running app:
 
 1. **`set_incremental(false)` on the SortListModel** (commit `f89046d`,
-   still in the tree) — a *full* re-sort every refresh. Fixed the blank /
-   partially-sorted rows but **not** the text desync.
+   still in the tree) — a *full* re-sort every refresh. Did **not** resolve
+   the desync (and did not reliably fix the blank rows either).
 2. **Discard stale cell bindings on recycle** (commits `81cc6ac` + `753fd84`) —
-   the binding-lifecycle fix described below.
+   the binding-lifecycle fix described below. Did **not** resolve the
+   persistent desync.
 
-The fact that #1 (a full re-sort) does not resolve it is the strongest clue:
-the desync survives a full rebind of every row's cells, so the stale
-reference is either (a) on a code path the cell factory doesn't own, (b) a
-data-level `ProcessRow` reuse across PIDs in `refresh_list`, or (c) a leak
-the app never hits the `unbind` path for.
+The contrast in persistence (scroll-clears vs. never-clears) is the strongest
+clue: it is almost certainly *two* bugs, not one. The transient one is likely
+a `GtkListItemManager` render/realise defect in GTK 4.18's recycling; the
+persistent one is a live, wrong-source `glib::Binding` (or a `refresh_list`
+data-level `ProcessRow`/PID mismatch). Neither of our two fixes addresses the
+transient render defect, which is why the blank rows remain.
 
-## Symptom
+## Symptoms
 
-Three interrelated symptoms appear in the process `ColumnView` (sorted by
-CPU% descending) during automatic refresh cycles, and resolve on the next
-refresh:
+Two distinct, *differently-persistent* symptoms appear in the process
+`ColumnView` (sorted by CPU% descending) during automatic refresh cycles.
+They should be treated as possibly-different bugs: one is purely cosmetic
+and self-heals, the other corrupts data and does **not** self-heal.
 
-1. **Blank rows at the top of the list.** A gap of empty space appears
-   between the column header and the first visible data row. The user
-   reports "blank lines at the top of the process list" that disappear on
-   the next refresh. (Screenshot: `gtk-refresh-bug/Capture d'écran du
-   2026-09-06 22-07-32.png` shows the gap above PID 5523.)
+### 1. Blank rows at the top of the list — transient, cosmetic
 
-2. **Stale sort order.** The row sequence does not match the CPU% column:
-   a row showing 61.9% appears *below* one showing 2.7%, and a row showing
-   12.6% appears *below* a 0.7% row. The SortListModel's comparator reads
-   the *current* `ProcessRow` data, so the visual order must be
-   pre-stale (a leftover from an earlier sort pass) rather than a live
-   comparator disagreement. (Screenshot: `gtk-refresh-bug/Capture d'écran
-   du 2026-09-06 22-08-25.png` shows 2.7% → 61.9% → 0.0% → 12.6% in that
-   order; `gtk-refresh-bug/Capture d'écran du 2026-09-06 16-40-09.png`
-   shows 12.7% → 0.0% → 5.3% → 2.7% → 1.3% …)
+A gap of empty space appears between the column header and the first
+visible data row; many rows can be affected at once. It is a layout/render
+anomaly, not a data one — the rows underneath are correct.
 
-3. **Cell text desync across columns.** A row's PID / User / Name cells
-   reflect one process while its CPU% / MEM% cells reflect another — for
-   example a PID that belongs to "firefox" displays "kworker/u64:3-btrfs-
-   endio-meta" as its Name cell, while the PID column still shows the
-   original PID. This is the most severe variant of the desync (screenshot
-   `22-08-25` also shows this: row 2 = PID 5523 · name "gnome-shell" ·
-   CPU 61.9%, but the row sequence does not match a CPU-descending sort).
+Properties (per user):
+- **Not cleared reliably by the next refresh.** It may take *several*
+  refreshes to clear, and sometimes does not clear on refresh alone.
+- **Scrolling down and back up clears it immediately.** This is the
+  reliable workaround — scrolling off and back into the top forces a
+  re-layout / re-realise of the recycled row widgets.
+- Suggests the recycled `GtkListItem` widgets are allocated but not
+  populated / not measured (or the row manager's `deleted_items` cache has
+  gone stale), a render-level rather than binding-level defect.
 
-All three symptoms are transient: they appear immediately after a refresh
-(splice + re-sort) and clear on the next one. The root-cause chain
-suspected is: a recycled `GtkListItem`'s cell `Label` retains a live
-`glib::Binding` to an old `ProcessRow`, and after the `SortListModel`
-re-orders rows the stale binding lets the old row's `notify` overwrite the
-cell text — while the `SortListModel`'s comparator (which reads
-`ProcessRow` properties directly, not the cell label) sees fresh data and
-has already ordered the list by the *old* pre-refresh values.
+Screenshots:
+- `gtk-refresh-bug/Capture d'écran du 2026-09-06 22-20-23.png` — **many**
+  blank lines above PID 12984 (RDD Process).
+- `gtk-refresh-bug/Capture d'écran du 2026-09-06 22-07-32.png` — smaller
+  gap above PID 5523.
+
+### 2. Cell text desync (wrong process name) — **persistent, data corruption**
+
+A row's cells disagree with one another: the PID / User / Name cells
+reflect one process while the CPU% / MEM% columns reflect a different row,
+or a PID belongs to "firefox"/"gnome-shell" but the Name cell shows a
+"kworker/…" thread.
+
+Properties (per user):
+- **Never fixes itself.** Once a row is in this state it stays broken —
+  subsequent refreshes do *not* repopulate the desynced cells for that
+  row. (This is the crucial distinction from symptom 1 and rules out a
+  purely transient render glitch.) The row's underlying `ProcessRow`
+  object is evidently out of sync with at least one of its bound cell
+  labels, and the sync is not repaired on later `set_item` calls.
+- This is the more serious bug: it means the `glib::Binding` between a
+  cell `Label` and the `ProcessRow` is pointing at the **wrong** source
+  object, or the `ProcessRow` being shown is not the one its PID belongs
+  to.
+
+Screenshots:
+- `gtk-refresh-bug/Capture d'écran du 2026-09-06 22-08-52.png` — row 3 =
+  PID 61821 · name "simpletaskmgr" · CPU 6.7%, but the ordering does not
+  match CPU-descending and the row sequence is internally inconsistent
+  with the rest of the visible set.
+- `gtk-refresh-bug/Capture d'écran du 2026-09-06 22-08-25.png` — row 2 =
+  PID 5523 (gnome-shell, 61.9%) sitting below PID 12239 (kworker, 2.7%)
+  and above PID 10581 (0.0%) — the sequence 2.7% → 61.9% → 0.0% is not
+  sorted, and several rows are missing entirely (they are in "blank" or
+  desynced state at the same time).
+- `gtk-refresh-bug/Capture d'écran du 2026-09-06 16-40-09.png` — 12.7% →
+  0.0% → 5.3% → 2.7% sequence.
+
+### 3. (Corollary) Stale sort order
+
+Because of symptoms 1 + 2, the *apparent* row sequence is frequently not
+CPU-descending. This is a downstream consequence: the SortListModel's
+comparator reads the *current* `ProcessRow` data, so the visual order
+being wrong means (a) some top rows are blank (not yet rendered) and/or
+(b) some rows are showing the wrong `ProcessRow`'s data. It is not a
+separate sort bug. `set_incremental(false)` (f89046d) did *not* reliably clear
+the blank rows and did not fix symptom 2 at all, which points to a
+binding/reference staleness and a render defect — neither of which a
+full-re-sort emission mode addresses.
+
+---
+
+The two symptoms have *opposite* behaviour (one clears on scroll / several
+refreshes, the other never clears), which is strong evidence they are two
+separate defects in the same recycle path rather than one. Both are
+consistent with a stale `glib::Binding` / stale `ProcessRow` reference on a
+recycled cell, but the persistent one additionally rules out pure render
+state and points at a live binding that keeps writing the wrong row's data
+(e.g. a binding that was never re-targeted after `bind`, or a `ProcessRow`
+object that got reused for a different PID by `refresh_list`).
 
 ## Root-cause hypothesis (verified in isolation)
 
@@ -98,13 +154,15 @@ sort_model.set_incremental(false);
 ```
 
 so every refresh is a full, deterministic re-sort over the just-updated
-values. That reportedly fixed the *blank rows / partial sort*, but did **not**
-fix the out-of-sync cell text (kworker name on firefox's PID). This is the
-key data point: a full re-sort still desyncs cells, which points away from
-"sort deltas reorder things" and toward a per-cell binding/reference staleness
-that a full re-sort happens to still leave in place — consistent with the
-binding-lifecycle theory above, and with the not-yet-found *other* sources of
-the desync (see "Not enough" below and next steps).
+values. That did **not** reliably fix the blank rows (the persistent-blank
+cases in the screenshots still appear with this line in place), and it did
+**not** fix the out-of-sync cell text (kworker name on firefox's PID). The
+key data point: a full re-sort still desyncs cells and still leaves blank
+rows, which points away from "sort deltas reorder things" and toward (a) a
+per-cell binding/reference staleness that a full re-sort still leaves in
+place, and (b) a separate GTK render/realise defect that neither the
+incremental switch nor the binding fix touches. See "Not enough" below and
+next steps.
 
 ## Fix implemented (commits 81cc6ac + 753fd84)
 
@@ -128,54 +186,95 @@ All 320 lib tests + integration tests pass, clippy and fmt clean.
 
 ## Why it is (per user testing) NOT enough
 
-The unit tests prove only the raw glib binding semantics — they do not
-exercise GTK's real `GtkList` item-factory signal ordering, only
-`set_item`→`notify` as the stale trigger, and only `ProcessRow` objects
-kept alive by the test scope.
+The two fixes target the binding lifecycle, but the user observes the
+persistent desync and the transient blank rows are *both* still present.
+Notably:
+
+- The persistent desync **never self-heals** and scrolling does *not* clear
+  it — so it is not a render/realise glitch like the blanks; it is a
+  reference that is permanently wrong for that row.
+- The unit tests prove only the raw glib binding semantics (no
+  drop-disconnect, two-live-bindings race) using a minimal glib stand-in — they
+  do not exercise GTK's real item-factory signal ordering, nor the
+  `GtkColumnView` cell pipeline, nor `refresh_list`'s in-place `ProcessRow`
+  reuse.
 
 Possible remaining holes (not yet confirmed):
 
-1. **Other stale paths we haven't disconnected.** The PID column displays
-   `ProcessRow::property("pid")`; if any other widget path (e.g. the
-   selected-process detail panel, tooltip, row activation, or another
-   factory) holds its own leaked binding or a stale `Row` reference, the
-   same symptom appears — the "kworker name on another row's PID" combo
-   suggests the *name cell* and *pid cell* got different rows, i.e. a
-   per-cell desync — exactly the mechanism fixed here, but we have not
-   confirmed the app-level path.
-2. **`refresh_list` splicing order vs binding updates.** `refresh_list`
-   splices rows in by PID. If a `ProcessRow` gets reused across pids
-   (row object kept, `set_item` with a *different* pid), the *name* cell
-   could legitimately lag the *pid* cell by one refresh cycle. That is a
-   data-level (not binding-level) desync our fix would never touch.
-3. **`bind` → `bind` without a real `unbind`** — GTK4 can rebind a slot if
-   the list *model* swaps an item in place. Our handler only fires on
-   `connect_unbind`; if GTK4 fires `setup`/`bind` twice on a row widget
-   without `unbind` for a new row, our stale-binding *guard* in
-   `bind_cell_binding` should catch it (`log::warn!` fires) — but we have
-   not yet captured logs from a real repro.
+1. **`refresh_list` may hand one `ProcessRow` object to two PIDs.** `refresh`
+   looks up rows by PID and reuses the *same object* (`rows.remove(&pid)` /
+   `set_item`) — but if two different PIDs ever map to one object (e.g. a
+   PID reuse by the kernel after a short-lived process exits, or a bookkeeping
+   bug in `order`/`rows`), the *name* cell and *pid* cell can legitimately
+   disagree by a whole refresh. That is a data-level (not binding-level)
+   desync our fix would never touch, and it would *explain the persistence*
+   (the wrong source object keeps being re-notified on every refresh). This
+   is the leading hypothesis now that the symptom is non-transient.
+2. **A stale source object kept alive elsewhere** — detail panel, tooltip,
+   context menu — holding a leaked `glib::Binding` or a strong `ProcessRow`
+   ref that fires `notify` into the recycled cell.
+3. **`bind` → `bind` without a real `unbind`** — if GTK4 fires `setup`/`bind`
+   twice on a row widget without `unbind` for a new row, our guard in
+   `bind_cell_binding` should log it (`log::warn!`) — but we have not yet
+   captured logs from a real repro to confirm the guard fires at all.
 
 ## Next steps / instrumentation to pin down the real path
 
-1. Add `log::info!` in `bind_cell_binding` logging `(pid of row, prop,
-   cell label ptr)` every time it's called; run the app with `-v` and
-   trigger the repro by sorting on CPU until the desync appears. Correlate
-   the log lines with the wrong row's PID.
-2. Add a debug-only `assert` in `set_item` that checks the label text
-   currently displayed matches that row's `name`/`pid` for the row's own
-   cell, and `log::warn!` + a panic in debug builds if they disagree.
-3. Grep `src/` for **all** `bind_property` call sites (not just the
-   factory) — the detail panel, the CPU/MEM graph pane tooltips, the
-   context-menu label — any of them could still be creating the same
-   leaked binding. Disconnect/refresh each on the same lifecycle signals.
-4. Confirm whether `refresh_list` can *rescue* a `ProcessRow` across a
-   PID change (search `refresh_list.rs` for `find` / `set_item` call
-   sites). If it does, that's a data-level desync and the real fix is to
-   replace the row object, not mutate it.
-5. If the above all come back clean, consider a stronger guard at
-   `set_item`: if the row's current `notify("name")` handler does not
-   correspond to the row's current cell (tracked via the `CELL_BINDING_KEY`
-   qdata slot), treat the write as a stale write and skip it.
+The persistence split is the single most useful lever: **the blank rows
+clear on scroll-down/up, the wrong-name rows do not.** Use that to
+separate the two defects before chasing any one of them.
+
+0. **Exploit the scroll workaround as a diagnostic.** For a *blank* row,
+   scrolling off/on re-realises it → render/row-manager staleness
+   (GTK 4.18 `GtkListItemManager`). For a *wrong-name* row, scroll does
+   *nothing* → the binding's source is permanently wrong. Any fix that
+   doesn't survive a "scroll down then up" is a render-layer fix; the
+   persistent bug needs a source-reference fix.
+
+1. **Identify the actual binding source of a broken row (primary target).**
+   The persistent wrong-name symptom means some `glib::Binding`'s *source*
+   `ProcessRow` is not the row its PID belongs to. Instrument to pin it down
+   without guessing:
+   - In `bind_cell_binding` (src/ui.rs) log `(label=id, target_prop,
+     source_pid, source_id)` on every call.
+   - In `ProcessRow::set_item` (src/process_row.rs) log `(row id, pid,
+     changed_props)`.
+   - At the moment a desync is visible, read the cell's *current* name text
+     and compare it against the `name` of `row.property` for that `row id`.
+     If they differ, find which `set_item` log wrote that text — that `row id`
+     is the *actual* source the live binding holds, independent of which row
+     the cell is showing as PID. That either proves the binding source object
+     is the wrong one, or proves the *row data itself* is wrong (see #2).
+
+2. **Audit PID → `ProcessRow` object consistency (the data-level
+   alternative).** If step 1 shows the cell and its binding source agree but
+   the *object's own data* is wrong, the bug is a data-level `ProcessRow`
+   being written with another process's item (e.g. a PID reuse colliding the
+   map in `refresh`). Add a debug invariant in `refresh` (src/refresh_list.rs):
+   after each pass, assert the PID→object map is injective and that no
+   `ProcessRow` ever reports a PID different from the one it was created for
+   (log old→new pid on any `set_item` with a changed pid). If such a
+   collision is real, the fix is to *replace* the object rather than mutate
+   it in place.
+
+3. **Confirm the stale-binding guard is even firing.** The `log::warn!` in
+   `bind_cell_binding` (the "leaked-binding guard") only fires if a *prior*
+   binding was still parked on the label at bind time. If it *never* fires
+   during a repro, the stale write is NOT coming from a leaked same-label
+   binding — it is coming from a wrong source object (step #2) or a different
+   widget. That single log is the cheapest discriminator we have.
+
+4. **Grep all `bind_property` call sites** (not only the factory): the
+   selected-process detail panel, graph-pane tooltips, context-menu label.
+   Any of them holding a `ProcessRow` ref that outlives a refresh can fire
+   `notify` into a recycled cell.
+
+5. **Render-layer fix for the blank rows (separate track).** Since those
+   clear on scroll, they are almost certainly a GTK 4.18 `GtkListItemManager`
+   realise/measure defect. Candidate mitigations: force a `queue_draw` /
+   `size_allocate` re-run after the splice, avoid the single-signal splice in
+   `refresh` for the top-of-list window, or (bigger) revisit `set_item`-in-
+   place vs. replacing objects so the row manager always re-binds cleanly.
 
 ## Files involved
 
@@ -190,31 +289,39 @@ Possible remaining holes (not yet confirmed):
 
 ## Reproduction (user-reported)
 
-1. Run the app; leave a kworker-ish PID running (kernel threads are
-   common on any Linux box).
-2. Sort the process list by CPU (or MEM) and trigger multiple refresh
-   cycles (the app auto-refreshes).
-3. Observe any of:
-   - a **blank gap** at the top of the list (empty space above the first
-     row) that clears on the next refresh,
-   - a **stale sort order** where the CPU% values are not strictly
-     decreasing (e.g. a 61.9% row below a 2.7% row),
-   - a **cell desync** where a PID that belongs to one process displays
-     the name of another (e.g. "kworker/" on firefox's PID).
+1. Run the app; leave short-lived / reordering kernel threads (kworkers) in
+   the set — they drive the constant PID churn.
+2. Sort the process list by CPU (or MEM) and let the app auto-refresh (or
+   toggle column sort to re-trigger re-sorts).
+3. Observe:
+   - **Blank gap(s) at the top** (empty space above the first row). These
+     are **transient but not reliably refresh-cleared**: they may take
+     *several* refreshes to clear, and **scrolling down then back up clears
+     them immediately**.
+   - **Wrong process name on a row** (a PID belongs to one process but the
+     Name cell / columns show another, e.g. "kworker/" on firefox's PID).
+     This is **persistent** — once a row is in this state it does *not*
+     self-heal on later refreshes and does **not** clear on scroll.
+   - **Stale sort order** (CPU% not strictly decreasing, e.g. 61.9% below
+     2.7%) — a downstream consequence of the above two.
+
+The two symptoms' opposite persistence (scroll-refreshes vs. never-clears)
+is the key diagnostic: treat them as **two separate bugs**.
 
 Screenshots captured at `gtk-refresh-bug/`:
 
 - `Capture d'écran du 2026-09-06 16-40-09.png` — stale sort order (12.7%
   → 0.0% → 5.3% → 2.7% → 1.3%).
 - `Capture d'écran du 2026-09-06 22-07-32.png` — **blank rows at the top**
-  (gap above PID 5523) *and* the otherwise well-ordered list immediately
-  below (a "recovery" refresh that has re-bound the recycled widget).
-- `Capture d'écran du 2026-09-06 22-08-25.png` — **cell desync**: PID 5523
-  (gnome-shell) shows 61.9% CPU, but row order is 2.7% → 61.9% → 0.0% →
-  12.6% → … which is not CPU-descending.
-- `Capture d'écran du 2026-09-06 22-08-52.png` — a subsequent refresh
-  re-sorting the same data (13.4% → 9.3% → 6.7% → 1.3% → 0.7% → 0.7%),
-  confirming the desync is transient.
+  (gap above PID 5523) with the otherwise well-ordered list below.
+- `Capture d'écran du 2026-09-06 22-08-25.png` — wrong order + missing
+  rows: PID 5523 (gnome-shell, 61.9%) sits below PID 12239 (kworker, 2.7%)
+  and above PID 10581 (0.0%); several top rows not shown.
+- `Capture d'écran du 2026-09-06 22-08-52.png` — persistent desync:
+  13.4% → 9.3% → **6.7% (PID 61821 "simpletaskmgr") → 1.3% → 0.7% → 0.7%**;
+  the ordering/identity does not match a clean CPU-descending set.
+- `Capture d'écran du 2026-09-06 22-20-23.png` — **many blanks** above PID
+  12984 (RDD Process), the strongest blank-gap capture.
 
 ## Notes
 
