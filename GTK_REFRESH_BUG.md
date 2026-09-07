@@ -1,6 +1,15 @@
 # GTK Cell-Recycle Refresh Bug — Investigation Log
 
-Status: **NOT RESOLVED.** There are **two** distinct, differently-persistent
+Status: **NOT RESOLVED — investigation paused at the Phase 1 instrumented
+baseline.** See the "Current state (2026-09-07)" section at the bottom for the
+exact branch / commit / evidence / what's ruled out / what's next. Everything
+above is the earlier record and is retained for continuity.
+
+---
+
+# GTK Cell-Recycle Refresh Bug — Investigation Log (earlier record)
+
+**Not resolved.** There are **two** distinct, differently-persistent
 defects, and neither is resolved:
 
 - **Blank rows at the top** — *cosmetic & transient*. Takes *several*
@@ -335,3 +344,132 @@ Screenshots captured at `gtk-refresh-bug/`:
   leak (and should have retired it); if it *doesn't* fire, the stale
   write is coming from a different code path entirely (likely the
   detail panel, another widget, or a data-level `set_item` desync).
+
+---
+
+## Current state (2026-09-07) — investigation paused at Phase 1
+
+### Where the tree is
+- **Branch:** `fix/gtk-refresh-baseline` (off `36512ad`), HEAD = `1391918`.
+- **Working tree:** only this document (`GTK_REFRESH_BUG.md`) modified
+  (pending commit); untracked: `gtk-refresh-bug/` (screenshots +
+  `repro-gtk-refresh.txt`).
+- **Phase 0 done & committed** — the two earlier fixes (and their tests)
+  are all reverted:
+  - `b8c80ae` revert `set_incremental(false)`
+  - `0459a1e` revert `bind_cell_binding` / `CELL_BINDING_KEY`
+  - `f5437ab` revert the 3 binding-lifecycle tests for the above
+- **Phase 1 done & committed** — `1391918` "Instrument the refresh path":
+  - `src/process_row.rs::set_item` — `warn!` if a live row's PID changes
+    (data-level PID-reuse tripwire).
+  - `src/refresh_list.rs::refresh` — per-tick churn digest
+    (`removed=, moved=, re_texted=, added=`) at `debug!`, plus a
+    `debug_assert!` that the store ends with injective PIDs (checked on the
+    in-memory `order` vec, so **no FFI** on the hot path).
+  - `src/ui.rs::make_cell_factory` — `BIND_PID_KEY` qdata: park the bound
+    PID on `bind`, clear on `unbind`; `warn!` on a bind-without-unbind
+    (recycle-race) tripwire.
+
+### Attempted fixes — all do NOT fix the bug (kept out of the tree)
+Three changes have been tried and each one is ruled out as **the** fix:
+
+1. **`set_incremental(false)` on the `SortListModel`** — commit `f89046d`,
+   later added to `main`. Full, non-incremental re-sort on every refresh.
+   *Reverted* in `b8c80ae` (Phase 0). Reason: it strictly **increases** row
+   churn (GTK destroys and re-adds every row widget on each re-sort), the
+   opposite of what reduces the two symptoms; and the earlier user test
+   shows it neither reliably clears the blank rows nor fixes the desync.
+   Note: it *is* the only thing whose presence on `main` correlates with the
+   bug becoming frequent — so reverting it may be a necessary part of the
+   fix — but it is a mitigation-by-removal, not a root-cause fix, and it
+   alone did not make the bug go away.
+
+2. **Discard stale cell bindings on recycle** (`CELL_BINDING_KEY` qdata +
+   `bind_cell_binding()` + 3 regression tests) — commits `81cc6ac` +
+   `753fd84`. Forces at most one live `glib::Binding` per cell label by
+   stealing and `unbind()`-ing a prior binding before each new one.
+   *Reverted* in `0459a1e` (and the tests in `f5437ab`). Reason: the Phase 1
+   diagnostic that was *built to confirm* this exact failure (a
+   bind-without-unbind "recycle race") **never fires** in the real repro, so
+   there is no leaked same-label binding to discard — hardening the binding
+   lifecycle touches a path that isn't at fault here.
+
+3. **Phase 2A — pre-sort `items` by the active column before `refresh`.**
+   Implemented on top of `1391918`, built, run under Xvfb, and *reverted*
+   (working tree is back at `1391918`). Reason: it made things **worse**, not
+   better — per-tick base-store churn went from `moved≈0` to `moved` 250–416.
+   It also triggered `Gtk-CRITICAL: Comparison method violates its general
+   contract`; that CRITICAL is notable because it **does not appear in the
+   user's real repro at all** (verified 0 occurrences in
+   `repro-gtk-refresh.txt`) — so it is an artifact of Phase 2A's larger
+   permutation, not the original symptom. Pre-sort did not reduce
+   `SortListModel` churn; it added churn.
+
+Conclusion so far: none of the three is the fix. #1 and #2 are reverted and
+staying out; #3 was a regression. The tree is at the clean Phase 1 baseline
+with diagnostics, ready to catch the real fault.
+
+### The key new data point (why Phase 2A was abandoned)
+The Phase 1 baseline (Phase 0 + diagnostics) is what the user's repro ran.
+The churn digest there is **near-zero on steady ticks** — `moved=0`,
+`removed/added` 0–4 — i.e. the base `ListStore` is **not** churning, and the
+two Phase 1 tripwires (`PID changed`, `recycle race`) **never fire** in the
+repro. So, under the clean baseline:
+- **No data-level PID collision** (injectivity holds; `set_item` PID-change
+  is silent) — the "one `ProcessRow` for two PIDs" hypothesis from the
+  earlier record is **not confirmed** by the log.
+- **No bind-without-unbind recycle race** on our labels.
+- **No base-store churn** — `refresh` is basically a no-op on most ticks.
+
+The earlier "root-cause hypothesis" (leaked `glib::Binding` on a recycled
+label) is the one the diagnostic was built to confirm, and the log does
+**not** confirm it. The fault lives in a path the current diagnostics do not
+observe yet.
+
+### Hypotheses ruled in / out so far
+| Hypothesis | Status | Evidence |
+|---|---|---|
+| `set_incremental(false)` is the sole cause of the bug | **ruled out** | reverting it (Phase 0) makes it *less* frequent (user report), not gone — so it's a contributing factor on `main`, not the whole story |
+| base-store churn from `refresh` | **ruled out** as driver | digest shows `moved/added/removed ≈ 0` on steady ticks |
+| leaked `glib::Binding` writing a stale cell (earlier "root cause") | **not confirmed** | `recycle race` tripwire silent; no bind-without-unbind captured |
+| one `ProcessRow` reused for two PIDs | **not confirmed** | injectivity `debug_assert` holds; `PID changed` silent |
+| SortListModel re-sort over in-place `notify` value updates is the fault | **leading, unproven** | only remaining churn path; every tick fires `SorterChange::Different` over ~15 `re_texted` rows |
+
+### What is not yet known (the gap)
+The existing repro log (930 lines, 92 refresh passes) contains **zero**
+occurrences of `Gtk-CRITICAL`, `recycle race`, and `PID changed`; steady-state
+ticks show `moved=0`, `re_texted` 11–31 (startup ticks spike to 162). No log
+line co-occurs with the visual glitch — the glitch happened outside the
+logged window (or the diagnostic path that would catch it is not yet
+instrumented). **Re-capture with the glitch framed** is the immediate next
+step.
+
+### Next steps (in order)
+1. **Re-capture a log with the glitch in-frame** (done: the existing log has
+   zero `Gtk-CRITICAL`, zero `recycle race`, zero `PID changed`; steady-state
+   `moved=0`, `re_texted` 11–31 — no spike brackets a visible glitch).
+   Have the user trigger the blank-row / wrong-name state, `Ctrl-C`, and
+   keep the whole log so we can locate the exact `refresh pass:` line.
+2. **Confirm whether `main` reproduces the bug reliably** (it carries the
+   `set_incremental(false)` + binding-lifecycle code). If `main` is
+   consistently broken and `fix/gtk-refresh-baseline` is not, the fix is
+   already "just don't do those two things" and we can merge the branch as
+   the fix.
+3. **If the glitch still reproduces on the baseline**, add one more
+   targeted probe: log inside `connect_bind` / `connect_unbind` the exact
+   `(label id, new/old pid, prop)` so we can tie a specific recycled cell to
+   a specific row, and log `GtkSortListModel`'s own `items-changed` event
+   stream (`store.connect_items_changed` on the *sort model*, not the base
+   store) to see whether the re-sort on `SorterChange::Different` is the
+   actual mutation path. Only then choose Phase 2B (object replacement on
+   identity change) or a SortListModel-specific mitigation.
+
+### Files in play right now
+- `GTK_REFRESH_BUG.md` (this file) — earlier record + this section.
+- `GTK_REFRESH_FIX_PLAN.md` — Phase 1/2 plan; Phase 2A **abandoned** (see
+  above), Phase 2B/C unexecuted, Phase 3 (README/docs) unexecuted.
+- `gtk-refresh-bug/repro-gtk-refresh.txt` — the user's Phase-1-instrumented
+  repro; steady-state ticks are clean, no bad tick yet located.
+- `src/ui.rs`, `src/refresh_list.rs`, `src/process_row.rs` — Phase 1
+  diagnostics present at HEAD, no fixes applied.
+
