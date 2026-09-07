@@ -473,18 +473,6 @@ fn build_process_list() -> ListView {
         Some(store.clone()),
         Some(column_view.sorter().expect("ColumnView exposes a sorter")),
     );
-    // A `GtkSortListModel` is *incremental* by default: it re-emits store
-    // changes to the `ColumnView` as minimal remove/insert deltas. Under
-    // GTK 4.18's `GtkListItemManager`, reusing a `GtkListItem` on a delta
-    // that lands after a `ProcessRow` was re-texted in place (the
-    // anti-flicker contract, `refresh_list::refresh`) leaves the row
-    // widget unbound (a blank row) and the order only partially sorted.
-    // A full (non-incremental) re-sort per refresh rebinds every row's
-    // cells and reads the just-updated values, so the top rows are
-    // never blank and CPU%/disk ordering is always honored. This touches
-    // only the `SortListModel`'s emission mode — `refresh_list` and the
-    // single-`items-changed` splice design are unchanged.
-    sort_model.set_incremental(false);
     let selection = gtk4::SingleSelection::new(Some(sort_model.clone()));
     // `GtkSingleSelection` autoselects the first row by default — so a row is
     // already selected when the list is first populated. Disable it so
