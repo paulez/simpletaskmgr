@@ -402,13 +402,40 @@ fn build_disk_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::Dra
 /// One shared `SignalListItemFactory` for a text column: a single `Label`
 /// whose `label` is property-bound to the row's `ProcessRow` string property
 /// (`prop_name`). Re-texting a cell on refresh is a pure `g_object_notify`.
+///
+/// `BIND_PID_KEY` is a *diagnostic* qdata slot (not a fix): we park the row
+/// pid currently bound to a label, and clear it on `unbind`. If the next
+/// `bind` on the same label fires while the qdata still holds a *different*
+/// pid — i.e., GTK fired bind → bind without an intervening unbind — that is
+/// the "recycle without unbind" race that would let a stale `ProcessRow`'s
+/// property binding re-write the reused label. `warn!` (visible even
+/// without `-v`) makes that race loud during a repro without changing any
+/// binding semantics. The pid-parking is a small `i32`, so it is cheap
+/// (unlike carrying a `glib::Binding` in qdata, which was the reverted
+/// earlier attempt).
 fn make_cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
+    const BIND_PID_KEY: &str = "simpletaskmgr::bind-pid";
     let f = gtk4::SignalListItemFactory::new();
     f.connect_setup(move |_f, li| {
         let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
         let label = gtk4::Label::new(None);
         label.set_xalign(0.0);
         li.set_child(Some(&label));
+    });
+    f.connect_unbind(move |_f, li| {
+        let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
+        let Some(child) = li.child() else {
+            return;
+        };
+        let Ok(label) = child.downcast::<gtk4::Label>() else {
+            return;
+        };
+        // SAFETY: `label` is still parented on the list item during the
+        // unbind phase, the qdata slot key is a `&'static str`, and the
+        // parked value is an `i32` we (and only we) ever write there.
+        unsafe {
+            let _prev = label.steal_data::<i32>(BIND_PID_KEY);
+        }
     });
     f.connect_bind(move |_f, li| {
         let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
@@ -422,6 +449,40 @@ fn make_cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
             .expect("a row object")
             .downcast::<ProcessRow>()
             .expect("a ProcessRow");
+        let new_pid = row.pid();
+        // Diagnostic: if the label already holds a *different* pid, GTK
+        // fired bind → bind without an intervening unbind for this recycled
+        // cell — a genuine recycle race that can leave a stale `ProcessRow`
+        // binding writing into this label. A `warn!` (default level) makes
+        // this visible in the very run where the user sees the desync, so
+        // a repro log can confirm or rule out this hypothesis. Same-pid
+        // rebinds (or the slot being `None`, as on the initial bind for a
+        // fresh label) are the expected paths.
+        //
+        // SAFETY: same rationale as the unbind handler; the qdata slot is
+        // an `i32` we own.
+        let prev: Option<i32> = unsafe { label.steal_data::<i32>(BIND_PID_KEY) };
+        if let Some(prev_pid) = prev {
+            if prev_pid != new_pid {
+                log::warn!(
+                    "recycle race: cell label was bound to pid {} and is \
+                     now being bound to pid {} without an intervening \
+                     unbind — a stale binding to pid {} may still be \
+                     live on this label (property: {prop_name})",
+                    prev_pid,
+                    new_pid,
+                    prev_pid
+                );
+            }
+        }
+        // Park the identity of the row now bound to this label so the
+        // unbind handler (or the next bind, if there is no unbind — the
+        // race we are probing for) can detect it.
+        //
+        // SAFETY: as above — the slot holds an `i32` and we are sole writer.
+        unsafe {
+            label.set_data::<i32>(BIND_PID_KEY, new_pid);
+        }
         // `g_object_bind_property` auto-drops the binding when either the
         // row object or this cell widget is destroyed. `sync_create`
         // copies the current value into the label immediately (the

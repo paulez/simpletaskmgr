@@ -160,6 +160,21 @@ impl ProcessRow {
             if *o == *item {
                 return;
             }
+            // A live `ProcessRow` represents exactly one process; `refresh`
+            // only ever feeds it an item with the same pid it was created
+            // under (rows are keyed by pid). So a pid change here means a row
+            // was handed another process's data — the data-level desync
+            // signature. It should be rare enough that a `warn!` (which
+            // surfaces even without `-v`) is a good tripwire.
+            if o.pid != item.pid {
+                log::warn!(
+                    "set_item: PID changed from {} to {} on a live row — a \
+                     live ProcessRow should never represent another process \
+                     (data-level desync)",
+                    o.pid,
+                    item.pid
+                );
+            }
             [
                 ("pid", o.pid != item.pid),
                 ("username", o.value.username != item.value.username),

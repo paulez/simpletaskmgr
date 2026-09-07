@@ -117,6 +117,16 @@ pub fn refresh(store: &ListStore, items: &[ProcessItem]) {
 
     let target_pids: HashSet<i32> = items.iter().map(|i| i.pid).collect();
 
+    // Churn counters, summed at the end into a single `debug!` line. They let
+    // a repro log show *how much* the per-tick store mutation is: heavy
+    // remove/move/add counts are the signal that the sort/diff path is
+    // churning the row manager (the blank-row + desync trigger); a near-zero
+    // digest means the list was already in display order and little moved.
+    let mut removed = 0u32;
+    let mut moved = 0usize;
+    let mut re_texted = 0usize;
+    let mut added = 0usize;
+
     // Pass 1: drop rows whose pid is not in the target set. Contiguous runs
     // are removed with a single `splice` (one `items-changed` signal each).
     let mut to_remove: Vec<u32> = Vec::new();
@@ -142,6 +152,7 @@ pub fn refresh(store: &ListStore, items: &[ProcessItem]) {
     }
     for (pos, len) in runs.iter().rev() {
         splice(store, *pos, *len, &[]);
+        removed += *len;
     }
     order.retain(|p| target_pids.contains(p));
     rows.retain(|p, _| target_pids.contains(p));
@@ -155,7 +166,13 @@ pub fn refresh(store: &ListStore, items: &[ProcessItem]) {
             // object in place (its on-screen labels repaint via
             // `set_item`); otherwise there is nothing to do at all. No store
             // mutation means no `items-changed` signal and no widget churn.
-            if !rows[&pid].has_value(item) {
+            // Evaluate the "changed?" flag first: `set_item` replaces the
+            // row's data in place, so once it runs `has_value` would compare
+            // the row against itself (always false) and the churn counter
+            // would double-count every re-text as a re-text.
+            let text_changed = !rows[&pid].has_value(item);
+            if text_changed {
+                re_texted += 1;
                 rows[&pid].set_item(item);
             }
             continue;
@@ -174,7 +191,10 @@ pub fn refresh(store: &ListStore, items: &[ProcessItem]) {
             // `insert` pair (two signals) that destroys the widget and
             // rebuilds a blank one. No blank flash.
             let row = rows.remove(&pid).expect("row for a kept pid");
-            if !row.has_value(item) {
+            moved += 1;
+            let text_changed = !row.has_value(item);
+            if text_changed {
+                re_texted += 1;
                 // Its data changed while it moved: re-text it.
                 row.set_item(item);
             }
@@ -185,6 +205,7 @@ pub fn refresh(store: &ListStore, items: &[ProcessItem]) {
         } else {
             // A brand-new pid: insert a fresh row here (or at the tail).
             let fresh = ProcessRow::from_item(item);
+            added += 1;
             if (t as u32) < store.n_items() {
                 store.insert(t as u32, &fresh);
             } else {
@@ -194,6 +215,44 @@ pub fn refresh(store: &ListStore, items: &[ProcessItem]) {
             rows.insert(pid, fresh);
         }
     }
+
+    // One line per refresh pass, at `debug!` (visible with `simpletaskmgr
+    // -v`): exactly how much this pass mutated the store. A healthy list
+    // already in display order reads near `(0,0,0,0)`; heavy churn on most
+    // ticks is the signature that the base store is being re-ordered against
+    // the `SortListModel` every tick (the thing driving the blank rows and
+    // the desync). `total` is the store size *before* this pass.
+    log::debug!(
+        "refresh pass: {} -> {} rows (removed={}, moved={}, re_texted={}, added={})",
+        old_n,
+        store.n_items(),
+        removed,
+        moved,
+        re_texted,
+        added
+    );
+
+    // `refresh` is keyed by pid, so it must end with no two rows sharing a
+    // pid — the anti-"two PIDs share one row" guard the investigation called
+    // for. A violation would let a later `set_item`/sort legitimately mix
+    // data from two processes into one row (the persistent wrong-name
+    // symptom). Checked on `order` — the `Vec<i32>` that mirrors the store
+    // contents, so this is a plain in-memory set, **no FFI `store.item`
+    // round-trips** on the refresh hot path. `debug_assert!` runs in debug/
+    // test builds (our CI) and is a no-op in release, where the invariant is
+    // still held by construction (`rows` is a `HashMap` keyed by pid).
+    let distinct = order
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<i32>>()
+        .len();
+    debug_assert_eq!(
+        distinct,
+        order.len(),
+        "refresh leaves duplicate pids: {} distinct of {} rows",
+        distinct,
+        order.len()
+    );
 }
 
 #[cfg(test)]
