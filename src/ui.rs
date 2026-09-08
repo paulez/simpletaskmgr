@@ -404,7 +404,7 @@ fn build_disk_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::Dra
 /// (`prop_name`). Re-texting a cell on refresh is a pure `g_object_notify`.
 ///
 /// GTK does not own the `glib::Binding`: dropping the Rust handle does not
-/// disconnect the C-side binding (see `GTK_REFRESH_BUG.md`). The factory
+/// disconnect the C-side binding (see `doc/GTK_REFRESH_BUG.md`). The factory
 /// therefore parks the live binding on the label (via
 /// [`crate::cell_label::park`], a thread-local registry that avoids the
 /// `unsafe` of `set_data`/`steal_data`), and retires it on recycle

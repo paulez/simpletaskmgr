@@ -15,7 +15,7 @@
 //! pair lets us attach a `glib::Binding` from a source object to a
 //! `Label` that will be recycled. GTK does **not** own those bindings.
 //! Dropping the Rust [`glib::Binding`] handle does not disconnect the
-//! C-side binding (established in `GTK_REFRESH_BUG.md`), so if the
+//! C-side binding (established in `doc/GTK_REFRESH_BUG.md`), so if the
 //! factory simply lets the handle drop, each recycled cell accrues one
 //! live binding per previous row it was bound to — the "persistent
 //! wrong-name" symptom (a row's cells disagree and never self-heal).

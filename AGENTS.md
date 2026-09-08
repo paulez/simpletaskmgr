@@ -41,6 +41,19 @@ This app uses **GTK4** from Rust via the gtk-rs crate.
 - Bind data changes to signals (use callback handlers for list updates, user input)
 - For performance with large lists, consider virtual scrolling/pagination
 
+## Documentation & Planning Files
+
+- **Keep planning and investigation docs in `doc/`** (e.g. `doc/<TOPIC>_FIX_PLAN.md`,
+  `doc/<TOPIC>_BUG.md`, `doc/toolkit-choices.md`). Create new plan/bug/investigation
+  files directly in `doc/` from the start — do not place them at the repo root.
+- **`README.md` stays at the repo root** — it is the user-facing entry point, not a
+  planning doc. Update it when a user-visible feature changes; do not move it into
+  `doc/`.
+- Relative links from a doc in `doc/` to other repo paths must be prefixed with
+  `../` (e.g. reference screenshots as `../gtk-refresh-bug/…`).
+- rustdoc references inside `src/*` to these docs use the `doc/…` path
+  (e.g. "see `doc/GTK_REFRESH_BUG.md`").
+
 ## Development Workflow
 
 Work in small, focused changes. For **each** change, follow this gate and
