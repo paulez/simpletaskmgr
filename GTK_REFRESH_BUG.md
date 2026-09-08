@@ -1,9 +1,17 @@
 # GTK Cell-Recycle Refresh Bug — Investigation Log
 
-Status: **NOT RESOLVED — investigation paused at the Phase 1 instrumented
-baseline.** See the "Current state (2026-09-07)" section at the bottom for the
-exact branch / commit / evidence / what's ruled out / what's next. Everything
-above is the earlier record and is retained for continuity.
+Status: **PERSISTENT DESYNC ROOT-CAUSE CONFIRMED AND FIXED (pending user
+repro to close the loop).** See the "Phase 1.5 — root cause confirmed"
+section near the bottom. The root cause is a **leaked `glib::Binding` on a
+recycled cell label** (`src/ui.rs::make_cell_factory` created a binding on
+`bind` but never disconnected it on `unbind`, so stale rows kept `notify`-ing
+into the reused label). This is exactly the defect `GTK_REFRESH_BUG.md`
+first hypothesized; the Phase 1 PID tripwire that "ruled it out" was testing
+the wrong indicator (see Phase 1.5). The **blank rows** are a separate,
+cosmetic GTK 4.18 `GtkListItemManager` render defect and are NOT covered by
+this fix.
+
+Everything else above is the earlier record and is retained for continuity.
 
 ---
 

@@ -1,117 +1,129 @@
-# GTK Refresh Bug — Revised Fix Plan
+# Fix plan — persistent cell desync (wrong process name on a row)
 
-Status: **IN PROGRESS** (supersedes the earlier two-attempt log in
-`GTK_REFRESH_BUG.md`, whose "two separate bugs" framing is retained as a
-diagnostic but whose root cause is re-assessed below).
+Status: **IN PROGRESS** (this is the file the build is executing)
 
-## Fresh diagnosis
+## Root cause (corrected earlier theory)
 
-Both prior fixes treat symptoms; the common **driver** they never touch is
-churn. On **every** refresh tick the pipeline runs two full orderings:
+The Phase 1 baseline (`src/ui.rs::make_cell_factory`, `src/ui.rs:416-496`)
+leaks a live `glib::Binding` on every GTK cell-recycle:
 
-1. `refresh_list::refresh(store, items)` splices the base `ListStore` into
-   **`/proc` enumeration order** (`process_list.rs` builds `processes` by
-   iterating `/proc`), so the base order churns each tick as kworkers
-   die/spawn. (`refresh_list.rs:106`)
-2. Then the `SortListModel` **re-sorts that churning base** into the active
-   display column.
+- `connect_bind` (line 491) creates a new
+  `row.bind_property(prop_name, &label, "label").sync_create().build()`
+  and drops the `Binding` handle. Dropping the Rust handle does **not**
+  disconnect the C-side binding (established in the bug doc probe #2).
+- `connect_unbind` (lines 425-438) only steals the `BIND_PID_KEY`
+  diagnostic qdata. It **never disconnects the binding**.
 
-The upshot: `GtkListItemManager` recycles a large batch of row widgets
-**every tick** — and #1's `set_incremental(false)` makes that a *full*
-clear+re-add each tick = maximum churn. Churn is what both prior fixes missed.
+Consequence: on `bind → unbind → bind` of a recycled cell, each cycle
+piles up another live binding from a different `ProcessRow` on the same
+`Label`. After N recycles, N stale rows can all push `notify` into one
+label; last-writer-wins ⇒ persistent wrong-name symptom that never
+self-heals, and that scrolling does not clear (scrolling re-realizes the
+label's *current* value but does not retire the stale binding).
 
-Reconciliation of the two symptoms: churn *re-creates* desync races faster
-than old ones clear (so a bad row looks "persistent" across refreshes), and
-the same recycle path is where the transient blanks originate. This explains
-both the opposite persistence and why neither the incremental switch nor the
-binding-lifecycle hardening moved the needle.
+### Why the Phase 1 PID tripwire gave a false negative
 
-Supporting evidence already in the codebase: `cpu_tracker.rs:155` and
-`io_tracker.rs:101` already special-case **PID reuse** (a pid whose owner
-changed) — the app is already aware pid-reuse is a real event, but the row
-modeling (`ProcessRow::set_item`) does *not* treat pid change as an identity
-change: it mutates the same object in place.
+`BIND_PID_KEY` parks the currently-bound PID on the label and the
+`connect_bind` handler `warn!`s if `prev_pid != new_pid`. But the
+`connect_unbind` handler clears the qdata. So on any legitimate
+`bind → unbind → bind` cycle, the qdata is cleared in between and the
+tripwire never fires — yet the underlying *binding* is still live on the
+label. The diagnostic was checking the wrong indicator.
 
-## Execution phases
+### Concluded rule
 
-### Phase 0 — revert both prior fixes (clean baseline)
+The `BIND_PID_KEY` qdata tripwire (and its `unsafe { set_data
+/ steal_data }` blocks) are retired. The correct tripwire is
+**"is there still a live `glib::Binding` on the label at bind time?"**
+If yes → `warn!` and retire it. If no, we are on a healthy path.
 
-All three fix commits touch only `src/ui.rs`:
+## Goal
 
-- `f89046d` — `set_incremental(false)` (+1 comment)
-- `81cc6ac` — `bind_cell_binding` / `CELL_BINDING_KEY` recycle fix
-- `753fd84` — 3 glib-binding regression tests
+Fix the persistent cell desync **without `unsafe`**, by parking the
+`glib::Binding` on a typed Rust field of a `Label` subclass rather than
+in a raw qdata slot. This also gives us a clean, type-safe place to
+install the real tripwire.
 
-Revert newest→first, one granular commit each (`753fd84`, `81cc6ac`,
-`f89046d`). Restores the plain `bind_property` call site and the default
-(incremental) `SortListModel`. No other site references the reverted symbols.
+## Deliverable (one logical change, one branch, one commit series)
 
-### Phase 1 — instrument (diagnostic commit; stays in at `debug!`/`warn!`)
+1. **New module `src/cell_label.rs`** — a small `glib::Object` subtype
+   wrapping `gtk4::Label` (i.e. `ParentType = gtk4::Label`) with a
+   typed `Cell<Option<glib::Binding>>` field plus `new()`,
+   `take_binding()`, `set_binding(Option<glib::Binding>)` accessors.
 
-Three cheap, cheap-to-remove probes that together identify the active fault
-without guesswork:
+2. **Rewrite `make_cell_factory` in `src/ui.rs`** — build
+   `CellLabel` instead of `gtk4::Label`, replace all `unsafe` qdata
+   accesses with the typed accessors, and keep *only* the corrected
+   tripwire `warn!` (stale binding on recycled label at bind time).
 
-- `process_row.rs::set_item` — `log::warn!` **when the PID itself changes**
-  on a live row (data-level PID-reuse lock-in; the "kworker on firefox's pid"
-  hypothesis, root cause #4).
-- `refresh_list.rs::refresh` — per-tick churn digest (removed/moved/added/
-  re-texted counts) at `debug!`, plus `debug_assert` that after the pass the
-  store's PIDs are **injective** (no two rows share a PID).
-- `ui.rs::connect_bind` — park the previous bound PID in qdata (a cheap
-  `i32`, no `Binding`-lifetime gymnastics); if the PID changed for the label,
-  `log::warn!` so a recycle-race desync is visible at bind time.
+3. **Regression tests** — a fresh test in `src/cell_label.rs` proving:
+   - a bind → unbind → bind-on-different-row cycle leaves exactly one
+     live binding on the label, and
+   - a stale row's `notify` no longer writes to the label after the
+     unbind.
+   Both use the existing `crate::testutil::test_item` fixtures.
 
-The `warn!` lines are the discriminators. To capture them the user runs the
-app with `-v` (already wired: `-v` → `LevelFilter::Debug`) during a normal
-repro and shares the log. **This log decides the Phase-2 fix below.**
+4. **Update `GTK_REFRESH_BUG.md`** — replace the "leading hypothesis"
+   line with the confirmed root cause and note the false-negative
+   tripwire so the next reader doesn't repeat Phase 0's mistake.
+   Do not delete the earlier record; append a short "Phase 1.5 —
+   confirmed root cause" section.
 
-### Phase 2 — the fix, chosen by the log
+5. **README / public doc** — no user-visible change, so the existing
+   README stays as-is unless `make_cell_factory`'s doc comment needs to
+   be refreshed (it will — it currently describes the PID diagnostic).
 
-Ranked (default = the churn one, since it's highest probability +
-reversible):
+6. **No changes** to `refresh_list.rs` or `process_row.rs` — they are
+   not at fault; the churn-digest diagnostics and the `set_item`
+   PID-change tripwire stay.
 
-- **A. Stop feeding the SortListModel a churning base.** In `make_rebuild`
-  (ui.rs), **sort `items` by the active display column before calling
-  `refresh`** (read `ColumnViewSorter::primary_sort_column` + current
-  order). The base store then arrives **already in display order**, the
-  `SortListModel` re-sort becomes a near-no-op, and per-tick recycle churn
-  collapses to the real delta. This is pure logic (testable: sort over
-  `items` × column × direction) and attacks the common root cause of both
-  symptoms at once.
-- **B. Fix the PID-reuse hole (only if the PID-change `warn!` in Phase 1
-  fired):** when a PID's *identity* changes across a refresh, **replace** the
-  `ProcessRow` object (new `ProcessRow::from_item`) via a fresh `splice`
-  rather than mutating it in place. `set_item` in-place is fine for
-  value-only changes; identity changes need a new object.
-- **C. Blank-row render quirk (only if A doesn't fully kill it):** after the
-  splice pass in `make_rebuild`, call `column_view.queue_resize()` (or
-  `size_allocate`) to force GTK's row-manager to re-measure — a targeted
-  workaround for a known GTK 4.18 `GtkListItemManager` stale-row defect.
+## Test strategy
 
-**Do not** keep `set_incremental(false)` — it strictly increases churn and
-is the opposite of what A does.
+Follow the repo's test discipline (`#[cfg(test)] mod tests`, `test_`
+prefix, `super::*`).
 
-### Phase 3 — docs
+### Unit tests for `CellLabel`
 
-- `GTK_REFRESH_BUG.md`: mark RESOLVED (or PARTIALLY, with the surviving
-  symptom named), record which Phase-2 path was taken and the log that
-  decided it.
-- `README.md`: only if behaviour changes visibly (it shouldn't, modulo
-  ordering — which stays CPU-desc by default).
+- `test_cell_label_take_and_set` — empty label: `take()` returns
+  `None`; `set(Some(b))`; `take()` returns `Some(b)`; `take()` again
+  returns `None`.
+- `test_cell_label_bind_then_unbind_does_not_leak` — the exact
+  desync scenario. Given two `ProcessRow`s (`row_a`, `row_b`) and one
+  `CellLabel`:
+  1. `bind(row_a) + take()` (simulate what the factory does); `set(...)`
+     to park the binding; read the label text → must be `row_a`'s value.
+  2. `take()` + `b.unbind()` (simulate the factory's unbind).
+  3. `bind(row_b) + set(...)`.
+  4. `row_a.set_item(other)` (a `notify` from a stale row).
+  5. Assert the label still shows `row_b`'s value, not
+     `row_a`'s.
 
-## Verification
+### Unit tests for `make_cell_factory`
 
-- Unit-test the Phase-2A pre-sort helper (pure: `items` + column + direction
-  → expected pids); a `refresh` test with a **duplicate PID** must panic the
-  injectivity `debug_assert` (guards against a data-level pid-collision).
-- Existing lib + integration suites stay green.
-- Every commit: `cargo check && cargo test && cargo clippy --all-targets
-  && cargo fmt --check`.
+Keep the existing factory intact but route it through `CellLabel`. Add:
 
-## Decision points
+- `test_cell_factory_recycle_preserves_last_binding` — simulate
+  `setup → bind(row_a) → unbind → bind(row_b)` once, then
+  `row_a.set_item(other)`. Assert the label text matches `row_b`.
+  The `warn!` (corrected tripwire) does not fire because we unbound
+  properly.
+- `test_cell_factory_recycle_fires_tripwire_if_unbind_missing` —
+  simulate `setup → bind(row_a) → bind(row_b)` (no unbind):
+  `captured_logs` (via `env_logger::try_init` or a simple
+  `log` test harness) must contain the `stale binding` warning.
+  If the log-capture harness is too heavy for this repo, assert the
+  invariant on the label directly: after the second `bind`, the label
+  must reflect `row_b` (the guard retired the stale binding).
 
-1. Keep the Phase-1 `warn!`/`debug!` probes in the tree once the bug is
-   fixed? (default: keep — they are cheap and are the first line of future
-   diagnosis; remove only if noisy.)
-2. If Phase-2A alone clears both symptoms, do **not** also do B or C; the
-   principle is to touch only what the log justifies.
+## Execution checklist (per AGENTS.md workflow)
+
+- [ ] Write `GTK_REFRESH_FIX_PLAN.md` (this file).
+- [ ] Add `src/cell_label.rs` with the `CellLabel` module + unit tests.
+- [ ] Rewrite `make_cell_factory` in `src/ui.rs` to use `CellLabel`;
+      remove the `BIND_PID_KEY` qdata tripwire.
+- [ ] Add / update the `make_cell_factory` tests.
+- [ ] Update `GTK_REFRESH_BUG.md` with the corrected root cause.
+- [ ] Run the gate:
+  `cargo check && cargo test && cargo clippy --all-targets && cargo fmt --check`.
+- [ ] Commit logical changes in order (new module, factory rewrite,
+      tests) with clear messages. Do not push.
