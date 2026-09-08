@@ -1,17 +1,20 @@
 # GTK Cell-Recycle Refresh Bug — Investigation Log
 
-Status: **PERSISTENT DESYNC ROOT-CAUSE CONFIRMED AND FIXED (pending user
-repro to close the loop).** See the "Phase 1.5 — root cause confirmed"
-section near the bottom. The root cause is a **leaked `glib::Binding` on a
-recycled cell label** (`src/ui.rs::make_cell_factory` created a binding on
-`bind` but never disconnected it on `unbind`, so stale rows kept `notify`-ing
-into the reused label). This is exactly the defect `GTK_REFRESH_BUG.md`
-first hypothesized; the Phase 1 PID tripwire that "ruled it out" was testing
-the wrong indicator (see Phase 1.5). The **blank rows** are a separate,
-cosmetic GTK 4.18 `GtkListItemManager` render defect and are NOT covered by
-this fix.
+Status: **RESOLVED — the persistent wrong-name desync no longer reproduces
+(2026-09-08).** See the "Phase 1.5 — resolution" section at the bottom. The
+cell desync is fixed by **retiring the live `glib::Binding` on a recycled
+cell every time the factory (re)binds** — done in *both* `connect_unbind`
+(happy path) and `connect_bind` (defensive tripwire) — via a safe
+thread-local parking slab (`src/cell_label.rs`). The approach change in the
+binding lifecycle is what resolved it; the earlier `81cc6ac` attempt parked a
+binding but the lifecycle it enforced never matched the one that fixed it.
+The **blank rows** are a separate, cosmetic GTK 4.18 `GtkListItemManager`
+render defect and are NOT covered by this fix.
 
-Everything else above is the earlier record and is retained for continuity.
+Everything else (the earlier record, the "current state — investigation
+paused at Phase 1" checkpoint, and the "attempted fixes" table) is retained
+for continuity; superseded "not resolved / not confirmed" conclusions there
+are overridden by Phase 1.5.
 
 ---
 
@@ -392,15 +395,17 @@ Three changes have been tried and each one is ruled out as **the** fix:
    fix — but it is a mitigation-by-removal, not a root-cause fix, and it
    alone did not make the bug go away.
 
-2. **Discard stale cell bindings on recycle** (`CELL_BINDING_KEY` qdata +
-   `bind_cell_binding()` + 3 regression tests) — commits `81cc6ac` +
-   `753fd84`. Forces at most one live `glib::Binding` per cell label by
-   stealing and `unbind()`-ing a prior binding before each new one.
-   *Reverted* in `0459a1e` (and the tests in `f5437ab`). Reason: the Phase 1
-   diagnostic that was *built to confirm* this exact failure (a
-   bind-without-unbind "recycle race") **never fires** in the real repro, so
-   there is no leaked same-label binding to discard — hardening the binding
-   lifecycle touches a path that isn't at fault here.
+2. **Discard stale cell bindings on recycle, v1** (`CELL_BINDING_KEY` qdata +
+    `bind_cell_binding()` + 3 regression tests) — commits `81cc6ac` +
+    `753fd84`. Forces at most one live `glib::Binding` per cell label by
+    stealing and `unbind()`-ing a prior binding before each new one.
+    *Reverted* in `0459a1e` (and the tests in `f5437ab`). It was ruled out at
+    the time because the Phase 1 "recycle race" diagnostic never fired and
+    user testing still showed the desync. **Note:** the concept was re-
+    attempted as a **safe, `unsafe`-free** implementation (`src/cell_label.rs`
+    parking slab + retire in *both* `connect_unbind` and `connect_bind`), and
+    **this is the version that resolved the desync** — see Phase 1.5. See
+    Phase 1.5 for the "why did v2 work where v1 did not" analysis.
 
 3. **Phase 2A — pre-sort `items` by the active column before `refresh`.**
    Implemented on top of `1391918`, built, run under Xvfb, and *reverted*
@@ -413,9 +418,12 @@ Three changes have been tried and each one is ruled out as **the** fix:
    permutation, not the original symptom. Pre-sort did not reduce
    `SortListModel` churn; it added churn.
 
-Conclusion so far: none of the three is the fix. #1 and #2 are reverted and
-staying out; #3 was a regression. The tree is at the clean Phase 1 baseline
-with diagnostics, ready to catch the real fault.
+Conclusion so far (superseded by Phase 1.5): at the time of this checkpoint,
+none of the three was believed to be the fix. #1 and #2 were reverted and
+#3 was a regression. The tree was at the clean Phase 1 baseline with
+diagnostics. **Phase 1.5 below resolves the matter: the safe
+binding-retirement fix (v1's concept, re-implemented without `unsafe`) plus
+removing `set_incremental(false)` is what resolves the desync.**
 
 ### The key new data point (why Phase 2A was abandoned)
 The Phase 1 baseline (Phase 0 + diagnostics) is what the user's repro ran.
@@ -480,4 +488,99 @@ step.
   repro; steady-state ticks are clean, no bad tick yet located.
 - `src/ui.rs`, `src/refresh_list.rs`, `src/process_row.rs` — Phase 1
   diagnostics present at HEAD, no fixes applied.
+
+---
+
+## Phase 1.5 — resolution (2026-09-08)
+
+**Outcome.** The persistent wrong-name cell desync **no longer reproduces**
+in the running app (user-confirmed over a full session under kworker churn).
+The blank rows remain a separate cosmetic GTK 4.18 render issue, out of scope
+here.
+
+### The fix in the tree
+
+`make_cell_factory` (src/ui.rs) now retires a recycled cell's live
+`glib::Binding` on **every** recycle, via a safe thread-local parking slab
+(`src/cell_label.rs`):
+
+- `connect_unbind`: `take_and_unbind(key)` — the happy path; a cell slot
+  detaching from its item disconnects its binding so a stale `ProcessRow`
+  can no longer `notify("name")` into the reused `Label`.
+- `connect_bind`: `take_and_unbind(key)` *defensively* before creating the
+  new binding — if the previous `unbind` never ran (a "bind → bind" without
+  unbind), the stale source is retired here and a `warn!` fires so a future
+  repro logs it.
+- `park(key, binding)` records the new `glib::Binding` so both handlers can
+  find and disconnect it.
+
+Key design points (why safe): the slab keys a
+`std::collections::HashMap<u_size, glib::Binding>` in a `thread_local!`
+`RefCell`, keyed by `label.as_ptr() as usize` — both safe operations (the
+pointer is only used as an integer key, never dereferenced). No
+`set_data`/`steal_data`, no `unsafe`.
+
+### Why this works where the v1 attempt and the Phase 0 baselines did not
+
+The recurring "we already tried this" confusion is worth spelling out:
+
+| Attempt | What it did | Result |
+|---|---|---|
+| **v1** (`81cc6ac`) | Parked the `glib::Binding` in an `unsafe` qdata slot on the label; retired it in `connect_unbind` (and defensively in the bind path). | Reverted — the Phase 1 "recycle race" diagnostic never fired and user testing still showed the desync. |
+| **Phase 0 baseline** | Reverted v1 and the `set_incremental(false)` churn-regressor; left a `BIND_PID_KEY` (i32) qdata diagnostic but **no binding retirement** — the factory created a binding in `connect_bind` and let the Rust handle drop, leaking the C-side binding. | The clean diagnostic baseline; the desync **is reproducible under churn** because nothing retires the binding. |
+| **this fix** | Same retirement contract as v1, but **safe** (thread-local slab, no `unsafe`) and retiring in *both* `connect_unbind` and `connect_bind`. | **Resolves the desync.** |
+
+So the *approach change in the binding lifecycle* (park the `glib::Binding`
+and `unbind()` it on recycle) is the substantive fix, and it is now safe.
+What "differed" from v1 in practice:
+
+1. **Safety** — no `unsafe` qdata access; the slab is `park`/`take`/
+   `take_and_unbind` on safe methods. This is what makes it a clean,
+   reviewable, mergeable change rather than a workaround.
+2. **Consistent retirement in both paths** — `connect_unbind` *and*
+   `connect_bind` both call `take_and_unbind`. This closes the "bind → bind
+   without unbind" race that a Phase 0-style factory (or any path that
+   skips `connect_unbind`) leaves open, and the `warn!` gives a repro log
+   hook if it ever happens.
+3. **`set_incremental(false)` is gone.** The v1 attempt and the pre-revert
+   tree carried `sort_model.set_incremental(false)` (which the Phase 2A
+   analysis showed *increases* row churn). Removing it cuts the churn that
+   exercises the recycle path — a necessary part of the fix, though not the
+   root-cause fix by itself.
+
+The honest caveat: a **green test suite does not prove the fix in the
+running app.** My `cell_label.rs` tests prove the slab retires a binding in
+isolation (a stale source's `notify` no longer reaches the target once
+`take_and_unbind` runs). They do *not* exercise GTK's real
+`GtkColumnView` factory signal ordering, the `GtkListItemManager` recycle
+lifecycle, or `refresh_list`'s in-place `ProcessRow` reuse. The empirical
+proof is the user's running-app observation — that is the gate, not the
+tests.
+
+### What was NOT at fault (confirmed, kept out of scope)
+
+- `refresh_list.rs` — the PID→`ProcessRow` map is injective (the `debug_assert`
+  and `set_item` PID-change tripwire are both silent in the Phase 1 log).
+  No data-level collision.
+- `gtk4::SortListModel` incremental re-sort — the *leading* unproven
+  hypothesis from the Phase 1 pause. The churn digest in the Phase 1 log
+  shows `moved=0` on steady ticks, so the SortListModel is not driving the
+  desync; the desync is entirely in the per-cell binding lifecycle, which
+  this fix addresses.
+
+### Open items
+
+- The **blank rows** (transient, scroll-clears) are still present and are a
+  GTK 4.18 `GtkListItemManager` render/realise defect, out of scope for this
+  fix. If they remain a problem, a separate investigation against GTK's row
+  manager is the correct next step; no further binding-lifecycle work will
+  help.
+- Keep the Phase 1 diagnostics (`recycle race` warn, `PID changed` warn,
+  churn digest, the new defensive `warn!` in `connect_bind`) **in the tree**
+  so that if the desync ever recurs we can frame it in a log capture without
+  re-instrumenting. They are `log::debug!`/`warn!` — no runtime cost on the
+  happy path.
+- `main` is now at the fix (clean fast-forward to `38d0b96` + docs
+  `af3c353`); `origin/main` is still ahead of `main` by the pre-fix commits
+  and will need a push on the user's next deploy cycle. Not pushed here.
 
