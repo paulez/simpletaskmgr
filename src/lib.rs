@@ -1,3 +1,4 @@
+pub mod cell_label;
 pub mod config;
 pub mod cpu_status;
 pub mod cpu_tracker;

@@ -403,18 +403,17 @@ fn build_disk_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::Dra
 /// whose `label` is property-bound to the row's `ProcessRow` string property
 /// (`prop_name`). Re-texting a cell on refresh is a pure `g_object_notify`.
 ///
-/// `BIND_PID_KEY` is a *diagnostic* qdata slot (not a fix): we park the row
-/// pid currently bound to a label, and clear it on `unbind`. If the next
-/// `bind` on the same label fires while the qdata still holds a *different*
-/// pid — i.e., GTK fired bind → bind without an intervening unbind — that is
-/// the "recycle without unbind" race that would let a stale `ProcessRow`'s
-/// property binding re-write the reused label. `warn!` (visible even
-/// without `-v`) makes that race loud during a repro without changing any
-/// binding semantics. The pid-parking is a small `i32`, so it is cheap
-/// (unlike carrying a `glib::Binding` in qdata, which was the reverted
-/// earlier attempt).
+/// GTK does not own the `glib::Binding`: dropping the Rust handle does not
+/// disconnect the C-side binding (see `GTK_REFRESH_BUG.md`). The factory
+/// therefore parks the live binding on the label (via
+/// [`crate::cell_label::park`], a thread-local registry that avoids the
+/// `unsafe` of `set_data`/`steal_data`), and retires it on recycle
+/// ([`crate::cell_label::take_and_unbind`]) — both in `connect_unbind`
+/// (the happy path) and as a defensive tripwire at the top of
+/// `connect_bind` (the "persistent wrong-name" bug's signature: a
+/// previous `unbind` never ran, leaving a live stale binding that may
+/// `notify` into the recycled label).
 fn make_cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
-    const BIND_PID_KEY: &str = "simpletaskmgr::bind-pid";
     let f = gtk4::SignalListItemFactory::new();
     f.connect_setup(move |_f, li| {
         let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
@@ -430,12 +429,11 @@ fn make_cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
         let Ok(label) = child.downcast::<gtk4::Label>() else {
             return;
         };
-        // SAFETY: `label` is still parented on the list item during the
-        // unbind phase, the qdata slot key is a `&'static str`, and the
-        // parked value is an `i32` we (and only we) ever write there.
-        unsafe {
-            let _prev = label.steal_data::<i32>(BIND_PID_KEY);
-        }
+        // Happy path: retire the parking (and disconnect the binding) so
+        // the recycled label no longer holds a live binding to its
+        // previous source row.
+        let key = label.as_ptr() as usize;
+        crate::cell_label::take_and_unbind(key);
     });
     f.connect_bind(move |_f, li| {
         let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
@@ -449,48 +447,35 @@ fn make_cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
             .expect("a row object")
             .downcast::<ProcessRow>()
             .expect("a ProcessRow");
-        let new_pid = row.pid();
-        // Diagnostic: if the label already holds a *different* pid, GTK
-        // fired bind → bind without an intervening unbind for this recycled
-        // cell — a genuine recycle race that can leave a stale `ProcessRow`
-        // binding writing into this label. A `warn!` (default level) makes
-        // this visible in the very run where the user sees the desync, so
-        // a repro log can confirm or rule out this hypothesis. Same-pid
-        // rebinds (or the slot being `None`, as on the initial bind for a
-        // fresh label) are the expected paths.
-        //
-        // SAFETY: same rationale as the unbind handler; the qdata slot is
-        // an `i32` we own.
-        let prev: Option<i32> = unsafe { label.steal_data::<i32>(BIND_PID_KEY) };
-        if let Some(prev_pid) = prev {
-            if prev_pid != new_pid {
-                log::warn!(
-                    "recycle race: cell label was bound to pid {} and is \
-                     now being bound to pid {} without an intervening \
-                     unbind — a stale binding to pid {} may still be \
-                     live on this label (property: {prop_name})",
-                    prev_pid,
-                    new_pid,
-                    prev_pid
-                );
-            }
-        }
-        // Park the identity of the row now bound to this label so the
-        // unbind handler (or the next bind, if there is no unbind — the
-        // race we are probing for) can detect it.
-        //
-        // SAFETY: as above — the slot holds an `i32` and we are sole writer.
-        unsafe {
-            label.set_data::<i32>(BIND_PID_KEY, new_pid);
+        let key = label.as_ptr() as usize;
+        // Defensive tripwire: a healthy factory always retires the previous
+        // binding in `connect_unbind`, so a parking still alive here means
+        // the previous unbind for this recycled slot did not run — the
+        // stale source's binding could still `notify` into and overwrite
+        // the new one. Retire it (the desync source) and `warn!` the event
+        // so a repro log can confirm this is the path that produced a
+        // persistent wrong-name row. A fresh label has no parking here.
+        if crate::cell_label::take_and_unbind(key).is_some() {
+            log::warn!(
+                "cell recycling: a stale binding to a previous row \
+                 (property: {prop_name}) was still parked on this label \
+                 — the previous unbind did not run; retired the stale \
+                 source before binding a new row",
+            );
         }
         // `g_object_bind_property` auto-drops the binding when either the
         // row object or this cell widget is destroyed. `sync_create`
-        // copies the current value into the label immediately (the
-        // factory may run its `setup`/`bind` in either order, so we do
-        // not rely on the `notify` order).
-        row.bind_property(prop_name, &label, "label")
+        // copies the current value into the label immediately (the factory
+        // may run `setup`/`bind` in either order, so we do not rely on
+        // the `notify` order). Park the binding so a later
+        // `connect_unbind` (and the defensive tripwire at the next
+        // `connect_bind`) can retire the live binding by its `glib::Binding`
+        // rather than by a weak reference.
+        let binding = row
+            .bind_property(prop_name, &label, "label")
             .sync_create()
             .build();
+        crate::cell_label::park(key, binding);
     });
     f
 }
