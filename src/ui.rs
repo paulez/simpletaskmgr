@@ -1150,6 +1150,7 @@ fn load_css() {
 }
 
 #[cfg(test)]
+#[serial_test::serial]
 mod tests {
     use super::*;
 

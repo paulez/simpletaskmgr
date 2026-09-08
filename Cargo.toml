@@ -29,3 +29,4 @@ path = "src/main.rs"
 
 [dev-dependencies]
 rstest = "0.26.1"
+serial_test = "4"

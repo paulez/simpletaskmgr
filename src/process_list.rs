@@ -379,7 +379,12 @@ mod tests {
     /// `init` populates the current-user rows from `/proc`, each pid unique
     /// (display order is owned by GTK's `SortListModel`, applied by `ui` after
     /// the first paint).
+    /// Marked `#[serial]` because `init()` walks every live `/proc/[pid]`
+    /// (one open per process), so it must not run concurrently with the
+    /// `ui::tests`/GPU-sampling tests that hold the other open-file budget
+    /// (see `doc/TEST_FD_LIMIT_BUG.md`).
     #[test]
+    #[serial_test::serial]
     fn test_init_populates_unique_rows() {
         let list = ProcessList::init();
         let mut pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();

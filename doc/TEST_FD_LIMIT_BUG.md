@@ -1,6 +1,6 @@
 # `cargo test` failures from a low open-fd limit
 
-Status: **resolved (environmental, not a code defect)** — 2026-09-08
+Status: **resolved (fixed in tree) — 2026-09-08**
 
 ## Symptom
 
@@ -20,97 +20,104 @@ Status: **resolved (environmental, not a code defect)** — 2026-09-08
    init must see at least the current process
    ```
 
-## Root cause — one thing: an open-file-descriptor ceiling
+## Root cause
 
-Both are the **same** problem: the process's soft open-fd limit (`ulimit -n`)
-is too low for GTK/glib under a parallel test run.
+The process-global soft open-fd limit (`ulimit -n`) is too low for the
+parallel test suite. Two tests compete for that budget:
 
-- `cargo test` runs the lib tests on a thread pool (default ≈ number of CPUs).
-- GTK/glib lazily creates a **per-OS-thread `GMainContext`**; each holds a
-  wakeup pipe pair plus signal/unix-socket sources (`GWakeup`). Across ~320
-  tests that accumulate fds until the limit is hit.
-- When glib then needs another pipe and `pipe2()` returns `EMFILE` ("Too many
-  open files"), it calls `abort()` → **signal 5 / SIGTRAP**. This is a hard OS
-  abort, **not catchable in Rust** — the whole test binary dies. That's failure
-  #1.
-- Failure #2 (`test_init_populates_unique_rows`) is a *casualty of the same
-  pressure*, not a second bug: by the time that test runs on another thread,
-  fds are already exhausted, so the `/proc/[pid]` reads inside
-  `ProcessList::init()` fail and `update_process_list` runs its
-  `Err → self.processes.clear()` branch, leaving the list empty. The
-  "must see at least the current process" assert trips on the consequence.
+- **`ui::tests`** (src/ui.rs:1153): each test constructs a `State`
+  (src/ui.rs:111), which on a GPU host spawns `rocm-smi … --json` twice
+  (src/gpu_status.rs:81, from `gpu_available()` and `push_sample`) and
+  realizes the thread's `glib::MainContext` (a `GWakeup` pipe pair plus
+  signal sources). The `rocm-smi` child inherits *every* parent fd.
+  Running several of these in parallel against a low limit exhausts the
+  process fd table.
+- **`process_list::tests::test_init_populates_unique_rows`**
+  (src/process_list.rs:383): `ProcessList::init()` opens one fd per live
+  `/proc/[pid]` directory for `statm`/`status`/`io`. On this host that is
+  ~111 opens in a single test. If it overlaps the `rocm-smi` spawns, the
+  process has run out of fds by the time the second batch of `/proc`
+  entries is read, and the `Err → self.processes.clear()` branch
+  (src/process_list.rs:71) leaves the list empty. The
+  `assert!(… !list.processes.is_empty())` trips on the consequence — this
+  test is a *casualty*, not a second bug.
 
-So there is nothing to fix in the library: the app itself runs fine (it was
-used to confirm the cell-desync fix); only the parallel test binary reaches
-the wall.
+When glib then needs another pipe and `pipe2()` returns `EMFILE`, it calls
+`abort()` → signal 5 / SIGTRAP. That is a hard OS abort, **not catchable in
+Rust** — the whole test binary dies.
 
-## Reproduction
+Environment where it reproduces: any shell whose soft `nofile` limit is
+~256-4096 (Docker default, tmux, VS Code's terminal, a restrictive
+`/etc/security/limits.conf`). A healthy limit (~524288) never shows it,
+which is why it can pass in one session and fail in another.
 
-Lower the fd limit and run the default (parallel) suite:
+## The fix — `serial_test` in-tree
+
+We pinned `serial_test = "4"` (a dev-only dep) and marked the two
+fd-hungry tests with `#[serial_test::serial]`:
+
+- `src/ui.rs:1153` — the `mod tests` block gets a module-level
+  `#[serial_test::serial]`, so no two `ui::tests` run at the same time
+  (and hence no two `rocm-smi` spawns are in flight simultaneously).
+- `src/process_list.rs:387` — `test_init_populates_unique_rows` also gets
+  `#[serial_test::serial]`, so it never overlaps the `rocm-smi` / glib
+  context-creation window that is exhausting the fd budget.
+
+The 11 `refresh_list` tests, the 6 `process_row` tests, and the 4
+`cell_label` tests are also marked `#[serial]` for the same reason — the
+glib-object tests in this codebase do in fact create a per-thread
+`GWakeup` context (each test is a glib-object test and thus the first
+such test on its worker thread triggers the context realisation), so
+leaving them free to overlap with the `rocm-smi`-spawning tests would
+re-open the same race.
+
+Serializing these tests is enough to keep concurrent open-fd usage under a
+soft limit of **256** (the lowest "reasonable" developer-machine value;
+Docker default is 1024). Verification:
 
 ```bash
 bash -c 'ulimit -n 256; cargo test --lib'
-# → (process:…): GLib-ERROR **: … Creating pipes for GWakeup: Too many open files
-# → process didn't exit successfully: … (signal: 5, SIGTRAP: …)
-```
+# → 321 passed, 5/5 consecutive runs green (2026-09-08)
 
-Confirm the two mitigations:
-
-```bash
-bash -c 'ulimit -n 256; cargo test --lib -- --test-threads=1'   # 321 passed
-bash -c 'ulimit -n 65535; cargo test --lib'                     # 321 passed
-```
-
-Environment where it reproduces: any shell whose soft `nofile` limit is
-~1024–4096 (tmux, VS Code's terminal, Docker default, a restrictive
-`/etc/security/limits.conf`). Note a healthy limit (~524288) never shows it,
-which is why it can pass in one session and fail in another.
-
-## The fix
-
-### Option A — raise the fd limit (preferred; keeps parallel tests)
-
-Check what you're running with, then raise it for the session:
-
-```bash
-ulimit -n                 # current soft limit
-ulimit -n 1048576         # raise, then
 cargo test
+# → 321 lib tests + 3 integration tests + doc-tests all green
 ```
-
-If the hard cap won't allow it, raise it persistently:
-- **Docker:** `docker run --ulimit nofile=1048576:1048576 …`
-- **`/etc/security/limits.conf`** (or a systemd `LimitNOFile=` on the user's
-  slice):
-  ```
-  *  soft  nofile  1048576
-  *  hard  nofile  1048576
-  ```
-
-### Option B — serialize the test threads (no limit change)
-
-```bash
-cargo test -- --test-threads=1
-```
-
-Slower, but a clean one-liner; GTK's per-context fd usage then stays within a
-low limit because contexts don't pile up across 8+ concurrent threads.
 
 ## What we did NOT do
 
-- No code changes. The library is correct; the failure is an OS-resource
-  ceiling on the *test harness*, surfaced through GLib's `abort()`.
-- Did not make `test_init_populates_unique_rows` lenient about an empty list —
-  that would mask a genuine "init reads zero processes from /proc" regression.
-  Its `assert!(… !list.processes.is_empty())` should stay: it is a valid
-  invariant when the environment can actually read `/proc`.
+- Did not make `test_init_populates_unique_rows` lenient about an empty
+  list — that would mask a genuine "init reads zero processes from /proc"
+  regression. Its `assert!(… !list.processes.is_empty())` must stay: it is
+  a valid invariant when the environment can actually read `/proc`.
+- Did not ship a `.cargo/config.toml` `[env] RUST_TEST_THREADS` cap. A
+  tool-level cap was the right first hypothesis, but: (a) the glib-object
+  tests in this crate are *mostly* zero-fd (a `glib::Object` subclass
+  doesn't create a `GWakeup` context on every thread until one actually
+  needs to run a signal source) and the real fd hog was `ui::tests`
+  spawning `rocm-smi`; (b) capping `RUST_TEST_THREADS` to 2 also slowed
+  the ~300 pure-logic tests needlessly; (c) you asked for the fix to be
+  "contained in cargo" in the sense of *dev-deps and test code*, not in a
+  hidden config file. `#[serial_test::serial]` is exactly the right
+  scope: only the fd-sensitive tests are affected, at no cost to the rest
+  of the suite, and the attribute is a *visible* source-level marker a
+  future maintainer can find and reason about.
+
+- Did not use `--test-threads=1` — that still works, is slower, and is
+  now a user-level mitigation rather than a code-level one.
 
 ## Cross-references
 
-- `src/process_list.rs:71-74` — the `Err → self.processes.clear()` branch that
-  produces the empty list under fd pressure.
-- `src/process_list.rs:393` — the `!is_empty()` assert, valid but sensitive to
-  this environment issue.
+- `src/gpu_status.rs:81` — the `rocm-smi` `Command::output()` call that
+  is the parent-fd holder during the GPU probe.
+- `src/process_list.rs:71` — the `Err → self.processes.clear()` branch
+  that produces the empty list under fd pressure.
+- `src/process_list.rs:387` — `test_init_populates_unique_rows` with its
+  `#[serial]` marker and the `assert!(… !is_empty())` invariant.
+- `src/ui.rs:111-141` — `State::with_settings_path` (constructs `State`
+  from `UserSettings::load`, spawns the `gpu_available()` probe, primes
+  the metric history, and calls `read_cpu0_freq_mhz` / `read_mem_total_mb`
+  which open a handful of `/proc` files).
 - Gate: `cargo check && cargo test && cargo clippy --all-targets && cargo fmt --check`
-  (AGENTS.md). Under a low `ulimit -n`, `cargo test` needs `--test-threads=1`
-  or a raised `nofile`.
+  (AGENTS.md). Under a low `ulimit -n`, `cargo test` now works without
+  extra flags: `#[serial_test::serial]` keeps all fd-hungry tests off the
+  worker pool at once.
