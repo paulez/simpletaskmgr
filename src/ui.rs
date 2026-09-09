@@ -528,13 +528,34 @@ fn make_cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
 /// All columns share one comparator source of truth —
 /// `ProcessList::compare_values` — so the header ordering can never disagree
 /// with the data.
-fn make_column_sorter(sort_col: SortColumn) -> gtk4::CustomSorter {
+///
+/// The comparator also reports whether this column is currently sorted
+/// descending (read live from the view's sorter), which lets the optional-value
+/// columns keep a missing value pinned to the bottom of the list in either
+/// direction (see `ProcessList::compare_values`).
+fn make_column_sorter(
+    sort_col: SortColumn,
+    column: &gtk4::ColumnViewColumn,
+    view_sorter: &gtk4::Sorter,
+) -> gtk4::CustomSorter {
+    let column_ptr = column.as_ptr() as usize;
+    let view_sorter = view_sorter.clone();
     gtk4::CustomSorter::new(move |a: &glib::Object, b: &glib::Object| {
         let ra = a.downcast_ref::<ProcessRow>().expect("a ProcessRow");
         let rb = b.downcast_ref::<ProcessRow>().expect("a ProcessRow");
         let ia = ra.item();
         let ib = rb.item();
-        ProcessList::compare_values(&ia, &ib, sort_col).into()
+        // `true` only when this very column is the active, descending primary
+        // sort; `false` otherwise (ascending, or the sort has moved elsewhere).
+        let descending = view_sorter
+            .downcast_ref::<gtk4::ColumnViewSorter>()
+            .and_then(|cs| {
+                let pc = cs.primary_sort_column()?;
+                (pc.as_ptr() as usize == column_ptr).then_some(cs)
+            })
+            .map(|cs| cs.primary_sort_order() == gtk4::SortType::Descending)
+            .unwrap_or(false);
+        ProcessList::compare_values(&ia, &ib, sort_col, descending).into()
     })
 }
 
@@ -582,6 +603,12 @@ fn build_process_list() -> ListView {
         ("Disk W", "disk-write", 80, false, SortColumn::DiskWrite),
     ];
 
+    // The view's own sorter, created once here so each column's comparator can
+    // read the *current* primary sort direction (to keep missing values pinned
+    // to the list bottom in either direction). The same object is reused as the
+    // `SortListModel`'s sorter (see the capture below).
+    let view_sorter = column_view.sorter().expect("ColumnView exposes a sorter");
+
     let mut columns: Vec<gtk4::ColumnViewColumn> = Vec::new();
     for (title, prop, width, expand, sort_col) in COLS.iter() {
         let col = gtk4::ColumnViewColumn::new(Some(title), Some(make_cell_factory(prop)));
@@ -591,7 +618,7 @@ fn build_process_list() -> ListView {
             col.set_fixed_width(*width);
         }
         col.set_resizable(true);
-        col.set_sorter(Some(&make_column_sorter(*sort_col)));
+        col.set_sorter(Some(&make_column_sorter(*sort_col, &col, &view_sorter)));
         column_view.append_column(&col);
         columns.push(col);
     }
@@ -624,7 +651,6 @@ fn build_process_list() -> ListView {
         .map(|(_, col)| col.as_ptr() as usize)
         .collect();
 
-    let view_sorter = column_view.sorter().expect("ColumnView exposes a sorter");
     let prev_primary = Rc::new(RefCell::new(None::<usize>));
     let flipping = Rc::new(RefCell::new(false));
     let cv = column_view.clone();

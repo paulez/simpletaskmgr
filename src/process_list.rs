@@ -227,39 +227,85 @@ impl ProcessList {
         Ok(task_mgr_process_list_filtered)
     }
 
-    /// Compares two rows' values by the given column, ascending.
+    /// Compares two rows' values by the given column, in ascending order.
     ///
     /// `f64` is compared with `total_cmp` so `NaN` values sort without
     /// panicking (unlike `partial_cmp().unwrap()`). This is the single
     /// source of truth for row ordering: every native `GtkColumnView`
     /// header sorter wraps it via `CustomSorter`.
+    ///
+    /// `descending` reports whether the column is currently sorted
+    /// descending (most-first). The always-present columns (`Pid`,
+    /// `Username`, `CpuPercent`, `Name`) ignore it; the columns that may be
+    /// empty (`MemPercent`, `DiskRead`, `DiskWrite`) use it to pin a missing
+    /// value to the bottom of the visible list in either direction (see
+    /// [`rank_optional`]).
     pub fn compare_values(
         a: &ProcessItem,
         b: &ProcessItem,
         column: crate::SortColumn,
+        descending: bool,
     ) -> std::cmp::Ordering {
         match column {
             crate::SortColumn::Pid => a.pid.cmp(&b.pid),
             crate::SortColumn::Username => a.value.username.cmp(&b.value.username),
             crate::SortColumn::CpuPercent => a.value.cpu_percent.total_cmp(&b.value.cpu_percent),
-            crate::SortColumn::MemPercent => a
-                .value
-                .mem_percent
-                .unwrap_or(0.0)
-                .total_cmp(&b.value.mem_percent.unwrap_or(0.0)),
+            crate::SortColumn::MemPercent => {
+                rank_optional(a.value.mem_percent, b.value.mem_percent, descending)
+            }
             crate::SortColumn::Name => a.value.name.cmp(&b.value.name),
-            // Unknown (`None`) rates sort as 0.0 so rows without I/O data
-            // sink to the bottom of an ascending sort.
-            crate::SortColumn::DiskRead => a
-                .value
-                .disk_read_speed
-                .unwrap_or(0.0)
-                .total_cmp(&b.value.disk_read_speed.unwrap_or(0.0)),
-            crate::SortColumn::DiskWrite => a
-                .value
-                .disk_write_speed
-                .unwrap_or(0.0)
-                .total_cmp(&b.value.disk_write_speed.unwrap_or(0.0)),
+            // A missing (`None`) rate is pinned to the bottom of the visible
+            // list however the column points, so rows without I/O data never
+            // float up ahead of rows with a real rate (see [`rank_optional`]).
+            crate::SortColumn::DiskRead => {
+                rank_optional(a.value.disk_read_speed, b.value.disk_read_speed, descending)
+            }
+            crate::SortColumn::DiskWrite => rank_optional(
+                a.value.disk_write_speed,
+                b.value.disk_write_speed,
+                descending,
+            ),
+        }
+    }
+}
+
+/// Orders an optional numeric value (CPU-independent: MEM% / disk r/w) against
+/// another, always settling the missing (`None`) one at the *bottom* of the
+/// visible list — whichever direction the column is pointed.
+///
+/// GTK4 applies the header's direction itself: for the descending (most-first)
+/// direction it *negates* this comparator's whole result (see
+/// `gtkcolumnviewsorter.c`). So a comparator that put `None` at the bottom in
+/// ascending order would be flipped to the top in descending order. The two
+/// `None`/`Some` cases must therefore return opposite orderings per direction:
+///
+/// * ascending (no negation): report `None` as *greater* ⇒ it lands last;
+/// * descending (negated):    report `None` as *less* ⇒ negation lands it last.
+///
+/// `Some`/`Some` still orders by value (`total_cmp`, `NaN` safe) and `None`/`None`
+/// is `Equal`, in both directions. This replaces the old `unwrap_or(0.0)`
+/// shortcut, which tied a missing rate with a real zero and let it surface at
+/// the top of a data-first (descending) sort — the "empty rows first" bug.
+fn rank_optional(a: Option<f64>, b: Option<f64>, descending: bool) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        (None, None) => std::cmp::Ordering::Equal,
+        // `a` is the missing side: rank it last (greater when ascending,
+        // least-then-negated-to-last when descending).
+        (None, Some(_)) => {
+            if descending {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        }
+        // Mirror of the arm above for the case where `b` is the missing side.
+        (Some(_), None) => {
+            if descending {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Less
+            }
         }
     }
 }
@@ -359,26 +405,26 @@ mod tests {
         let c = item(5); // same pid as `a` but a distinct object
 
         // Antisymmetry: compare(a,b) == reverse of compare(b,a).
-        let ab = ProcessList::compare_values(&a, &b, crate::SortColumn::Pid);
-        let ba = ProcessList::compare_values(&b, &a, crate::SortColumn::Pid);
+        let ab = ProcessList::compare_values(&a, &b, crate::SortColumn::Pid, false);
+        let ba = ProcessList::compare_values(&b, &a, crate::SortColumn::Pid, false);
         assert_eq!(ab, std::cmp::Ordering::Less);
         assert_eq!(ba, std::cmp::Ordering::Greater);
 
         // Consistency: equal values compare equal no matter the order.
         assert_eq!(
-            ProcessList::compare_values(&a, &c, crate::SortColumn::Pid),
+            ProcessList::compare_values(&a, &c, crate::SortColumn::Pid, false),
             std::cmp::Ordering::Equal
         );
         assert_eq!(
-            ProcessList::compare_values(&c, &a, crate::SortColumn::Pid),
+            ProcessList::compare_values(&c, &a, crate::SortColumn::Pid, false),
             std::cmp::Ordering::Equal
         );
 
         // Transitivity across three distinct values.
         let d = item(7);
-        assert!(ProcessList::compare_values(&a, &d, crate::SortColumn::Pid).is_lt());
-        assert!(ProcessList::compare_values(&d, &b, crate::SortColumn::Pid).is_lt());
-        assert!(ProcessList::compare_values(&a, &b, crate::SortColumn::Pid).is_lt());
+        assert!(ProcessList::compare_values(&a, &d, crate::SortColumn::Pid, false).is_lt());
+        assert!(ProcessList::compare_values(&d, &b, crate::SortColumn::Pid, false).is_lt());
+        assert!(ProcessList::compare_values(&a, &b, crate::SortColumn::Pid, false).is_lt());
     }
 
     /// `compare_values` is the exact comparator the `ColumnView` sorters run:
@@ -396,7 +442,11 @@ mod tests {
 
         let ascending = [lo.clone(), nan.clone(), hi.clone()];
         let mut sorted = ascending;
-        sorted.sort_by(|a, b| ProcessList::compare_values(a, b, crate::SortColumn::CpuPercent));
+        // `CpuPercent` has no missing values, so the direction flag is a no-op
+        // here — the comparator still must not panic and must order by value.
+        sorted.sort_by(|a, b| {
+            ProcessList::compare_values(a, b, crate::SortColumn::CpuPercent, false)
+        });
         // `total_cmp` orders finite values first and NaN last.
         let pids: Vec<i32> = sorted.iter().map(|i| i.pid).collect();
         assert_eq!(
@@ -405,22 +455,16 @@ mod tests {
             "NaN must not panic and must order total_cmp"
         );
 
-        // Equal values compare equal regardless of direction.
+        // Equal values compare equal in either direction (no-op for `CpuPercent`).
         let a = item(9, 1.5);
         let b = item(10, 1.5);
         assert_eq!(
-            ProcessList::compare_values(&a, &b, crate::SortColumn::CpuPercent),
+            ProcessList::compare_values(&a, &b, crate::SortColumn::CpuPercent, false),
             std::cmp::Ordering::Equal
         );
-
-        // `None` disk rates sort as 0.0.
-        let mut none_r = item(20, 0.0);
-        none_r.value.disk_read_speed = None;
-        let mut some_r = item(21, 0.0);
-        some_r.value.disk_read_speed = Some(10.0);
         assert_eq!(
-            ProcessList::compare_values(&none_r, &some_r, crate::SortColumn::DiskRead),
-            std::cmp::Ordering::Less
+            ProcessList::compare_values(&a, &b, crate::SortColumn::CpuPercent, true),
+            std::cmp::Ordering::Equal
         );
     }
 
@@ -428,46 +472,75 @@ mod tests {
         TaskMgrProcess::new(format!("name{pid}"), pid, ruid, "u".to_string(), 0.0)
     }
 
-    /// Comparing by a disk speed column tolerates unknown (`None`) rates
-    /// without panicking; `None` sorts as 0.0.
+    /// Comparing by a disk speed column pins a missing (`None`) rate to the
+    /// *bottom* of the list in either direction (so it never surfaces ahead of
+    /// a real rate), while `Some` rates still order by magnitude.
     #[test]
-    fn test_compare_disk_speeds_with_none_does_not_panic() {
-        fn item(pid: i32, read: Option<f64>, write: Option<f64>) -> ProcessItem {
+    fn test_compare_disk_speeds_none_pinned_last() {
+        fn item(pid: i32, read: Option<f64>) -> ProcessItem {
             let mut p = proc(pid, 1);
             p.disk_read_speed = read;
-            p.disk_write_speed = write;
             ProcessItem::new(&p)
         }
 
-        let none = item(1, None, Some(900.0));
-        let some_read = item(2, Some(50.0), None);
-        let some_write = item(3, None, Some(20.0));
+        let blank = item(1, None); // no I/O data
+        let positive = item(2, Some(50.0));
+        let real_zero = item(3, Some(0.0));
 
-        // `None` behaves as 0.0, so it sorts below any positive rate and
-        // above nothing on either column — never a panic.
-        assert_eq!(
-            ProcessList::compare_values(&none, &some_read, crate::SortColumn::DiskRead),
-            std::cmp::Ordering::Less,
-            "None (0.0) < 50.0 on disk-read"
-        );
-        assert_eq!(
-            ProcessList::compare_values(&none, &some_write, crate::SortColumn::DiskWrite),
-            std::cmp::Ordering::Greater,
-            "900.0 > None (0.0) on disk-write"
-        );
+        // A missing rate ranks strictly *below* every real rate (and below a
+        // real zero), and does so in BOTH directions: ascending reports a blank
+        // as greater than a real value (so it lands last), descending reports
+        // it as lesser (and GTK negates that, still landing it last). The two
+        // argument orders give opposite results — a pair is antisymmetric.
+        for &descending in &[false, true] {
+            // `blank` first.
+            let blank_first = if descending {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            };
+            assert_eq!(
+                ProcessList::compare_values(
+                    &blank,
+                    &positive,
+                    crate::SortColumn::DiskRead,
+                    descending
+                ),
+                blank_first,
+                "blank vs 50.0 (descending={descending})"
+            );
+            // `positive` first — the antisymmetric mirror of the line above.
+            assert_eq!(
+                ProcessList::compare_values(
+                    &positive,
+                    &blank,
+                    crate::SortColumn::DiskRead,
+                    descending
+                ),
+                blank_first.reverse(),
+                "50.0 vs blank (descending={descending})"
+            );
+            assert_eq!(
+                ProcessList::compare_values(
+                    &blank,
+                    &real_zero,
+                    crate::SortColumn::DiskRead,
+                    descending
+                ),
+                blank_first,
+                "blank vs 0.0 (descending={descending})"
+            );
+        }
 
-        // `None` on both sides compares equal (both are 0.0) — still defined,
-        // not a panic; a real rate still beats it.
-        let both_none = item(4, None, None);
+        // Real rates still order by magnitude regardless of the direction flag.
         assert_eq!(
-            ProcessList::compare_values(&none, &both_none, crate::SortColumn::DiskRead),
-            std::cmp::Ordering::Equal,
-            "None vs None on disk-read is 0.0 == 0.0"
+            ProcessList::compare_values(&positive, &real_zero, crate::SortColumn::DiskRead, false),
+            std::cmp::Ordering::Greater
         );
+        // Blank vs blank is always equal.
         assert_eq!(
-            ProcessList::compare_values(&some_read, &both_none, crate::SortColumn::DiskRead),
-            std::cmp::Ordering::Greater,
-            "50.0 > None (0.0) on disk-read"
+            ProcessList::compare_values(&blank, &item(9, None), crate::SortColumn::DiskRead, true),
+            std::cmp::Ordering::Equal
         );
     }
 
@@ -496,25 +569,57 @@ mod tests {
         let high = item(3, Some(12.25));
         let nan = item(4, Some(f64::NAN));
 
-        // `None` (0.0) sorts below any known value.
+        // A missing value is pinned to the list bottom in BOTH directions:
+        // ascending reports it greater (last), descending reports it lesser
+        // (GTK then negates to still land it last).
+        for &descending in &[false, true] {
+            let blank_side = if descending {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            };
+            assert_eq!(
+                ProcessList::compare_values(
+                    &unknown,
+                    &high,
+                    crate::SortColumn::MemPercent,
+                    descending
+                ),
+                blank_side,
+                "unknown vs 12.25 (descending={descending})"
+            );
+            assert_eq!(
+                ProcessList::compare_values(
+                    &unknown,
+                    &low,
+                    crate::SortColumn::MemPercent,
+                    descending
+                ),
+                blank_side,
+                "unknown vs 0.5 (descending={descending})"
+            );
+        }
+
+        // Known values still order by `total_cmp`.
         assert_eq!(
-            ProcessList::compare_values(&unknown, &high, crate::SortColumn::MemPercent),
+            ProcessList::compare_values(&low, &high, crate::SortColumn::MemPercent, false),
             std::cmp::Ordering::Less,
         );
-        assert_eq!(
-            ProcessList::compare_values(&low, &high, crate::SortColumn::MemPercent),
-            std::cmp::Ordering::Less,
-        );
-        // Equal values compare equal, and NaN compares `Greater` under
-        // `total_cmp` (never panics).
+        // Equal known values compare equal (never panics on `NaN`).
         let a = item(5, Some(0.5));
         assert_eq!(
-            ProcessList::compare_values(&low, &a, crate::SortColumn::MemPercent),
+            ProcessList::compare_values(&low, &a, crate::SortColumn::MemPercent, false),
             std::cmp::Ordering::Equal,
         );
+        // `NaN` is a *known* value: `total_cmp` orders it last among knowns
+        // without panicking, so it still ranks above a finite value.
         assert_eq!(
-            ProcessList::compare_values(&unknown, &nan, crate::SortColumn::MemPercent),
+            ProcessList::compare_values(&low, &nan, crate::SortColumn::MemPercent, false),
             std::cmp::Ordering::Less,
+        );
+        assert_eq!(
+            ProcessList::compare_values(&nan, &low, crate::SortColumn::MemPercent, false),
+            std::cmp::Ordering::Greater,
         );
     }
 

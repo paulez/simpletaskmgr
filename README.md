@@ -10,7 +10,8 @@ time, and lets you inspect and signal individual processes.
   read/write speed; auto-refreshes in place, flicker-free. The name is the
   full program name (`argv[0]`), not truncated to the kernel's 15-char `comm`.
 - **Sortable columns**: click any header to sort; numeric columns default
-  highest-first.
+  highest-first. Rows with no value for a column (blank MEM%/Disk) always stay
+  at the bottom, in either sort direction.
 - **Show all processes**: toggle between every process on the system and only
   the current user's (default).
 - **Detail view**: click a process to see live metrics in a side pane and send
