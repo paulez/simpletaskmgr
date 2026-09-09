@@ -19,9 +19,24 @@ mod tests {
     // helpers
     // ---------------------------------------------------------------------------
 
+    /// Init the test logger once per test process.
+    ///
+    /// Defaults to `Warn` so `cargo test` output stays quiet. Set
+    /// `SIMPLETASKMGR_TEST_LOG=debug` (case-insensitive, any `debug`-ish value
+    /// works) to see the crate's `debug!` logs while developing — the same
+    /// knob as the app's `-v` flag, exposed as an env var because `cargo test`
+    /// doesn't forward arbitrary flags to the test binary.
     fn init_log() {
+        let level = std::env::var("SIMPLETASKMGR_TEST_LOG")
+            .map(|v| v.eq_ignore_ascii_case("debug"))
+            .unwrap_or(false);
+        let filter = if level {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Warn
+        };
         let _ = simplelog::SimpleLogger::init(
-            log::LevelFilter::Debug,
+            filter,
             simplelog::ConfigBuilder::new()
                 .add_filter_allow_str("simpletaskmgr")
                 .build(),
