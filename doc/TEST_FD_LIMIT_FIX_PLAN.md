@@ -1,14 +1,14 @@
 # Make the unit-test suite hermetic: no live `/proc` walks in the parallel pool
 
-Status: **in progress — 2026-09-09**
+Status: **done — 2026-09-09**
 
 Supersedes the runtime mitigation shipped in `d330111` (`#[serial_test::serial]`
 markers across 5 test modules + the `serial_test` dev-dep), and the earlier
 "stop spawning `rocm-smi`" theory in this same file. **The rocm-smi theory was
-disproven** (see "Why the earlier theories don't hold"). This plan separates
-*unit* tests (pure, no external I/O) from *integration* tests (the small set
-that reads the real system), so the parallel lib pool can never saturate the
-process open-file budget.
+disproven** (see "Why the earlier theories don't hold"). This change separates
+*unit* tests (pure, no external I/O) from *integration* tests (the set that
+reads the real system), so the parallel lib pool can never saturate the process
+open-file budget.
 
 ## The rule (applies to **all** tests that touch external data)
 
@@ -17,11 +17,13 @@ process open-file budget.
   content of anything outside the test process — no `/proc/[pid]` walks, no
   `/proc/{stat,meminfo,diskstats,uptime}`, no `/sys/…` cpufreq/hwmon reads,
   no `rocm-smi` spawn. They use fixtures / pure functions.
-- **Integration tests** (the `tests/*.rs` binaries) are the *small* set that
-  read the real source: the live `/proc` process list, the live `rocm-smi`,
-  the live cpu freq/temp, the live disk snapshots. These run in their own
-  binary, outside the lib's parallel pool, where only a handful of such reads
-  are in flight at a time — so they cannot saturate the fd table.
+- **Integration tests** (the `tests/*.rs` binaries) are the small set that read
+  the real source: the live `/proc` process list, the live `rocm-smi`, the
+  live cpu freq/temp, the live disk snapshots. These run in their own binary,
+  outside the lib's parallel pool. Because `RUST_TEST_THREADS` still applies
+  inside the binary, the heavy live walks there are consolidated into a small
+  number of tests (see N2 below) so the concurrent `/proc` opens stay well
+  under a low `ulimit -n`.
 
 ## Why the earlier theories don't hold
 
@@ -38,16 +40,18 @@ reads `/proc/{stat,meminfo,uptime,diskstats}` and one `/sys` cpufreq + hwmon
 sensor. Previously ~15 `ui::tests` (each `State::with_settings_path` → `init()`
 → `push_sample`) plus the `process_list`/`metrics` live tests ran on the default
 16-thread pool. That is thousands of short-lived procfs opens in flight under a
-`nofile` of 256 → `EMFILE`. The lib pool amplifies it; the integration binary
-does not (few reads, sequential).
+`nofile` of 256 → `EMFILE`. The lib pool amplifies it; a single heavy reader
+does not.
 
 Data points (no-spawn build, `ulimit -n 256`): the single live `process_list`
 init test passed 3/3 alone, but the batched `ui::tests` failed 1/3 — i.e. it is
 the *combination* under the pool, not any single reader, that crosses the limit.
 
-## Changes — DONE (this commit, uncommitted at write-time)
+## Changes — DONE
 
-### `src/ui.rs`
+### Commit `fce2bfb` (hermetic `ui` unit suite)
+
+#### `src/ui.rs`
 - **`State`, `KillStatus` and the methods integration tests need are now
   `pub`** (`State`, `KillStatus::Sent/NoSelection/Failed`, `refresh`, `kill`,
   `set_show_all`, `set_refresh_interval`, `reset_settings`,
@@ -61,73 +65,105 @@ the *combination* under the pool, not any single reader, that crosses the limit.
   baseline read), `gpu_available: false`, `selected_pid: None`. This is what
   `ui` unit tests build `State` from.
 - **`ui::tests::test_state`** now calls `with_processes(path, vec![item(123)])`.
-  The six tests that do live I/O are **removed from the unit suite** (they will
-  return as integration tests): `test_state_new_primes_metrics`,
-  `test_refresh_appends_one_metric_sample`, `test_refresh_preserves_selection`,
-  `test_kill_sigkill_on_sleep_child`, `test_refresh_drops_killed_process`,
-  `test_state_initializes_from_saved_settings`.
+  The six tests that do live I/O (state primes metrics, refresh appends one
+  sample, refresh preserves selection, kill-`sleep`, refresh-drops-killed,
+  settings round-trip) were removed from the unit suite — re-added as
+  integration tests below.
 - The remaining `ui::tests` are pure-control-flow (settings round-trip,
   `kill` no-selection / dead-pid, `find`, `reset`, timer slot) — no `/proc`,
   no `refresh`.
 
-### `src/process_list.rs`
-- Removed `test_init_populates_unique_rows` (live `/proc/[pid]` walk).
+#### `src/process_list.rs`
+- Removed `test_init_populates_unique_rows` (live `/proc/[pid]` walk) —
+  re-added as an integration test below.
 
-### `src/gpu_status.rs` / `Cargo.{toml,lock}` / `tests/integration_tests.rs`
+#### `src/gpu_status.rs` / `Cargo.{toml,lock}`
 - Removed the 2 live `rocm-smi` unit tests; kept the pure `parse_gpu_json`
   fixture tests.
-- Added integration `test_read_gpu_card_sane_when_present`.
 - Dropped the `serial_test` dev-dep and all `#[serial_test::serial]` markers.
 
-## Changes — NEXT (not yet done)
+### Current commit (hermetic `metrics` / `cpu_status` / `disk_status` unit suite)
 
-### N1. Move the remaining live-I/O **unit** tests to integration
-These still read the real system and must leave the lib pool:
-- `src/metrics.rs`: `test_push_sample_*` (caps_history, updates_history,
-  carries_freq, carries_gpu, carries_disks) and
-  `test_second_cpu_sample_is_measured_not_stuck_zero` (all call `push_sample`
-  / `sample_cpu` → `/proc/stat`, `/proc/meminfo`, `/proc/diskstats`, `/sys`).
-- `src/cpu_status.rs`: `test_read_cpu0_freq_mhz_sane_when_present`,
+#### N1 — moved the last live-I/O unit tests out of the lib pool
+- `src/metrics.rs`: removed `test_push_sample_caps_history`,
+  `test_push_sample_updates_history_and_last`, `test_push_sample_carries_freq`,
+  `test_push_sample_carries_gpu`, `test_push_sample_carries_disks` (all call
+  `push_sample` → `/proc/stat`, `/proc/meminfo`, `/proc/diskstats`, `/sys`).
+  (The plan mentioned `test_second_cpu_sample_is_measured_not_stuck_zero` —
+  that test does not exist in the tree; the second-sample contract is covered
+  by the disk/freq `carries_*` tests.)
+- `src/cpu_status.rs`: removed `test_read_cpu0_freq_mhz_sane_when_present`,
   `test_read_cpu_temp_c_sane_when_present` (live `/sys/cpufreq`, `/sys/hwmon`).
-- `src/disk_status.rs`: `test_snapshot_sane_when_present`,
-  `test_snapshot_only_physical_disks` (live `/proc/diskstats`, `/proc/uptime`).
+  The `pick_*`/`hottest_*` hwmon tests stay — they build their own temp dirs.
+- `src/disk_status.rs`: removed `test_snapshot_sane_when_present`,
+  `test_snapshot_only_physical_disks` (live `/proc/diskstats`,
+  `/proc/uptime`).
 
-(The `cpu_status` hwmon `pick_*`/`hottest_*` tests are **fine to keep** — they
-build their own temp dirs, not the real `/sys` tree.)
+#### N2 — added/consolidated the integration coverage
+`tests/integration_tests.rs` now contains the relocated tests plus the six
+relocated `ui` live tests, **consolidated wherever they share the same heavy
+live walk** so the binary's 16-thread pool cannot saturate a low `ulimit -n`:
 
-### N2. Write the corresponding integration tests
-One per removed area, in `tests/integration_tests.rs`, using the now-`pub`
-items: `ProcessList::init()` unique-rows + non-empty; `SystemMetrics`
-`push_sample` bookkeeping + freq/gpu/disk carry-over; cpu second-sample; a
-`State::with_settings_path` + `refresh` tick appends exactly one sample and
-preserves the selection; the kill-`sleep`-child + refresh-drops-it contract.
-These run one binary at a time → no fd saturation.
+- **One sequential test — `test_state_lifecycle`** — owns every full
+  `/proc/[pid]` enumerator, running them strictly in sequence as steps (a)–(g):
+  (a) `with_settings_path` primes metrics, (b) `refresh` appends one sample,
+  (c) `refresh` preserves selection, (d) `kill(SIGKILL)` on a live `sleep`
+  child, (e) `refresh` drops the killed process, (f) saved-settings round-trip,
+  and (g) `refresh_process_list` returns a non-empty, unique-pid, fully-populated
+  row set. Keeping exactly **one** full walk in flight is the key: two
+  concurrent 420-entry `/proc` walks already exhaust a `nofile` of 256, so the
+  old separate `test_init_populates_unique_rows` /
+  `test_process_names_*` trio failed in concert at 256 even though each passed
+  alone.
+- **Light single-file readers stay in their own small tests** (each opens only a
+  couple of procfs/sysfs fds, so they cannot saturate the table):
+  `test_push_sample_{caps_history,updates_history_and_last,carries_freq,
+  carries_gpu,carries_disks}` (`/proc/{stat,meminfo,diskstats,uptime}` +
+  `/sys` cpufreq), `test_read_cpu0_freq_mhz_sane_when_present`,
+  `test_read_cpu_temp_c_sane_when_present` (`/sys` cpu0 + hwmon),
+  `test_snapshot_sane_when_present`, `test_snapshot_only_physical_disks`
+  (`/proc/diskstats`).
+- `test_read_gpu_card_sane_when_present` (from `fce2bfb`) — one `rocm-smi`
+  spawn.
 
-### N3. (Optional, only if a test *needs* it) make `SystemMetrics::sample_cpu`
-and its `stat_baseline` field accessible from the binary — e.g. `pub(crate)`
-is insufficient for `tests/`; either add a thin `pub` accessor or cover the
-"second sample is measured, not stuck zero" behaviour through the public
-`push_sample`/`history()` API (preferred, keeps the surface small).
+#### N3 — no API changes needed
+`State`, `KillStatus`, `SystemMetrics`, `GpuSample`, `DiskSample`,
+`ProcessList`, `ProcessItem`, `TaskMgrProcess`, `UserSettings`,
+`Signal`, `RefreshInterval` and the relevant methods (`push_sample`,
+`history`, `with_settings_path`, `with_processes`, `refresh`, `kill`,
+`snapshot`, `init`, `refresh_process_list`) were all already `pub`, so the
+integration binary could reach them without widening the API surface.
 
-### N4. Gate + verify (the acceptance bar)
-```bash
-cargo check --all-targets && cargo test && cargo clippy --all-targets && cargo fmt --check
-bash -c 'ulimit -n 256; cargo test --lib'   # repeat ≥5× — the lib pool must NOT drop to SIGTRAP
-bash -c 'ulimit -n 256; cargo test'         # + integration, still green
+#### N4 — acceptance bar
 ```
-The suite that currently SIGTRAPs is the **lib** pool; the acceptance check is
-`cargo test --lib` under `ulimit -n 256`.
+cargo check --all-targets                      → clean
+cargo test                                     → 299 lib + 6 + 13 integration + 0 doc-tests, all pass
+cargo clippy --all-targets                     → clean
+cargo fmt --check                              → clean
+
+bash -c 'ulimit -n 256; cargo test --lib'      → 5/5 green (the SIGTRAP source pool)
+bash -c 'ulimit -n 256; cargo test'            → 3/3 green (lib + integration together)
+```
 
 ## Rollback
 
-The suite was fully green at `d330111`. To roll back everything:
-`git revert` this commit (or `git checkout d330111 -- src tests Cargo.toml
-Cargo.lock`) restores the serial_test mitigation.
+The suite was fully green at `d330111`. To roll back the whole hermetic
+change, `git revert` the two commits (`fce2bfb` and this one); to roll back
+only this commit, `git revert HEAD`.
 
 ## Risk / notes
-- **Production behaviour is unchanged**: `State::with_settings_path` still does
-  the identical `init()` + probe + sample; only the *test* entry point changed.
+- **Production behaviour is unchanged**: `State::with_settings_path` still
+  does the identical `init()` + probe + sample; only the *test* entry points
+  and their location changed.
 - Non-GPU hosts (CI) are unaffected — `read_gpu_card()` degrades to `None`.
-- A future contributor who adds external I/O must put it in an **integration**
-  test, not a `#[cfg(test)]` unit test — the `test_state` and `with_processes`
-  doc comments say so.
+- Integration tests that assert "non-empty" results (`test_state_lifecycle`
+  sub-checks, `test_process_list_walk_sane_when_populated`, the `push_sample`
+  bookkeeping) degrade to `None`/empty under fd pressure, matching the
+  documented "casualty" path for `Err → processes.clear()`.
+- A future contributor adding external I/O **must** put it in an integration
+  test, not a `#[cfg(test)]` unit test — the `test_state` and
+  `with_processes` doc comments state this.
+- A future contributor adding a *new* heavy live walk (a `#[test]` that
+  enumerates `/proc/[pid]`) should consolidate it with the
+  `all_processes`-family tests in the integration binary to avoid adding
+  another concurrent enumerator to the pool.

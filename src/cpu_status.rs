@@ -366,21 +366,6 @@ mod tests {
         assert_eq!(format_freq(mhz), expected);
     }
 
-    /// On a real Linux host the `cpufreq` interface for core 0 is usually
-    /// present; when it is, the current frequency must be a positive MHz value.
-    /// On a host/container without the driver the read is `None` — both are
-    /// acceptable, but a present value must be sane.
-    #[test]
-    fn test_read_cpu0_freq_mhz_sane_when_present() {
-        if let Some(mhz) = read_cpu0_freq_mhz() {
-            assert!(mhz > 0.0, "a present frequency must be positive");
-            assert!(
-                mhz < 1_000_000.0,
-                "a frequency in the MHz hundreds of millions is a parsing bug"
-            );
-        }
-    }
-
     /// Creates a unique empty `hwmon` base directory and returns its path.
     /// Tests build `hwmonN` sensor dirs inside it and remove the base at the
     /// end, so parallel tests never share a tree.
@@ -658,16 +643,5 @@ mod tests {
     #[case::zero(0.0, "0.0 °C")]
     fn test_format_temp(#[case] celsius: f64, #[case] expected: &str) {
         assert_eq!(format_temp(celsius), expected);
-    }
-
-    /// On a real Linux host a CPU `hwmon` sensor is usually present; when it
-    /// is, the recorded temperature must be a positive and physically-sane
-    /// Celsius value. On a host/container without one the read is `None`.
-    #[test]
-    fn test_read_cpu_temp_c_sane_when_present() {
-        if let Some(c) = read_cpu_temp_c() {
-            assert!(c > 0.0, "a present CPU temp must be positive");
-            assert!(c < 150.0, "a CPU temp above 150 °C indicates a parsing bug");
-        }
     }
 }

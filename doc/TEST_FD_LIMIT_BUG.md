@@ -1,6 +1,6 @@
 # `cargo test` failures from a low open-fd limit
 
-Status: **in progress — root fix (hermetic unit tests) underway — 2026-09-09**
+Status: **resolved — root fix (hermetic unit tests) complete — 2026-09-09**
 
 Companion to `TEST_FD_LIMIT_FIX_PLAN.md`, which holds the current plan and the
 concrete next steps. This file records *what the bug was* and *the honest
@@ -62,62 +62,67 @@ Two earlier hypotheses were checked and set aside:
   failed 1/3 — it is the *combination* under the 16-thread pool, not any single
   reader, that crosses the limit.)
 
-## Current fix state (this commit)
+## The fix (two commits)
 
 The direction is **separate hermetic unit tests from integration tests**:
 
 - **`serial_test` removal** — the `#[serial_test::serial]` markers and the dev-dep
   are gone (reverted to the pre-`d330111` dependency state).
-- **`ui::tests` made hermetic** (the main fd hog): `src/ui.rs` now has a
-  fixture constructor `State::with_processes(path, items)` — `ProcessList::new()`
+- **`ui::tests` made hermetic** (the main fd hog): `src/ui.rs` has a fixture
+  constructor `State::with_processes(path, items)` — `ProcessList::new()`
   (no `/proc` walk), empty `metrics` (no `/proc/stat` read), `gpu_available:false`.
-  `ui::tests::test_state` (src/ui.rs:1221) uses it. The six `ui` tests that need
-  live I/O (`refresh`, `kill`-on-live-child, "primes metrics") were removed from
-  the unit suite and will return as **integration** tests.
-- **`process_list` live init test removed** from the unit suite
-  (`test_init_populates_unique_rows` is gone).
+  `ui::tests::test_state` (src/ui.rs) uses it. Its six live-I/O tests
+  (`refresh`, `kill`-on-live-child, "primes metrics", settings round-trip) moved
+  into the integration binary.
+- **`process_list` live init test** (`test_init_populates_unique_rows`) and the
+  **`metrics` `push_sample_*`**, **`cpu_status` `read_cpu0_freq/temp_*`**, and
+  **`disk_status` `snapshot_*`** live tests all moved out of the lib pool into the
+  integration binary.
 - **Public API for integration tests**: `State`, `KillStatus`, and the
-  `refresh`/`kill`/`set_*`/`take_timer_id` methods are now `pub` so
-  `tests/*.rs` can drive the same code paths that used to be unit-tested.
+  `refresh`/`kill`/`set_*`/`take_timer_id` methods are `pub` so `tests/*.rs` can
+  drive the same code paths that used to be unit-tested.
 - **`rocm-smi` covered by ONE integration test**
-  (`tests/integration_tests.rs::test_read_gpu_card_sane_when_present`), in its
-  own binary where a single spawn cannot contend with the pool.
+  (`tests/integration_tests.rs::test_read_gpu_card_sane_when_present`).
 - Production behaviour is **unchanged**: `State::with_settings_path` still does
   the identical `init()` + GPU probe + first sample.
 
-**Not yet done** (tracked as N1–N4 in `TEST_FD_LIMIT_FIX_PLAN.md`):
-- Move the remaining live-I/O unit tests (`metrics::test_push_sample_*`,
-  `cpu_status::test_read_cpu0_freq/temp_*`, `disk_status::test_snapshot_*`) into
-  `tests/*.rs` as integration tests.
-- Write the integration coverage that replaces the six removed `ui` tests.
-- Acceptance bar: `bash -c 'ulimit -n 256; cargo test --lib'` green ≥5×, and the
-  full `cargo test` (lib + integration) green.
+### Acceptance bar — met
+```
+cargo check --all-targets && cargo test && cargo clippy --all-targets && cargo fmt --check
+bash -c 'ulimit -n 256; cargo test --lib'   # 5/5 green — the pool that used to SIGTRAP
+bash -c 'ulimit -n 256; cargo test'         # 3/3 green — lib + integration together
+```
 
 ## What we did NOT do
 
-- Did not make `ProcessList` tolerant of an empty list — that would mask a real
-  "init reads zero processes" regression. The invariant stays valid in
-  integration tests that can read `/proc`.
+- Did **not** weaken the "non-empty on a normal host" assertions in the
+  integration suite. They are the tests' *contract*, and it is where the
+  original SIGTRAP symptom first surfaced (the empty-list casualty). Instead, we
+  **consolidated** all full `/proc/[pid]` walks into a **single sequential test**
+  (`test_state_lifecycle`, steps (a)–(g)); the light single-file readers
+  (`meminfo`/`cpu0`/`hwmon`/`snapshot`) stay in their own small tests. With only
+  one enumerator ever in flight in the integration binary, the non-empty
+  contract holds under `ulimit -n 256` with no tolerance branch and no
+  serialisation attribute.
 - Did not ship a `.cargo/config.toml` `[env] RUST_TEST_THREADS` cap, and did not
   use `--test-threads=1` — both are user/tool-level mitigations that hide the
-  defect and slow the ~300 pure-logic tests. The fix is meant to be in test
-  *structure* (unit = hermetic, integration = real I/O), which is visible in
-  source.
-- Did not re-add `#[serial_test::serial]` as a stop-gap; only `d330111` is the
-  rollback if the hermetic path proves infeasible for the remaining live tests.
+  defect and slow the ~300 pure-logic tests. The fix is in test *structure*
+  (unit = hermetic; integration = real I/O, heavy walks consolidated), visible
+  in source.
+- Did **not** re-add `#[serial_test::serial]`; `d330111` remains the rollback.
 
 ## Cross-references
 
 - `src/process_list.rs` — `ProcessList::init()` / `refresh_process_list()`
   (the per-`/proc/[pid]` walk that is the real fd hog); the
   `Err → self.processes.clear()` branch is what produced the empty-list casualty.
-- `src/metrics.rs` — `push_sample()` / `sample_cpu()` (`/proc/stat`,
-  `/proc/meminfo`, `/proc/diskstats`, `/sys` cpufreq+hwmon).
-- `src/ui.rs:1221` — `ui::tests::test_state`, now fixture-based via
-  `State::with_processes` (src/ui.rs). The live paths live in
-  `tests/integration_tests.rs`.
+- `src/metrics.rs` — `push_sample()` (`/proc/stat`, `/proc/meminfo`,
+  `/proc/diskstats`, `/sys` cpufreq+hwmon).
+- `src/ui.rs` — `ui::tests::test_state`, now fixture-based via
+  `State::with_processes`. The live paths live in `tests/integration_tests.rs`.
 - `tests/integration_tests.rs` — the real-I/O coverage (live `rocm-smi`, the
-  live `/proc` process list) in its own binary.
+  live `/proc` process list, cpu freq/temp, disk snapshots) in its own binary,
+  with heavy walks consolidated to avoid concurrent enumerators.
 - Gate: `cargo check --all-targets && cargo test && cargo clippy --all-targets
   && cargo fmt --check` (AGENTS.md). Acceptance under a low limit:
   `bash -c 'ulimit -n 256; cargo test --lib'`.

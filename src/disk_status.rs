@@ -615,46 +615,4 @@ mod tests {
         assert_eq!(sda.write_bps, Some(0.0));
         assert_eq!(sda.util_pct, Some(0.0));
     }
-
-    // ---- Live I/O (smoke test) ------------------------------------------
-
-    /// On a real Linux host `/proc/diskstats` is present: the second snapshot
-    /// (which now has a baseline) yields sane readings for whatever physical
-    /// disks exist — throughput ≥ 0, utilization in 0–100. On a host/container
-    /// with no physical disk the snapshot is empty — both are acceptable.
-    #[test]
-    fn test_snapshot_sane_when_present() {
-        let mut ds = DiskStatus::default();
-        let first = ds.snapshot();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let second = ds.snapshot();
-        assert_eq!(second.len(), first.len(), "same set of devices both times");
-        for s in &second {
-            assert!(!s.name.is_empty());
-            if let Some(b) = s.read_bps {
-                assert!(b >= 0.0);
-            }
-            if let Some(w) = s.write_bps {
-                assert!(w >= 0.0);
-            }
-            if let Some(u) = s.util_pct {
-                assert!((0.0..=100.0).contains(&u), "util in 0–100");
-            }
-        }
-    }
-
-    /// `snapshot` always filters to physical disks — it must never report a
-    /// partition or a virtual device, whatever the host happens to expose.
-    #[test]
-    fn test_snapshot_only_physical_disks() {
-        let mut ds = DiskStatus::default();
-        let _ = ds.snapshot();
-        for s in ds.snapshot() {
-            assert!(
-                is_physical_disk(&s.name),
-                "snapshot must only report physical disks, got {}",
-                s.name
-            );
-        }
-    }
 }
