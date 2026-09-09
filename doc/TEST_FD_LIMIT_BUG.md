@@ -1,6 +1,10 @@
 # `cargo test` failures from a low open-fd limit
 
-Status: **resolved (fixed in tree) — 2026-09-08**
+Status: **in progress — root fix (hermetic unit tests) underway — 2026-09-09**
+
+Companion to `TEST_FD_LIMIT_FIX_PLAN.md`, which holds the current plan and the
+concrete next steps. This file records *what the bug was* and *the honest
+evolution of the fix*.
 
 ## Symptom
 
@@ -16,108 +20,104 @@ Status: **resolved (fixed in tree) — 2026-09-08**
 2. **An unrelated-looking assertion** in a completely different test:
    ```
    ---- process_list::tests::test_init_populates_unique_rows stdout ----
-   thread '…' panicked at src/process_list.rs:393:9:
+   thread '…' panicked at src/process_list.rs:…:
    init must see at least the current process
    ```
 
-## Root cause
+A hard `abort()` from `glib` when `pipe2()` returns `ENFILE`/`EMFILE` is signal
+5 / SIGTRAP — an OS-level kill, **not catchable in Rust**; the whole test binary
+dies. The empty-list assertion (the `process_list` one) is a *casualty* of the
+same fd exhaustion (see root cause), not a second bug.
 
-The process-global soft open-fd limit (`ulimit -n`) is too low for the
-parallel test suite. Two tests compete for that budget:
+Environment where it reproduces: any shell whose soft `nofile` limit is ~256-4096
+(Docker default, tmux, VS Code's terminal, a restrictive
+`/etc/security/limits.conf`). A healthy limit (~524288) never shows it, so it is
+session-dependent.
 
-- **`ui::tests`** (src/ui.rs:1153): each test constructs a `State`
-  (src/ui.rs:111), which on a GPU host spawns `rocm-smi … --json` twice
-  (src/gpu_status.rs:81, from `gpu_available()` and `push_sample`) and
-  realizes the thread's `glib::MainContext` (a `GWakeup` pipe pair plus
-  signal sources). The `rocm-smi` child inherits *every* parent fd.
-  Running several of these in parallel against a low limit exhausts the
-  process fd table.
-- **`process_list::tests::test_init_populates_unique_rows`**
-  (src/process_list.rs:383): `ProcessList::init()` opens one fd per live
-  `/proc/[pid]` directory for `statm`/`status`/`io`. On this host that is
-  ~111 opens in a single test. If it overlaps the `rocm-smi` spawns, the
-  process has run out of fds by the time the second batch of `/proc`
-  entries is read, and the `Err → self.processes.clear()` branch
-  (src/process_list.rs:71) leaves the list empty. The
-  `assert!(… !list.processes.is_empty())` trips on the consequence — this
-  test is a *casualty*, not a second bug.
+## Root cause — the honest version
 
-When glib then needs another pipe and `pipe2()` returns `EMFILE`, it calls
-`abort()` → signal 5 / SIGTRAP. That is a hard OS abort, **not catchable in
-Rust** — the whole test binary dies.
+**The fd hog is the live `/proc` walk, not the GPU probe.**
 
-Environment where it reproduces: any shell whose soft `nofile` limit is
-~256-4096 (Docker default, tmux, VS Code's terminal, a restrictive
-`/etc/security/limits.conf`). A healthy limit (~524288) never shows it,
-which is why it can pass in one session and fail in another.
+`ProcessList::init()` / `refresh_process_list()` (src/process_list.rs) enumerates
+*every* `/proc/[pid]` entry — **≈420 on this host** — and for each opens
+`stat`/`status`/`statm`/`io`. `SystemMetrics::push_sample()` (src/metrics.rs)
+additionally reads `/proc/{stat,meminfo,uptime,diskstats}` and one `/sys`
+cpufreq + hwmon sensor.
 
-## The fix — `serial_test` in-tree
+Previously *many* **unit** tests triggered these live reads: the ~15
+`ui::tests` (each built `State` via `with_settings_path` → `init()` →
+`push_sample`) plus the `process_list` / `metrics` / `cpu_status` / `disk_status`
+live tests, all running on the default 16-thread pool. That is thousands of
+short-lived procfs opens in flight under a `nofile` of 256 → `EMFILE`.
 
-We pinned `serial_test = "4"` (a dev-only dep) and marked the two
-fd-hungry tests with `#[serial_test::serial]`:
+Two earlier hypotheses were checked and set aside:
 
-- `src/ui.rs:1153` — the `mod tests` block gets a module-level
-  `#[serial_test::serial]`, so no two `ui::tests` run at the same time
-  (and hence no two `rocm-smi` spawns are in flight simultaneously).
-- `src/process_list.rs:387` — `test_init_populates_unique_rows` also gets
-  `#[serial_test::serial]`, so it never overlaps the `rocm-smi` / glib
-  context-creation window that is exhausting the fd budget.
+- **`serial_test` (commit `d330111`)** — serialised the fd-sensitive tests. It
+  worked but **hid the defect** and slowed the whole pool. Reverted.
+- **"stop spawning `rocm-smi`"** — **disproven as the root cause**. Removing the
+  two live `rocm-smi` unit tests and re-running under `ulimit -n 256` *still*
+  left `ui::tests` failing flakily. `rocm-smi` is at most a minor contributor;
+  the `/proc/[pid]` walk is the real cost. (Data point: the single live
+  `process_list` init test passed 3/3 in isolation, but the batched `ui::tests`
+  failed 1/3 — it is the *combination* under the 16-thread pool, not any single
+  reader, that crosses the limit.)
 
-The 11 `refresh_list` tests, the 6 `process_row` tests, and the 4
-`cell_label` tests are also marked `#[serial]` for the same reason — the
-glib-object tests in this codebase do in fact create a per-thread
-`GWakeup` context (each test is a glib-object test and thus the first
-such test on its worker thread triggers the context realisation), so
-leaving them free to overlap with the `rocm-smi`-spawning tests would
-re-open the same race.
+## Current fix state (this commit)
 
-Serializing these tests is enough to keep concurrent open-fd usage under a
-soft limit of **256** (the lowest "reasonable" developer-machine value;
-Docker default is 1024). Verification:
+The direction is **separate hermetic unit tests from integration tests**:
 
-```bash
-bash -c 'ulimit -n 256; cargo test --lib'
-# → 321 passed, 5/5 consecutive runs green (2026-09-08)
+- **`serial_test` removal** — the `#[serial_test::serial]` markers and the dev-dep
+  are gone (reverted to the pre-`d330111` dependency state).
+- **`ui::tests` made hermetic** (the main fd hog): `src/ui.rs` now has a
+  fixture constructor `State::with_processes(path, items)` — `ProcessList::new()`
+  (no `/proc` walk), empty `metrics` (no `/proc/stat` read), `gpu_available:false`.
+  `ui::tests::test_state` (src/ui.rs:1221) uses it. The six `ui` tests that need
+  live I/O (`refresh`, `kill`-on-live-child, "primes metrics") were removed from
+  the unit suite and will return as **integration** tests.
+- **`process_list` live init test removed** from the unit suite
+  (`test_init_populates_unique_rows` is gone).
+- **Public API for integration tests**: `State`, `KillStatus`, and the
+  `refresh`/`kill`/`set_*`/`take_timer_id` methods are now `pub` so
+  `tests/*.rs` can drive the same code paths that used to be unit-tested.
+- **`rocm-smi` covered by ONE integration test**
+  (`tests/integration_tests.rs::test_read_gpu_card_sane_when_present`), in its
+  own binary where a single spawn cannot contend with the pool.
+- Production behaviour is **unchanged**: `State::with_settings_path` still does
+  the identical `init()` + GPU probe + first sample.
 
-cargo test
-# → 321 lib tests + 3 integration tests + doc-tests all green
-```
+**Not yet done** (tracked as N1–N4 in `TEST_FD_LIMIT_FIX_PLAN.md`):
+- Move the remaining live-I/O unit tests (`metrics::test_push_sample_*`,
+  `cpu_status::test_read_cpu0_freq/temp_*`, `disk_status::test_snapshot_*`) into
+  `tests/*.rs` as integration tests.
+- Write the integration coverage that replaces the six removed `ui` tests.
+- Acceptance bar: `bash -c 'ulimit -n 256; cargo test --lib'` green ≥5×, and the
+  full `cargo test` (lib + integration) green.
 
 ## What we did NOT do
 
-- Did not make `test_init_populates_unique_rows` lenient about an empty
-  list — that would mask a genuine "init reads zero processes from /proc"
-  regression. Its `assert!(… !list.processes.is_empty())` must stay: it is
-  a valid invariant when the environment can actually read `/proc`.
-- Did not ship a `.cargo/config.toml` `[env] RUST_TEST_THREADS` cap. A
-  tool-level cap was the right first hypothesis, but: (a) the glib-object
-  tests in this crate are *mostly* zero-fd (a `glib::Object` subclass
-  doesn't create a `GWakeup` context on every thread until one actually
-  needs to run a signal source) and the real fd hog was `ui::tests`
-  spawning `rocm-smi`; (b) capping `RUST_TEST_THREADS` to 2 also slowed
-  the ~300 pure-logic tests needlessly; (c) you asked for the fix to be
-  "contained in cargo" in the sense of *dev-deps and test code*, not in a
-  hidden config file. `#[serial_test::serial]` is exactly the right
-  scope: only the fd-sensitive tests are affected, at no cost to the rest
-  of the suite, and the attribute is a *visible* source-level marker a
-  future maintainer can find and reason about.
-
-- Did not use `--test-threads=1` — that still works, is slower, and is
-  now a user-level mitigation rather than a code-level one.
+- Did not make `ProcessList` tolerant of an empty list — that would mask a real
+  "init reads zero processes" regression. The invariant stays valid in
+  integration tests that can read `/proc`.
+- Did not ship a `.cargo/config.toml` `[env] RUST_TEST_THREADS` cap, and did not
+  use `--test-threads=1` — both are user/tool-level mitigations that hide the
+  defect and slow the ~300 pure-logic tests. The fix is meant to be in test
+  *structure* (unit = hermetic, integration = real I/O), which is visible in
+  source.
+- Did not re-add `#[serial_test::serial]` as a stop-gap; only `d330111` is the
+  rollback if the hermetic path proves infeasible for the remaining live tests.
 
 ## Cross-references
 
-- `src/gpu_status.rs:81` — the `rocm-smi` `Command::output()` call that
-  is the parent-fd holder during the GPU probe.
-- `src/process_list.rs:71` — the `Err → self.processes.clear()` branch
-  that produces the empty list under fd pressure.
-- `src/process_list.rs:387` — `test_init_populates_unique_rows` with its
-  `#[serial]` marker and the `assert!(… !is_empty())` invariant.
-- `src/ui.rs:111-141` — `State::with_settings_path` (constructs `State`
-  from `UserSettings::load`, spawns the `gpu_available()` probe, primes
-  the metric history, and calls `read_cpu0_freq_mhz` / `read_mem_total_mb`
-  which open a handful of `/proc` files).
-- Gate: `cargo check && cargo test && cargo clippy --all-targets && cargo fmt --check`
-  (AGENTS.md). Under a low `ulimit -n`, `cargo test` now works without
-  extra flags: `#[serial_test::serial]` keeps all fd-hungry tests off the
-  worker pool at once.
+- `src/process_list.rs` — `ProcessList::init()` / `refresh_process_list()`
+  (the per-`/proc/[pid]` walk that is the real fd hog); the
+  `Err → self.processes.clear()` branch is what produced the empty-list casualty.
+- `src/metrics.rs` — `push_sample()` / `sample_cpu()` (`/proc/stat`,
+  `/proc/meminfo`, `/proc/diskstats`, `/sys` cpufreq+hwmon).
+- `src/ui.rs:1221` — `ui::tests::test_state`, now fixture-based via
+  `State::with_processes` (src/ui.rs). The live paths live in
+  `tests/integration_tests.rs`.
+- `tests/integration_tests.rs` — the real-I/O coverage (live `rocm-smi`, the
+  live `/proc` process list) in its own binary.
+- Gate: `cargo check --all-targets && cargo test && cargo clippy --all-targets
+  && cargo fmt --check` (AGENTS.md). Acceptance under a low limit:
+  `bash -c 'ulimit -n 256; cargo test --lib'`.

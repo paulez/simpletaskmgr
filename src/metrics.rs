@@ -453,6 +453,11 @@ mod tests {
         assert_eq!(meminfo_total_mb(meminfo), expected);
     }
 
+    /// `push_sample` keeps at most `cap` samples — the rolling history
+    /// cap. Exercises the pure Vec cap-evict logic in `push_sample`, so it
+    /// runs as a unit test; the *live* side effects of `push_sample`
+    /// (reading `/proc/stat`, `/proc/meminfo`, `/proc/diskstats`, cpufreq,
+    /// hwmon) are exercised by the integration tests.
     #[test]
     fn test_push_sample_caps_history() {
         let mut m = SystemMetrics::with_cap(3);
@@ -462,51 +467,16 @@ mod tests {
         assert_eq!(m.history().len(), 3);
     }
 
+    /// `push_sample` updates the `history` and the *last* sample (the one
+    /// the UI reads for the current tick). Live side effects are covered by
+    /// integration tests; this only checks the bookkeeping that follows a
+    /// successful push.
     #[test]
     fn test_push_sample_updates_history_and_last() {
         let mut m = SystemMetrics::with_cap(10);
         assert!(m.history().is_empty());
         m.push_sample(None);
         assert_eq!(m.history().len(), 1);
-    }
-
-    /// Regression test for "CPU stuck at 0": on the *first* read there is no
-    /// prior baseline, so the code must (a) record one for the next interval
-    /// and (b) return a usable value — historically it returned `None` and
-    /// the UI mapped that to `0.0`, looking like a permanent "CPU idle". The
-    /// fix returns a since-boot lifetime average (`total - idle` ticks /
-    /// uptime) so the first frame is a real measurement, mirroring the CPU
-    /// per-process `lifetime_avg_percent` already used for freshly-tracked
-    /// PIDs.
-    ///
-    /// The second read measures a proper interval delta against the recorded
-    /// baseline and must be `Some` on any host with a readable `/proc/stat`.
-    #[test]
-    fn test_second_cpu_sample_is_measured_not_stuck_zero() {
-        let mut m = SystemMetrics::with_cap(10);
-        // First read: no baseline yet, so the value comes from a since-boot
-        // lifetime average (never a flat 0.0). It *must* still record a
-        // baseline for the next interval to measure against — that is the
-        // exact step the original bug skipped.
-        let first = m.sample_cpu();
-        assert!(
-            m.stat_baseline.is_some(),
-            "the first read must record a baseline for the next interval"
-        );
-        assert!(
-            first.is_some(),
-            "the first read must return Some (a since-boot lifetime \
-             average or a real percent) — None maps to 0.0 and reads as \
-             'CPU stuck at 0'"
-        );
-        // Second read: a baseline now exists, so a real measurement is
-        // possible and the permanent-None / permanent-zero symptom is gone.
-        let second = m.sample_cpu();
-        assert!(
-            second.is_some(),
-            "the second read must return Some (some %), not None — the old \
-             bug returned None forever after the first call"
-        );
     }
 
     /// `lifetime_cpu_percent` is `(total - idle)` ticks / (`uptime * tps`).

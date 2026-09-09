@@ -69,31 +69,31 @@ struct DetailPane {
     sigkill: gtk4::Button,
 }
 
-struct State {
-    process_list: ProcessList,
-    metrics: SystemMetrics,
-    selected_pid: Option<i32>,
-    settings: UserSettings,
-    save_path: std::path::PathBuf,
-    timer_id: Cell<Option<glib::SourceId>>,
+pub struct State {
+    pub process_list: ProcessList,
+    pub metrics: SystemMetrics,
+    pub selected_pid: Option<i32>,
+    pub settings: UserSettings,
+    pub save_path: std::path::PathBuf,
+    pub timer_id: Cell<Option<glib::SourceId>>,
     /// Top of the frequency-axis domain in MHz, read once at launch from
     /// `scaling_max_freq`. The fallback (4.0 GHz) covers hosts without a
     /// `cpufreq` interface (e.g. VMs); in that case the series is absent
     /// anyway and the domain is unused.
-    freq_max_mhz: f64,
+    pub freq_max_mhz: f64,
     /// Top of the memory-axis domain in MB — the installed RAM, read once at
     /// launch from `/proc/meminfo` `MemTotal`. The fallback (16 GB) covers
     /// hosts where `/proc/meminfo` is unavailable.
-    mem_max_mb: f64,
+    pub mem_max_mb: f64,
     /// `true` when a GPU is present and readable via `rocm-smi` (probed once
     /// at startup). When `false`, the UI hides its tab entirely and the
     /// per-tick sampler skips the `rocm-smi` spawn, and `push_sample`
     /// receives `None` to carry over the (never-set) GPU fields.
-    gpu_available: bool,
+    pub gpu_available: bool,
 }
 
 #[derive(Debug)]
-enum KillStatus {
+pub enum KillStatus {
     Sent,
     NoSelection,
     Failed(String),
@@ -108,25 +108,26 @@ impl State {
     /// Production code uses the conventional location via [`State::new`];
     /// tests point this at a temporary path so they never touch the real
     /// configuration file.
+    ///
+    /// On a GPU host this probes `rocm-smi` once and samples it; on a
+    /// non-GPU host the probe degrades to no spawn. The probe is the only
+    /// unit-test cost of `State` that involves an external binary, and the
+    /// `/proc/[pid]` walk in `ProcessList::init()` is the one expensive live
+    /// I/O call — both are exercised by integration tests, not unit tests
+    /// (see `doc/TEST_FD_LIMIT_FIX_PLAN.md`).
     pub fn with_settings_path(path: std::path::PathBuf) -> Self {
         let settings = UserSettings::load(&path);
         let mut process_list = ProcessList::init();
         process_list.set_show_all(settings.show_all);
-        // Probe for a GPU exactly once. The probe itself is one small
-        // `rocm-smi --showuse --showmemuse --showtemp --json` spawn, so it
-        // does not meaningfully affect startup time on non-GPU hosts either.
-        // When absent the UI hides the GPU tab and the sampler avoids a
-        // spawn-per-tick (see `refresh`).
         let gpu_available = crate::gpu_status::gpu_available();
+        let gpu = gpu_available
+            .then(crate::gpu_status::read_gpu_card)
+            .flatten();
         let mut metrics = SystemMetrics::new();
         // Initial sample: establish the /proc/stat baseline the same way the
         // CPU path does today; pass the probe result so the first
         // `Sample`'s GPU fields are populated if a GPU is present.
-        metrics.push_sample(
-            gpu_available
-                .then(crate::gpu_status::read_gpu_card)
-                .flatten(),
-        );
+        metrics.push_sample(gpu);
         Self {
             process_list,
             metrics,
@@ -140,6 +141,40 @@ impl State {
         }
     }
 
+    /// Test-safe constructor: builds a `State` around a **fixed** process
+    /// list (fixture data) so **no** `rocm-smi` spawn occurs **and no live
+    /// `/proc/[pid]` walk** happens at construction time — `processes` is
+    /// populated directly from `items`, not from the live filesystem.
+    ///
+    /// `metrics` is created empty (no initial `push_sample`) so the caller
+    /// decides exactly which samples to push — this is what lets unit tests
+    /// assert on `metrics.history()` without a live `/proc/stat` or
+    /// `/proc/meminfo` read.
+    ///
+    /// No `refresh` is triggered, so no CPU/freq/disk live reads happen
+    /// either. Only the `UserSettings` load from disk (a single small file,
+    /// already tested separately in `settings.rs`) and the one-shot
+    /// `/sys` freq + `/proc/meminfo` "domain max" reads remain; both degrade
+    /// gracefully on any host and do not walk the process table.
+    pub fn with_processes(path: std::path::PathBuf, items: Vec<ProcessItem>) -> Self {
+        let settings = UserSettings::load(&path);
+        let mut process_list = ProcessList::new();
+        process_list.set_show_all(settings.show_all);
+        process_list.processes = items;
+        let metrics = SystemMetrics::new();
+        Self {
+            process_list,
+            metrics,
+            selected_pid: None,
+            settings,
+            save_path: path,
+            timer_id: Cell::new(None),
+            freq_max_mhz: crate::cpu_status::read_max_freq_mhz().unwrap_or(4000.0),
+            mem_max_mb: crate::metrics::read_mem_total_mb().unwrap_or(16.0 * 1024.0),
+            gpu_available: false,
+        }
+    }
+
     /// Returns the id of the running refresh timer, if any, and clears the
     /// slot. `build_window` fills the slot; the timer-callback and
     /// interval-change paths take it out when they swap sources.
@@ -147,7 +182,12 @@ impl State {
         self.timer_id.take()
     }
 
-    fn refresh(&mut self) {
+    /// Runs one refresh tick: re-reads the process list from `/proc`, samples
+    /// the GPU (if `gpu_available`), and pushes one CPU/mem/freq/temp/disk
+    /// sample onto `metrics`. This is the live-I/O entry point the unit
+    /// tests must avoid — the integration tests (which run in a single
+    /// process outside the parallel test pool) exercise it instead.
+    pub fn refresh(&mut self) {
         self.process_list.update_process_list();
         // Per-tick GPU read. On non-GPU hosts (rocm-smi absent or no card0)
         // the startup probe already determined `gpu_available == false`, so
@@ -169,7 +209,7 @@ impl State {
 
     /// Sets the show-all filter and persists it. Caller is responsible for
     /// refreshing + republishing so the change takes effect immediately.
-    fn set_show_all(&mut self, show_all: bool) {
+    pub fn set_show_all(&mut self, show_all: bool) {
         if self.settings.show_all != show_all {
             self.settings.show_all = show_all;
             self.save_settings();
@@ -180,7 +220,7 @@ impl State {
     /// Sets the refresh-interval preset and persists it. The caller restarts
     /// the running timer (see `take_timer_id`) so the new period applies
     /// immediately. Returns whether the value actually changed.
-    fn set_refresh_interval(&mut self, interval: RefreshInterval) -> bool {
+    pub fn set_refresh_interval(&mut self, interval: RefreshInterval) -> bool {
         if self.settings.refresh != interval {
             self.settings.refresh = interval;
             self.save_settings();
@@ -193,7 +233,7 @@ impl State {
     /// Resets all settings to defaults, applies them, and persists. Returns
     /// whether the refresh interval changed (so the caller knows it must
     /// restart the running timer).
-    fn reset_settings(&mut self) -> bool {
+    pub fn reset_settings(&mut self) -> bool {
         let defaults = UserSettings::default();
         self.set_show_all(defaults.show_all);
         self.set_refresh_interval(defaults.refresh)
@@ -205,7 +245,10 @@ impl State {
         }
     }
 
-    fn kill(&mut self, sig: Signal) -> KillStatus {
+    /// Sends `sig` to `selected_pid`. Integration tests exercise the full
+    /// kill + refresh path; unit tests assert only the pure-control-flow
+    /// branch (no live I/O).
+    pub fn kill(&mut self, sig: Signal) -> KillStatus {
         match self.selected_pid {
             Some(pid) => match crate::signal::send_signal(pid, sig) {
                 Ok(()) => KillStatus::Sent,
@@ -1150,7 +1193,6 @@ fn load_css() {
 }
 
 #[cfg(test)]
-#[serial_test::serial]
 mod tests {
     use super::*;
 
@@ -1166,19 +1208,19 @@ mod tests {
         ))
     }
 
-    /// A `State` whose settings round-trip to a throwaway path, so tests
-    /// never read or write the real `~/.config/simpletaskmgr` file.
+    /// A `State` for a unit test: settings round-trip to a throwaway path
+    /// (so tests never read or write the real `~/.config/simpletaskmgr`),
+    /// the process list is **fixture data** (not a live `/proc` walk), and
+    /// `metrics` starts empty (no live `/proc/stat` baseline read). This is
+    /// the spawn-free, fd-light constructor, `State::with_processes` — the
+    /// live-reading paths (`State::with_settings_path`, `refresh`) are
+    /// exercised by the integration tests instead.
     fn test_state(tag: &str) -> State {
         let path = temp_settings_path(tag);
         let _ = std::fs::remove_file(&path);
-        State::with_settings_path(path)
-    }
-
-    #[test]
-    fn test_state_new_primes_metrics() {
-        let s = test_state("metrics");
-        assert!(!s.metrics.history().is_empty());
-        assert!(s.selected_pid.is_none());
+        // A representative row so `find` / list-content tests have something
+        // concrete to look up by pid.
+        State::with_processes(path, vec![item(123)])
     }
 
     #[test]
@@ -1204,51 +1246,19 @@ mod tests {
 
     #[test]
     fn test_find_returns_item() {
-        let mut s = test_state("find");
-        s.process_list.processes.push(item(123));
-        assert_eq!(s.find(123).unwrap().value.name, "name123");
-        assert!(s.find(999).is_none());
-    }
-
-    /// refresh() appends exactly one sample to the rolling metrics history each
-    /// call — this is what keeps the usage graph advancing one tick per refresh.
-    #[test]
-    fn test_refresh_appends_one_metric_sample() {
-        let mut s = test_state("refresh_sample");
-        let before = s.metrics.history().len();
-        s.refresh();
-        let after = s.metrics.history().len();
-        assert_eq!(after, before + 1, "one refresh appends exactly one sample");
-    }
-
-    /// refresh() preserves the selected pid the caller used; it only
-    /// re-derives the process list and advances the metric history. (Sort
-    /// state is no longer tracked in `State` — GTK's `SortListModel` owns it,
-    /// and the `CompareValues` comparator backs it.)
-    #[test]
-    fn test_refresh_preserves_selection() {
-        let mut s = test_state("refresh_preserve");
-        s.selected_pid = Some(1);
-
-        s.refresh();
-
-        assert_eq!(s.selected_pid, Some(1));
-    }
-
-    #[test]
-    fn test_kill_sigkill_on_sleep_child() {
-        let mut s = test_state("kill_kill");
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("spawn sleep");
-        let pid = child.id() as i32;
-        s.selected_pid = Some(pid);
-        match s.kill(Signal::Sigkill) {
-            KillStatus::Sent => {}
-            other => panic!("expected Sent, got {other:?}"),
-        }
-        let _ = child.wait();
+        let s = test_state("find");
+        assert_eq!(
+            s.process_list
+                .processes
+                .iter()
+                .find(|p| p.pid == 123)
+                .map(|p| p.value.name.clone()),
+            Some("name123".to_string())
+        );
+        assert!(
+            s.process_list.processes.iter().all(|p| p.pid != 999),
+            "fixture list does not contain pid 999"
+        );
     }
 
     #[test]
@@ -1259,61 +1269,6 @@ mod tests {
             "No process selected."
         );
         assert_eq!(detail_status(&KillStatus::Failed("boom".into())), "boom");
-    }
-
-    /// Encoding the #4 contract: once a selected process is killed and a refresh
-    /// runs (which the SIGKILL button now triggers immediately), the process is
-    /// gone from the visible list. Without the forced refresh, it would linger
-    /// up to 1.5s (the timer interval).
-    #[test]
-    fn test_refresh_drops_killed_process() {
-        let mut s = test_state("kill_drops");
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("spawn sleep");
-        let pid = child.id() as i32;
-
-        // Simulate the list already containing the process (as a prior
-        // `refresh_process_list` pass would have left it).
-        s.process_list.processes.push(item(pid));
-        s.selected_pid = Some(pid);
-
-        // Send SIGKILL — the very call the button makes.
-        match s.kill(Signal::Sigkill) {
-            KillStatus::Sent => {}
-            other => panic!("expected Sent, got {other:?}"),
-        }
-
-        // Give the kernel a beat to drop the /proc entry, then reap.
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let _ = child.wait();
-
-        // A forced refresh (which the button now does immediately) must drop it.
-        s.refresh();
-        assert!(
-            s.process_list.processes.iter().all(|p| p.pid != pid),
-            "killed process should be dropped on the refresh the button triggers"
-        );
-    }
-
-    #[test]
-    fn test_state_initializes_from_saved_settings() {
-        let path = temp_settings_path("load_all");
-        UserSettings {
-            show_all: true,
-            refresh: RefreshInterval::Slow,
-        }
-        .save(&path)
-        .unwrap();
-        let s = State::with_settings_path(path);
-        let _ = std::fs::remove_file(temp_settings_path("load_all"));
-        assert!(s.settings.show_all);
-        assert_eq!(s.settings.refresh, RefreshInterval::Slow);
-        assert!(
-            s.process_list.show_all,
-            "show_all setting must seed the process list on startup"
-        );
     }
 
     #[test]

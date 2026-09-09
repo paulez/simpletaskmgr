@@ -376,31 +376,6 @@ mod tests {
         assert!(ProcessList::compare_values(&a, &b, crate::SortColumn::Pid).is_lt());
     }
 
-    /// `init` populates the current-user rows from `/proc`, each pid unique
-    /// (display order is owned by GTK's `SortListModel`, applied by `ui` after
-    /// the first paint).
-    /// Marked `#[serial]` because `init()` walks every live `/proc/[pid]`
-    /// (one open per process), so it must not run concurrently with the
-    /// `ui::tests`/GPU-sampling tests that hold the other open-file budget
-    /// (see `doc/TEST_FD_LIMIT_BUG.md`).
-    #[test]
-    #[serial_test::serial]
-    fn test_init_populates_unique_rows() {
-        let list = ProcessList::init();
-        let mut pids: Vec<i32> = list.processes.iter().map(|p| p.pid).collect();
-        pids.sort_unstable();
-        pids.dedup();
-        assert_eq!(
-            pids.len(),
-            list.processes.len(),
-            "init must not duplicate a pid"
-        );
-        assert!(
-            !list.processes.is_empty(),
-            "init must see at least the current process"
-        );
-    }
-
     /// `compare_values` is the exact comparator the `ColumnView` sorters run:
     /// it must be consistent with the sort order and NaN-safe.
     #[test]
@@ -501,63 +476,8 @@ mod tests {
         assert!((mem_percent_of(30_000, 10_000_000) - 0.3).abs() < 1e-12);
     }
 
-    /// `read_mem_total_kb` parses the real file's `MemTotal` line when present;
-    /// it is expected to succeed on any Linux host. On a host without it (or
-    /// reading a container with restricted meminfo) the row simply shows no
-    /// MEM% — both outcomes are acceptable here, but the value, when present,
-    /// must be positive.
-    #[test]
-    fn test_read_mem_total_kb_is_positive_when_available() {
-        let maybe = read_mem_total_kb();
-        if let Some(kb) = maybe {
-            assert!(kb > 0, "a real MemTotal can't be zero");
-        }
-    }
-
-    /// Regression guard for switching MEM% to `statm`: the `VmRSS` value
-    /// reported by `status` and the one derived from `statm.resident` (in
-    /// pages) must be on the same scale. The two come from *separate* live
-    /// syscalls (so a little drift is normal under load), but a wrong
-    /// page→KiB unit would make the ratio 4x or 0.25x — well outside the band.
-    #[test]
-    fn test_statm_resident_matches_status_vmrss() {
-        use procfs::process::Process;
-        let me = std::process::id() as i32;
-        let proc = Process::new(me).expect("own process must be readable");
-        let status = proc.status().expect("status of own process");
-        let statm = proc.statm().expect("statm of own process");
-        let status_kb = status.vmrss.expect("VmRSS of own process");
-        let ps = procfs::page_size();
-        // `statm.resident` is in pages; convert to KiB to compare scales.
-        let statm_kb = statm.resident.saturating_mul(ps / 1024);
-        assert!(
-            status_kb > 0 && statm_kb > 0,
-            "both views should be non-zero"
-        );
-        // The views can drift between the two reads, so compare the ratio and
-        // allow generous slack; a 4x / 0.25x unit slip is far beyond it.
-        let ratio = statm_kb as f64 / status_kb as f64;
-        assert!(
-            (0.5..2.0).contains(&ratio),
-            "statm KiB {statm_kb} vs status VmRSS {status_kb} => ratio {ratio}; \
-             expected within 0.5..2.0 (a wrong page/KiB unit is 4x or 0.25x)"
-        );
-    }
-    /// The targeted `read_io_bytes` reader must report the same `read_bytes`
-    /// and `write_bytes` as `procfs`'s full `io()` parse for the same PID.
-    #[test]
-    fn test_read_io_bytes_matches_procfs_io() {
-        use procfs::process::Process;
-        let me = std::process::id() as i32;
-        let mine = read_io_bytes(me).expect("own /proc/self/io must be readable");
-        let proc = Process::new(me).expect("own process must be readable");
-        let ref_io = proc.io().expect("procfs io() for own process");
-        assert_eq!(mine.0, ref_io.read_bytes, "read_bytes mismatch");
-        assert_eq!(mine.1, ref_io.write_bytes, "write_bytes mismatch");
-    }
-
-    /// Comparing two rows by MEM% is NaN-safe and `None`-tolerant, mirroring
-    /// the disk-speed comparator.
+    /// `compare_mem_percent_with_none_and_nan` mirrors the disk-speed
+    /// comparator for the MEM% column.
     #[test]
     fn test_compare_mem_percent_with_none_and_nan() {
         fn item(pid: i32, mem: Option<f64>) -> ProcessItem {

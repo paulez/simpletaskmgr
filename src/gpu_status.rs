@@ -196,30 +196,4 @@ mod tests {
         assert_eq!(parse_gpu_json("not json", "card0"), None);
         assert_eq!(parse_gpu_json("", "card0"), None);
     }
-
-    // ---- Live I/O (smoke test) ----------------------------------------
-
-    /// On a host with an AMD GPU and `rocm-smi` on PATH, the reading is
-    /// present and physically sane. On a host without either (CI, CI, or a
-    /// non-AMD box), `read_gpu_card` returns `None` — both are acceptable
-    /// outcomes. A `Some` reading must be in the 0–100% band and a positive
-    /// (but not ridiculous) temperature.
-    #[test]
-    fn test_read_gpu_card_sane_when_present() {
-        if let Some(s) = read_gpu_card() {
-            assert!((0.0..=100.0).contains(&s.use_pct), "use_pct in 0–100");
-            assert!((0.0..=100.0).contains(&s.vram_pct), "vram_pct in 0–100");
-            assert!(s.temp_c > 0.0, "a present GPU temp must be positive");
-            assert!(
-                s.temp_c < 120.0,
-                "a GPU temp above 120 °C indicates a parsing bug"
-            );
-        }
-    }
-
-    /// `gpu_available` must agree with `read_gpu_card` on the same host.
-    #[test]
-    fn test_gpu_available_matches_read_gpu_card() {
-        assert_eq!(gpu_available(), read_gpu_card().is_some());
-    }
 }
