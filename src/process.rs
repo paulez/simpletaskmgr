@@ -7,6 +7,9 @@
 /// `pid`, not on the value).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TaskMgrProcess {
+    /// The process's program name: `argv[0]`'s basename when the cmdline is
+    /// readable (the full, un-truncated name), else the kernel's 15-char
+    /// `comm` (e.g. kernel threads, zombies). See [`resolve_process_name`].
     pub name: String,
     pub pid: i32,
     pub ruid: u32,
@@ -144,6 +147,31 @@ pub(crate) fn build_task_mgr_process(
     }
 }
 
+/// Resolves a process's display name to a value that is not capped by the
+/// kernel's 15-char `TASK_COMM_LEN`.
+///
+/// `/proc/[pid]/comm` is hard-limited to 15 bytes (`stat.comm`), so it
+/// truncates real program names (`gnome-terminal-server` → `gnome-terminal-`).
+/// The fuller name is the process's `argv[0]` from `/proc/[pid]/cmdline`. We
+/// prefer its *basename* so `argv[0]` works whether or not it carries a
+/// leading path, and a name with spaces (e.g. "Isolated Web Content
+/// (renderer)") survives because only `/` matters when splitting.
+///
+/// `argv[0]` is unavailable — the cmdline is empty or unreadable — for kernel
+/// threads and zombies, so we fall back to `comm`, which is always present.
+pub(crate) fn resolve_process_name(comm: &str, cmdline: Option<&[String]>) -> String {
+    if let Some(arg0) = cmdline.and_then(|argv| argv.first()) {
+        if let Some(basename) = std::path::Path::new(arg0)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty())
+        {
+            return basename.to_string();
+        }
+    }
+    comm.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +283,59 @@ mod tests {
         assert_eq!(from_owned, from_ref);
         assert_eq!(from_owned.pid, 7);
         assert_eq!(from_owned.value.name, "name7");
+    }
+
+    /// `resolve_process_name` prefers the `argv[0]` basename so a name longer
+    /// than the kernel's 15-char `comm` cap comes through untouched.
+    #[test]
+    fn test_resolve_prefers_argv0_basename_over_truncated_comm() {
+        // A cmdline that is a *path* resolves to its basename.
+        let cmdline = vec!["/usr/libexec/gnome-terminal-server".to_string()];
+        assert_eq!(
+            resolve_process_name("gnome-terminal-", Some(cmdline.as_slice())),
+            "gnome-terminal-server"
+        );
+
+        // A bare argv[0] (no path) is returned as-is.
+        let cmdline = vec!["dbus-broker-launch".to_string()];
+        assert_eq!(
+            resolve_process_name("dbus-broker-lau", Some(cmdline.as_slice())),
+            "dbus-broker-launch"
+        );
+    }
+
+    /// A multi-word name with spaces survives resolution — only `/` splits the
+    /// basename, not whitespace.
+    #[test]
+    fn test_resolve_keeps_names_with_spaces() {
+        let cmdline = vec!["/usr/libexec/Isolated Web Content (renderer)".to_string()];
+        assert_eq!(
+            resolve_process_name("Isolated Web Co", Some(cmdline.as_slice())),
+            "Isolated Web Content (renderer)"
+        );
+    }
+
+    /// With no readable cmdline (kernel thread, zombie) the name falls back to
+    /// `comm`, the one name that is always available.
+    #[test]
+    fn test_resolve_falls_back_to_comm_when_cmdline_missing() {
+        assert_eq!(resolve_process_name("kworker/0:1", None), "kworker/0:1");
+        // An empty cmdline (some kernel threads, zombies) also falls back.
+        let empty: Vec<String> = Vec::new();
+        assert_eq!(
+            resolve_process_name("ksoftirqd/0", Some(empty.as_slice())),
+            "ksoftirqd/0"
+        );
+    }
+
+    /// A `argv[0]` that yields no basename (e.g. the root path `"/"`) falls
+    /// back to `comm` rather than producing an empty name.
+    #[test]
+    fn test_resolve_falls_back_when_argv0_has_no_basename() {
+        let cmdline = vec!["/".to_string(), "arg".to_string()];
+        assert_eq!(
+            resolve_process_name("some-comm-name", Some(cmdline.as_slice())),
+            "some-comm-name"
+        );
     }
 }

@@ -1,7 +1,7 @@
 use crate::cpu_tracker::CpuTracker;
 use crate::io_tracker::IoTracker;
 use crate::metrics::read_mem_total_kb;
-use crate::process::{build_task_mgr_process, ProcessItem, TaskMgrProcess};
+use crate::process::{build_task_mgr_process, resolve_process_name, ProcessItem, TaskMgrProcess};
 use anyhow::{Context, Result};
 use log::{debug, warn};
 use procfs::process;
@@ -141,6 +141,11 @@ impl ProcessList {
                     None => "unknown".to_string(),
                 };
                 let mut task_mgr_process = build_task_mgr_process(&stat, ruid, username);
+                // `stat.comm` is kernel-capped at 15 chars, so the row's name
+                // is re-derived from the process's `argv[0]` when the cmdline is
+                // readable; the fallback is `comm` (kernel threads, zombies).
+                task_mgr_process.name =
+                    resolve_process_name(&stat.comm, proc.cmdline().ok().as_deref());
                 self.cpu_tracker
                     .update_process_cpu(&mut task_mgr_process, &stat);
                 // MEM% = VmRSS / MemTotal * 100 (top-style). `top` reads this

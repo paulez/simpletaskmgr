@@ -7,7 +7,8 @@ time, and lets you inspect and signal individual processes.
 ## Features
 
 - **Process list**: PID, user (RUID), name, CPU%, MEM%, and per-process disk
-  read/write speed; auto-refreshes in place, flicker-free.
+  read/write speed; auto-refreshes in place, flicker-free. The name is the
+  full program name (`argv[0]`), not truncated to the kernel's 15-char `comm`.
 - **Sortable columns**: click any header to sort; numeric columns default
   highest-first.
 - **Show all processes**: toggle between every process on the system and only
