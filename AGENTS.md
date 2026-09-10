@@ -49,8 +49,11 @@ This app uses **GTK4** from Rust via the gtk-rs crate.
 - **`README.md` stays at the repo root** — it is the user-facing entry point, not a
   planning doc. Update it when a user-visible feature changes; do not move it into
   `doc/`.
-- Relative links from a doc in `doc/` to other repo paths must be prefixed with
-  `../` (e.g. reference screenshots as `../gtk-refresh-bug/…`).
+- Planning docs live in `doc/`; attach their supporting assets (screenshots,
+  repro files, …) as a subfolder next to them, e.g. `doc/<TOPIC>-bug/`. Links
+  from a doc to assets in the same folder use a bare relative path
+  (e.g. `gtk-refresh-bug/Capture …png`); links to other repo paths keep the
+  `../` prefix.
 - rustdoc references inside `src/*` to these docs use the `doc/…` path
   (e.g. "see `doc/GTK_REFRESH_BUG.md`").
 

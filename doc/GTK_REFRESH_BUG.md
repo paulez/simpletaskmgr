@@ -72,9 +72,9 @@ Properties (per user):
   gone stale), a render-level rather than binding-level defect.
 
 Screenshots:
-- `../gtk-refresh-bug/Capture d'écran du 2026-09-06 22-20-23.png` — **many**
+- `gtk-refresh-bug/Capture d'écran du 2026-09-06 22-20-23.png` — **many**
   blank lines above PID 12984 (RDD Process).
-- `../gtk-refresh-bug/Capture d'écran du 2026-09-06 22-07-32.png` — smaller
+- `gtk-refresh-bug/Capture d'écran du 2026-09-06 22-07-32.png` — smaller
   gap above PID 5523.
 
 ### 2. Cell text desync (wrong process name) — **persistent, data corruption**
@@ -97,16 +97,16 @@ Properties (per user):
   to.
 
 Screenshots:
-- `../gtk-refresh-bug/Capture d'écran du 2026-09-06 22-08-52.png` — row 3 =
+- `gtk-refresh-bug/Capture d'écran du 2026-09-06 22-08-52.png` — row 3 =
   PID 61821 · name "simpletaskmgr" · CPU 6.7%, but the ordering does not
   match CPU-descending and the row sequence is internally inconsistent
   with the rest of the visible set.
-- `../gtk-refresh-bug/Capture d'écran du 2026-09-06 22-08-25.png` — row 2 =
+- `gtk-refresh-bug/Capture d'écran du 2026-09-06 22-08-25.png` — row 2 =
   PID 5523 (gnome-shell, 61.9%) sitting below PID 12239 (kworker, 2.7%)
   and above PID 10581 (0.0%) — the sequence 2.7% → 61.9% → 0.0% is not
   sorted, and several rows are missing entirely (they are in "blank" or
   desynced state at the same time).
-- `../gtk-refresh-bug/Capture d'écran du 2026-09-06 16-40-09.png` — 12.7% →
+- `gtk-refresh-bug/Capture d'écran du 2026-09-06 16-40-09.png` — 12.7% →
   0.0% → 5.3% → 2.7% sequence.
 
 ### 3. (Corollary) Stale sort order
@@ -328,7 +328,7 @@ separate the two defects before chasing any one of them.
 The two symptoms' opposite persistence (scroll-refreshes vs. never-clears)
 is the key diagnostic: treat them as **two separate bugs**.
 
-Screenshots captured at `../gtk-refresh-bug/`:
+Screenshots captured at `gtk-refresh-bug/`:
 
 - `Capture d'écran du 2026-09-06 16-40-09.png` — stale sort order (12.7%
   → 0.0% → 5.3% → 2.7% → 1.3%).
@@ -363,7 +363,7 @@ Screenshots captured at `../gtk-refresh-bug/`:
 ### Where the tree is
 - **Branch:** `fix/gtk-refresh-baseline` (off `36512ad`), HEAD = `1391918`.
 - **Working tree:** only this document (`GTK_REFRESH_BUG.md`) modified
-  (pending commit); untracked: `../gtk-refresh-bug/` (screenshots +
+  (pending commit); untracked: `gtk-refresh-bug/` (screenshots +
   `repro-gtk-refresh.txt`).
 - **Phase 0 done & committed** — the two earlier fixes (and their tests)
   are all reverted:
@@ -484,7 +484,7 @@ step.
 - `GTK_REFRESH_BUG.md` (this file) — earlier record + this section.
 - `GTK_REFRESH_FIX_PLAN.md` — Phase 1/2 plan; Phase 2A **abandoned** (see
   above), Phase 2B/C unexecuted, Phase 3 (README/docs) unexecuted.
-- `../gtk-refresh-bug/repro-gtk-refresh.txt` — the user's Phase-1-instrumented
+- `gtk-refresh-bug/repro-gtk-refresh.txt` — the user's Phase-1-instrumented
   repro; steady-state ticks are clean, no bad tick yet located.
 - `src/ui.rs`, `src/refresh_list.rs`, `src/process_row.rs` — Phase 1
   diagnostics present at HEAD, no fixes applied.
