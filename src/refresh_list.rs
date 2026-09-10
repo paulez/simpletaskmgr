@@ -10,7 +10,7 @@
 //! [`ProcessRow::set_item`] (re-emitting the changed properties, so the
 //! property-bound cell labels follow) — the object keeps its identity, so
 //! *no store signal fires at all* for a stable-position value update. A position change is applied
-//! with the `splice` primitive (see [`store_splice`]): because GTK 4.18's
+//! with the `ListStore::splice` safe binding (see [`splice_move`]): because GTK 4.18's
 //! `GtkListItemManager` only reuses an existing row widget when the remove
 //! *and* the re-add of an item arrive inside **one** `items-changed` signal
 //! (its `deleted_items` widget cache is created per signal and unparented at
@@ -34,49 +34,32 @@ use crate::process_row::ProcessRow;
 use gtk4::gio::prelude::*;
 use gtk4::gio::ListStore;
 
-type GObjectPtr = *mut glib::gobject_ffi::GObject;
-
-/// Applies one `g_list_store_splice` mutation: removes `n_removals` items at
-/// `position` and inserts the `additions` in their place, emitting a
-/// **single** `items-changed(position, n_removals, n_additions)` signal.
-///
-/// `g_list_store_splice` (glib ≥ 2.50, present in the 4.18 runtime) is
-/// declared by `gio-sys` but not wrapped by the 0.22 `ListStore` bindings,
-/// so we call it through the FFI. The single-signal emission is what lets
-/// GTK 4.18's `GtkListItemManager` reuse a row widget that is removed and
-/// re-added inside the same signal — two separate `remove`/`insert` calls
-/// (two signals) lose the widget (see the module docs).
-///
-/// # Safety
-/// `additions` must outlive the call and hold one `g_object_ref` each;
-/// `n_removals` + `additions.len()` must fit the store.
-fn splice(store: &ListStore, position: u32, n_removals: u32, additions: &[GObjectPtr]) {
-    unsafe {
-        // `additions` is only read by the C function; the `as_mut_ptr`
-        // signature is an artifact of the FFI declaration.
-        gtk4::gio::ffi::g_list_store_splice(
-            store.as_ptr(),
-            position,
-            n_removals,
-            additions.as_ptr() as *mut GObjectPtr,
-            additions.len() as u32,
-        )
-    };
-}
-
 /// Moves the row currently at `src` to `dst` (a *left* move, `src > dst`)
 /// as one `items-changed` signal: the window `dst..=src` is removed and
 /// re-added with the moved row first.
+///
+/// We use `ListStore::splice`, the 0.22 safe binding for
+/// `g_list_store_splice`: it emits a **single** `items-changed` signal,
+/// which is what lets GTK 4.18's `GtkListItemManager` reuse a row widget
+/// that is removed and re-added inside the same signal — two separate
+/// `remove`/`insert` calls (two signals) lose the widget (see the module
+/// docs).
 fn splice_move(store: &ListStore, dst: u32, src: u32) {
-    let block: Vec<GObjectPtr> = (dst..=src)
-        .map(|p| store.item(p).expect("row present in window").as_ptr())
+    let block: Vec<ProcessRow> = (dst..=src)
+        .map(|p| {
+            store
+                .item(p)
+                .expect("row present in window")
+                .downcast::<ProcessRow>()
+                .expect("a ProcessRow")
+        })
         .collect();
     // Desired window: the moved row (last element of `block`) first, then
     // the original `dst..src` in order — so every slot is re-filled by an
     // existing item pointer and GTK reuses each slot's widget.
     let mut additions = block[block.len() - 1..].to_vec();
     additions.extend_from_slice(&block[..block.len() - 1]);
-    splice(store, dst, block.len() as u32, &additions);
+    store.splice(dst, block.len() as u32, &additions);
 }
 
 /// Replace the contents of `store` with `items`, mutating it in place so the
@@ -151,7 +134,7 @@ pub fn refresh(store: &ListStore, items: &[ProcessItem]) {
         i = j;
     }
     for (pos, len) in runs.iter().rev() {
-        splice(store, *pos, *len, &[]);
+        store.splice(*pos, *len, &[] as &[ProcessRow]);
         removed += *len;
     }
     order.retain(|p| target_pids.contains(p));
