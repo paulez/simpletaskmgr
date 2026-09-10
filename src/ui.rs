@@ -882,13 +882,18 @@ fn make_rebuild(
         // drifted. The adjustment auto-clamps to the valid range anyway.
         let saved = adj_r.value();
 
-        // Borrow (not clone) the process list: `refresh` only reads a
-        // `&[ProcessItem]`, so the whole-Vec clone here — every `ProcessRow`
-        // value (two Strings each), once per refresh tick — was pure waste.
-        {
-            let s = state_r.borrow();
-            refresh_list::refresh(&store_r, &s.process_list.processes);
-        }
+        // Clone the process list out *before* the GTK call: `refresh` mutates
+        // the store via `g_list_store_splice` / `insert` / `append`, and those
+        // synchronously re-emit `selected-notify` on the `SingleSelection`.
+        // If we still held a borrow of `state` here, that re-entry's
+        // `borrow_mut` (the selection handler) would hit `RefCell already
+        // borrowed` — and, being inside a GTK trampoline that cannot unwind,
+        // abort the process. Releasing the borrow first keeps the `RefCell`
+        // clean for the reentrant handler. (The clone is one extra
+        // `Vec<ProcessItem>` per tick, within the budget `refresh` already
+        // pays cloning items into its rows.)
+        let procs = state_r.borrow().process_list.processes.clone();
+        refresh_list::refresh(&store_r, &procs);
 
         // `refresh` updated the row *values* in place — it deliberately emits
         // no `items-changed` for a stable-position value update (that is the

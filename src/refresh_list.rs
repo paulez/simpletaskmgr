@@ -566,6 +566,91 @@ mod tests {
         assert_eq!(pids_of(&s), vec![7, 9, 8, 3, 1]);
     }
 
+    /// `refresh` mutates the store via GTK FFI, which synchronously emits
+    /// `items-changed` (and, through the wrapping `SingleSelection`, the
+    /// re-entrant `selected-notify`). The real UI handler (`ui.rs:1025`)
+    /// takes a `borrow_mut` of `state` inside that callback. If the caller
+    /// still held a `borrow` (shared) of `state` across the GTK call, that
+    /// re-entrant `borrow_mut` would panic with `RefCell already borrowed`
+    /// — and, being inside a GTK trampoline that cannot unwind, abort the
+    /// process (the reported crash after repeatedly clicking rows).
+    ///
+    /// This test pins the fix: clone the data **out** of `state` first
+    /// (releasing the shared borrow), then run `refresh`; the re-entrant
+    /// callback's `borrow_mut` then succeeds cleanly because no shared
+    /// borrow is outstanding. To prove the callback really fired
+    /// re-entrantly (and did not just run at setup time), the test seeds a
+    /// sentinel pid into `state.selected_pid`; only the callback clears
+    /// it, so the post-`refresh` assertion is only satisfiable if the
+    /// callback executed while `refresh` was still on the stack.
+    ///
+    /// The `gio::ListStore` is a plain `glib::Object`, so this works
+    /// headless, same as the other tests in this module — no GTK widget
+    /// (and therefore no `gtk4::init()` required).
+    const REENTRANT_SENTINEL_PID: i32 = 12_345;
+
+    #[test]
+    fn test_refresh_releases_state_borrow_before_reentrant_selection_handler() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let path = std::env::temp_dir().join(format!(
+            "simpletaskmgr-refresh-selection-test-{}-{}-settings.toml",
+            std::process::id(),
+            "reentrant-selection"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let state = Rc::new(RefCell::new(crate::ui::State::with_processes(
+            path.clone(),
+            vec![item(1), item(2), item(3)],
+        )));
+
+        let store = seed(&[1, 2, 3]);
+
+        // Install the "re-entrant callback" on the store. Any of GTK's
+        // synchronous `selected-notify` / `items-changed` / `sort` signals
+        // fires while the FFI mutation is in flight; this callback mirrors
+        // the production handler (ui.rs:1025) that takes a `borrow_mut` of
+        // `state` inside that same trampoline.
+        let s_clone = state.clone();
+        store.connect_items_changed(move |_store, _pos, _rem, _add| {
+            // Mirrors the real handler: a mutable borrow of `state` taken
+            // while the GTK store mutation is in flight (synchronous, inside
+            // the trampoline).
+            s_clone.borrow_mut().selected_pid = None;
+        });
+
+        // A sentinel the only writer (the callback above) knows how to clear.
+        // If it is still set after `refresh` returns, the callback never
+        // fired and the test is not actually exercising the reported hazard.
+        state.borrow_mut().selected_pid = Some(REENTRANT_SENTINEL_PID);
+
+        // Drive `refresh` to remove row pid 2 (not in the target), which
+        // forces at least one `splice` and thus at least one `items-changed`
+        // firing that re-enters the callback while `refresh` is still on the
+        // stack. The fix (ui.rs `make_rebuild`) keeps the shared `state`
+        // borrow released across this call, so the callback's `borrow_mut`
+        // succeeds cleanly. A regression that re-introduces the held
+        // borrow would panic with `RefCell already borrowed` here — and,
+        // inside a GTK trampoline that cannot unwind, abort the process.
+        let target: Vec<ProcessItem> = vec![item(1), item(3)];
+        refresh(&store, &target);
+
+        // `refresh` must land the store at the target…
+        assert_eq!(pids_of(&store), vec![1, 3]);
+        // …and the reentrant callback must have run (it is the *only* writer
+        // that clears a non-`SENTINEL` `selected_pid`) — proof the GTK
+        // mutation really re-entered *while* the `refresh` call was still
+        // on the stack.
+        assert_eq!(
+            state.borrow().selected_pid,
+            None,
+            "the reentrant callback must have cleared the sentinel; it did \
+             not fire, so this test never exercised the reported hazard"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn test_refresh_reorder_only() {
         let s = seed(&[1, 2, 3]);
