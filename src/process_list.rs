@@ -47,8 +47,12 @@ impl ProcessList {
     pub fn init() -> Self {
         let mut new_list = Self::new();
         new_list.update_process_list();
-        // Display order is owned by GTK's `SortListModel`; the initial
-        // CPU%-descending sort is applied by `ui` after the first paint.
+        // The display order is owned by the app (top-style): the refresh
+        // path (`ui::make_rebuild`) sorts the fresh values into the active
+        // column's order and splices the base store into it; GTK's
+        // `SortListModel` stays in step and its re-sorts become no-ops.
+        // The initial CPU%-descending sort is applied by `ui` after the
+        // first paint.
         new_list
     }
 
