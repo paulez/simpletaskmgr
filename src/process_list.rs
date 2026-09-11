@@ -232,7 +232,16 @@ impl ProcessList {
     /// `f64` is compared with `total_cmp` so `NaN` values sort without
     /// panicking (unlike `partial_cmp().unwrap()`). This is the single
     /// source of truth for row ordering: every native `GtkColumnView`
-    /// header sorter wraps it via `CustomSorter`.
+    /// header sorter wraps it via `CustomSorter`, and the Rust-side target
+    /// order (`display_order`) reuses it verbatim.
+    ///
+    /// **Every arm breaks remaining ties on `pid`**, so the result is a
+    /// *total* (stable-sort-independent) ordering. That matters for
+    /// `display_order`: the refresh path must produce the *same* order as
+    /// the `SortListModel` view for every column and direction, and if ties
+    /// depended on each sort algorithm's stability the two could land in
+    /// different orders (their "original" inputs differ), making the view
+    /// visibly re-shuffle the already-sorted base store.
     ///
     /// `descending` reports whether the column is currently sorted
     /// descending (most-first). The always-present columns (`Pid`,
@@ -248,7 +257,11 @@ impl ProcessList {
     ) -> std::cmp::Ordering {
         match column {
             crate::SortColumn::Pid => a.pid.cmp(&b.pid),
-            crate::SortColumn::Username => a.value.username.cmp(&b.value.username),
+            crate::SortColumn::Username => a
+                .value
+                .username
+                .cmp(&b.value.username)
+                .then(a.pid.cmp(&b.pid)),
             crate::SortColumn::CpuPercent => {
                 // `top`-style stable ordering: compare the integer tick delta
                 // of the latest sample (coarse — quantized to the sampling
@@ -264,20 +277,52 @@ impl ProcessList {
             }
             crate::SortColumn::MemPercent => {
                 rank_optional(a.value.mem_percent, b.value.mem_percent, descending)
+                    .then(a.pid.cmp(&b.pid))
             }
-            crate::SortColumn::Name => a.value.name.cmp(&b.value.name),
+            crate::SortColumn::Name => a.value.name.cmp(&b.value.name).then(a.pid.cmp(&b.pid)),
             // A missing (`None`) rate is pinned to the bottom of the visible
             // list however the column points, so rows without I/O data never
             // float up ahead of rows with a real rate (see [`rank_optional`]).
             crate::SortColumn::DiskRead => {
                 rank_optional(a.value.disk_read_speed, b.value.disk_read_speed, descending)
+                    .then(a.pid.cmp(&b.pid))
             }
             crate::SortColumn::DiskWrite => rank_optional(
                 a.value.disk_write_speed,
                 b.value.disk_write_speed,
                 descending,
-            ),
+            )
+            .then(a.pid.cmp(&b.pid)),
         }
+    }
+
+    /// Sorts `processes` in place into the display order for `column` under
+    /// `descending` — the exact arithmetic GTK applies to the same rows:
+    /// its `ColumnViewSorter` runs `compare_values` (feeding it the live
+    /// direction) and *negates* the result for a descending primary.
+    ///
+    /// Because `compare_values` is a total order (pid tie-break), this
+    /// replica agrees with the `SortListModel` view for **every** column and
+    /// direction. The top-style refresh path (`ui::make_rebuild`) sorts the
+    /// fresh values with this function and splices the base store into that
+    /// order, so the `SortListModel`'s own re-sorts (header click, first
+    /// membership change) find the base *already* in view order and become
+    /// identity no-ops instead of whole-list commits — the residual refresh
+    /// flicker (see `doc/CPU_FIRST_SIGHT_BLANK_LINES.md` for the history,
+    /// and `top`, which keeps its own sorted array, for the model).
+    pub fn sort_in_display_order(
+        processes: &mut [ProcessItem],
+        column: crate::SortColumn,
+        descending: bool,
+    ) {
+        processes.sort_by(|a, b| {
+            let o = Self::compare_values(a, b, column, descending);
+            if descending {
+                o.reverse()
+            } else {
+                o
+            }
+        });
     }
 }
 
@@ -495,6 +540,119 @@ mod tests {
         );
     }
 
+    /// `sort_in_display_order` applies the exact view arithmetic —
+    /// `compare_values` (fed the live direction), negated for descending —
+    /// and produces the expected sequences for the columns that matter in
+    /// practice.
+    #[test]
+    fn test_display_order_cpu_descents_then_ascends() {
+        fn item(pid: i32, ticks: u64) -> ProcessItem {
+            let mut p = TaskMgrProcess::new(format!("n{pid}"), pid, 1, "u".to_string(), 0.0);
+            p.cpu_ticks = ticks;
+            ProcessItem::new(&p)
+        }
+
+        // Deliberately unsorted input (and not pid order either).
+        let mut v = vec![item(20, 40), item(3, 50), item(9, 40), item(2, 10)];
+
+        // Descending (CPU% most-first): highest bucket first, smallest last.
+        // The *whole* comparator is negated for the descending view — so the
+        // `pid` tie-break comes out pid-descending within a bucket (20 > 9).
+        // (That matches the `SortListModel` view order exactly; the tie-break
+        // direction is irrelevant to the user as long as Rust and view agree.)
+        ProcessList::sort_in_display_order(&mut v, crate::SortColumn::CpuPercent, true);
+        assert_eq!(
+            v.iter().map(|i| i.pid).collect::<Vec<i32>>(),
+            vec![3, 20, 9, 2]
+        );
+
+        // Ascending: smallest bucket first, tie broken by pid ascending.
+        ProcessList::sort_in_display_order(&mut v, crate::SortColumn::CpuPercent, false);
+        assert_eq!(
+            v.iter().map(|i| i.pid).collect::<Vec<i32>>(),
+            vec![2, 9, 20, 3]
+        );
+    }
+
+    /// The optional-value columns pin a missing value to the list bottom in
+    /// **both** direction (the `rank_optional` contract) — and equal values
+    /// tie-break on `pid`, in the `pid`-negated direction for descending.
+    #[test]
+    fn test_display_order_mem_none_pinned_last_both_directions() {
+        fn item(pid: i32, mem: Option<f64>) -> ProcessItem {
+            let mut p = TaskMgrProcess::new(format!("n{pid}"), pid, 1, "u".to_string(), 0.0);
+            p.mem_percent = mem;
+            ProcessItem::new(&p)
+        }
+        let mut v = vec![
+            item(4, None),
+            item(2, Some(0.5)),
+            item(8, None),
+            item(3, Some(12.25)),
+        ];
+
+        // Descending (MEM% most-first): real values by magnitude, the missing
+        // ones pinned last; the two `None` rows tie, broken by pid 4, 8,
+        // negated for the descending view → 8, 4.
+        ProcessList::sort_in_display_order(&mut v, crate::SortColumn::MemPercent, true);
+        assert_eq!(
+            v.iter().map(|i| i.pid).collect::<Vec<i32>>(),
+            vec![3, 2, 8, 4]
+        );
+
+        // Ascending: real values ascending, missing still pinned last
+        // (pid ascending within the `None` rows: 4, 8).
+        ProcessList::sort_in_display_order(&mut v, crate::SortColumn::MemPercent, false);
+        assert_eq!(
+            v.iter().map(|i| i.pid).collect::<Vec<i32>>(),
+            vec![2, 3, 4, 8]
+        );
+    }
+
+    /// The order is *total*: shuffling the input order never changes the
+    /// result. This is the property that makes the Rust-side order and the
+    /// `SortListModel` view order identical regardless of which order the
+    /// base store happened to arrive in (the top-style convergence bet).
+    #[test]
+    fn test_display_order_total_and_input_order_independent() {
+        fn item(pid: i32, mem: f64) -> ProcessItem {
+            let mut p = TaskMgrProcess::new(format!("n{pid}"), pid, 1, "u".to_string(), 0.0);
+            p.mem_percent = Some(mem);
+            ProcessItem::new(&p)
+        }
+        // Two rows share a MEM% value — the tie resolves on pid, not input
+        // position.
+        let base = vec![200, 137, 900, 55, 310];
+        let mut shuffled = base.clone();
+        shuffled.reverse();
+
+        let items = |pids: &Vec<i32>| -> Vec<ProcessItem> {
+            pids.iter()
+                .map(|&p| {
+                    // pids 137 and 55 share a value: a genuine tie.
+                    let m = if p == 137 || p == 55 {
+                        42.0
+                    } else {
+                        (p % 100) as f64
+                    };
+                    item(p, m)
+                })
+                .collect()
+        };
+
+        let mut a = items(&base);
+        let mut b = items(&shuffled);
+        for &descending in &[false, true] {
+            ProcessList::sort_in_display_order(&mut a, crate::SortColumn::MemPercent, descending);
+            ProcessList::sort_in_display_order(&mut b, crate::SortColumn::MemPercent, descending);
+            assert_eq!(
+                a.iter().map(|i| i.pid).collect::<Vec<i32>>(),
+                b.iter().map(|i| i.pid).collect::<Vec<i32>>(),
+                "input order must not influence the result (descending={descending})"
+            );
+        }
+    }
+
     fn proc(pid: i32, ruid: u32) -> TaskMgrProcess {
         TaskMgrProcess::new(format!("name{pid}"), pid, ruid, "u".to_string(), 0.0)
     }
@@ -564,10 +722,10 @@ mod tests {
             ProcessList::compare_values(&positive, &real_zero, crate::SortColumn::DiskRead, false),
             std::cmp::Ordering::Greater
         );
-        // Blank vs blank is always equal.
+        // Blank vs blank ties break on `pid` (total order): pid 1 < 9.
         assert_eq!(
             ProcessList::compare_values(&blank, &item(9, None), crate::SortColumn::DiskRead, true),
-            std::cmp::Ordering::Equal
+            std::cmp::Ordering::Less
         );
     }
 
@@ -632,11 +790,12 @@ mod tests {
             ProcessList::compare_values(&low, &high, crate::SortColumn::MemPercent, false),
             std::cmp::Ordering::Less,
         );
-        // Equal known values compare equal (never panics on `NaN`).
+        // Equal values tie-break on `pid` (the comparator is a total order,
+        // so the Rust and view orders can never disagree on stability): pid 2 < 5.
         let a = item(5, Some(0.5));
         assert_eq!(
             ProcessList::compare_values(&low, &a, crate::SortColumn::MemPercent, false),
-            std::cmp::Ordering::Equal,
+            std::cmp::Ordering::Less,
         );
         // `NaN` is a *known* value: `total_cmp` orders it last among knowns
         // without panicking, so it still ranks above a finite value.
