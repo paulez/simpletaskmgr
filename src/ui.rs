@@ -850,6 +850,7 @@ fn make_rebuild(
     list: &ListView,
     dp: &Rc<DetailLabels>,
     adj: gtk4::Adjustment,
+    no_resort_kick: bool,
 ) -> Rc<dyn Fn()> {
     let store_r = list.store.clone();
     let sel_r = list.selection.clone();
@@ -906,7 +907,15 @@ fn make_rebuild(
         // sorter_set_column` does exactly this on every header click, so this
         // reuses the same, proven path. If no column is sorted yet the
         // sorter reports order NONE and the `changed` signal is a no-op.
-        view_sorter_r.changed(gtk4::SorterChange::Different);
+        //
+        // Skipped entirely with `--no-resort-kick`: a diagnostic to localize
+        // refresh flicker to the re-sort commit versus the membership-update
+        // path.
+        if no_resort_kick {
+            log::debug!("--no-resort-kick: skipping the refresh re-sort kick");
+        } else {
+            view_sorter_r.changed(gtk4::SorterChange::Different);
+        }
 
         let adj_idle = adj_r.clone();
         let saved_idle = saved;
@@ -951,7 +960,13 @@ fn make_rebuild(
 
 /// Builds the main window and wires the refresh timer.
 /// Call from the `activate` handler (main loop thread only).
-pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
+///
+/// `no_resort_kick` is the `--no-resort-kick` diagnostic flag: when `true`,
+/// the refresh path leaves the display order untouched after in-place value
+/// updates (rows keep their positions until a membership change re-sorts), so
+/// a flicker test can attribute visible flicker to the re-sort commit
+/// versus the membership-update path.
+pub fn build_window(app: &gtk4::Application, no_resort_kick: bool) -> gtk4::ApplicationWindow {
     let state = Rc::new(RefCell::new(State::new()));
 
     let window = gtk4::ApplicationWindow::new(app);
@@ -1013,7 +1028,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // ---- Shared closure: republish the store from state ------------------------
     let dp_labels = Rc::new(detail.labels);
     let adj = list.list_scroll.vadjustment();
-    let rebuild = make_rebuild(state.clone(), &list, &dp_labels, adj);
+    let rebuild = make_rebuild(state.clone(), &list, &dp_labels, adj, no_resort_kick);
 
     // ---- Row selection handler -------------------------------------------------
     {
