@@ -12,6 +12,11 @@ time, and lets you inspect and signal individual processes.
 - **Sortable columns**: click any header to sort; numeric columns default
   highest-first. Rows with no value for a column (blank MEM%/Disk) always stay
   at the bottom, in either sort direction.
+- **Calm CPU ordering**: the CPU% column orders rows by each process's integer
+  tick delta of the sample window (ties settle by PID, in `top`'s style), so
+  rows that measure equal — including rows that display the same value — keep
+  their position across refreshes instead of swapping back and forth. The
+  percentage shown is the live per-interval value.
 - **Show all processes**: toggle between every process on the system and only
   the current user's (default).
 - **Detail view**: click a process to see live metrics in a side pane and send

@@ -249,7 +249,19 @@ impl ProcessList {
         match column {
             crate::SortColumn::Pid => a.pid.cmp(&b.pid),
             crate::SortColumn::Username => a.value.username.cmp(&b.value.username),
-            crate::SortColumn::CpuPercent => a.value.cpu_percent.total_cmp(&b.value.cpu_percent),
+            crate::SortColumn::CpuPercent => {
+                // `top`-style stable ordering: compare the integer tick delta
+                // of the latest sample (coarse — quantized to the sampling
+                // window — so rows that display the same value are tied), and
+                // tie-break on `pid` so tied rows keep a deterministic position
+                // across refreshes instead of swapping. The displayed `f64`
+                // percent is deliberately never compared here, so a `NaN`
+                // value can't disturb the order either.
+                a.value
+                    .cpu_ticks
+                    .cmp(&b.value.cpu_ticks)
+                    .then(a.pid.cmp(&b.pid))
+            }
             crate::SortColumn::MemPercent => {
                 rank_optional(a.value.mem_percent, b.value.mem_percent, descending)
             }
@@ -427,44 +439,59 @@ mod tests {
         assert!(ProcessList::compare_values(&a, &b, crate::SortColumn::Pid, false).is_lt());
     }
 
-    /// `compare_values` is the exact comparator the `ColumnView` sorters run:
-    /// it must be consistent with the sort order and NaN-safe.
+    /// `CpuPercent` sorts by the integer tick key, not the displayed `f64`:
+    /// rows with an equal measured delta (whatever they display) settle by
+    /// `pid` in either direction, distinct buckets order by `cpu_ticks`, and
+    /// a `NaN` display value is harmless because it is never compared.
     #[test]
-    fn test_compare_values_matches_sort_order_and_is_nan_safe() {
-        fn item(pid: i32, cpu: f64) -> ProcessItem {
-            let p = TaskMgrProcess::new(format!("n{pid}"), pid, 1, "u".to_string(), cpu);
+    fn test_compare_values_cpu_by_ticks_with_pid_tiebreak() {
+        fn item(pid: i32, ticks: u64, cpu: f64) -> ProcessItem {
+            let mut p = TaskMgrProcess::new(format!("n{pid}"), pid, 1, "u".to_string(), cpu);
+            p.cpu_ticks = ticks;
             ProcessItem::new(&p)
         }
 
-        let nan = item(1, f64::NAN);
-        let lo = item(2, -5.0);
-        let hi = item(3, 42.0);
+        // Same measured delta (e.g. both display "3.0%"), distinct pids:
+        // deterministic order by `pid` (pid 9 < pid 10). The comparator
+        // ignores the direction flag — `CpuPercent` never has missing values
+        // to pin — and GTK's descending order negates the result, so in
+        // either direction the pair is antisymmetric and stable.
+        let a = item(9, 40, 3.0);
+        let b = item(10, 40, 3.3);
+        for &descending in &[false, true] {
+            assert_eq!(
+                ProcessList::compare_values(&a, &b, crate::SortColumn::CpuPercent, descending),
+                std::cmp::Ordering::Less,
+                "tie order must follow pid (descending={descending})"
+            );
+            assert_eq!(
+                ProcessList::compare_values(&b, &a, crate::SortColumn::CpuPercent, descending),
+                std::cmp::Ordering::Greater,
+                "comparator must stay antisymmetric (descending={descending})"
+            );
+        }
 
-        let ascending = [lo.clone(), nan.clone(), hi.clone()];
-        let mut sorted = ascending;
-        // `CpuPercent` has no missing values, so the direction flag is a no-op
-        // here — the comparator still must not panic and must order by value.
-        sorted.sort_by(|a, b| {
-            ProcessList::compare_values(a, b, crate::SortColumn::CpuPercent, false)
+        // Distinct tick buckets order by bucket, irrespective of the
+        // (differing) display values; a NaN display value sorts without
+        // panic and lands by its own tick bucket + pid.
+        let lo = item(2, 10, 0.5);
+        let mid_nan = item(1, 40, f64::NAN);
+        let hi = item(3, 50, 42.0);
+        let mut sorted = [
+            hi.clone(),
+            mid_nan.clone(),
+            lo.clone(),
+            a.clone(),
+            b.clone(),
+        ];
+        sorted.sort_by(|x, y| {
+            ProcessList::compare_values(x, y, crate::SortColumn::CpuPercent, false)
         });
-        // `total_cmp` orders finite values first and NaN last.
         let pids: Vec<i32> = sorted.iter().map(|i| i.pid).collect();
         assert_eq!(
             pids,
-            vec![2, 3, 1],
-            "NaN must not panic and must order total_cmp"
-        );
-
-        // Equal values compare equal in either direction (no-op for `CpuPercent`).
-        let a = item(9, 1.5);
-        let b = item(10, 1.5);
-        assert_eq!(
-            ProcessList::compare_values(&a, &b, crate::SortColumn::CpuPercent, false),
-            std::cmp::Ordering::Equal
-        );
-        assert_eq!(
-            ProcessList::compare_values(&a, &b, crate::SortColumn::CpuPercent, true),
-            std::cmp::Ordering::Equal
+            vec![2, 1, 9, 10, 3],
+            "bucket first (10 < 40 < 50), pid breaks ties within 40"
         );
     }
 

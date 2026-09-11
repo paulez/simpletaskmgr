@@ -91,7 +91,7 @@ pub fn parse_cpu_line(line: &str) -> Option<(u64, u64)> {
 ///
 /// `None` means the delta is unusable (the system was rebooted and counters
 /// reset, or the values underflowed), mirroring the PID-reuse case in
-/// `CpuTracker::calculate_cpu_percent`: the caller should discard the baseline
+/// `CpuTracker::calculate_cpu_sample`: the caller should discard the baseline
 /// and treat the next interval as the first real one.
 pub fn cpu_percent(last: &StatBaseline, total: u64, idle: u64) -> Option<f64> {
     let total_delta = total.checked_sub(last.last_total)?;

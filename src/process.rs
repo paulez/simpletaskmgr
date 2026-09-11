@@ -15,6 +15,18 @@ pub struct TaskMgrProcess {
     pub ruid: u32,
     pub username: String,
     pub cpu_percent: f64, // top-style per-core CPU%, may exceed 100 for multi-threaded
+    /// CPU *sort* key: integer CPU ticks of the latest sample, not the f64 above.
+    ///
+    /// The CPU% column orders rows by this `u64` (tie-broken by `pid`) instead
+    /// of the full-precision `cpu_percent`: quantized to ticks of the sampling
+    /// window (10 ms at 100 Hz), so two rows that display the same `0.1%`
+    /// rounded value are always tied, and the `pid` tie-break keeps their
+    /// relative order stable across refreshes — the same combination of a
+    /// coarse integer key (`PIDS_TICS_ALL_DELTA`) and stable ordering that
+    /// `top` uses. For a process's first sample (or after a PID-reuse baseline
+    /// reset) this holds the lifetime total `utime + stime`, matching `top`'s
+    /// first-frame behaviour.
+    pub cpu_ticks: u64,
     /// Share of system memory in percent (`VmRSS / MemTotal * 100`), or
     /// `None` when the RSS can't be read (e.g. another user's kernel thread).
     pub mem_percent: Option<f64>,
@@ -34,6 +46,7 @@ impl TaskMgrProcess {
             ruid,
             username,
             cpu_percent,
+            cpu_ticks: 0,
             mem_percent: None,
             disk_read_speed: None,
             disk_write_speed: None,
@@ -141,6 +154,7 @@ pub(crate) fn build_task_mgr_process(
         ruid,
         username,
         cpu_percent: 0.0,
+        cpu_ticks: 0,
         mem_percent: None,
         disk_read_speed: None,
         disk_write_speed: None,
