@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use gtk4::gio::prelude::*;
@@ -57,6 +58,10 @@ struct ListView {
     selection: gtk4::SingleSelection,
     cpu_column: gtk4::ColumnViewColumn,
     list_scroll: gtk4::ScrolledWindow,
+    /// Each column's `as_ptr()` mapped to its `SortColumn`, so the refresh
+    /// path (F1: skip the re-sort kick when the order is unchanged) can
+    /// resolve the active header sort by pointer alone.
+    sort_columns: HashMap<usize, SortColumn>,
 }
 
 /// The widgets of the detail pane (the value labels, the signal buttons, and
@@ -694,6 +699,11 @@ fn build_process_list() -> ListView {
         selection,
         cpu_column,
         list_scroll,
+        sort_columns: COLS
+            .iter()
+            .zip(&columns)
+            .map(|(spec, col)| (col.as_ptr() as usize, spec.4))
+            .collect(),
     }
 }
 
@@ -842,6 +852,61 @@ fn build_settings_popover() -> SettingsWidgets {
     }
 }
 
+/// F1 refresh gate: `true` when the `SortListModel`'s *current* row order
+/// differs from the order a re-sort (active header column, live direction)
+/// would produce from the rows' *current* values.
+///
+/// `GtkSortListModel::sort_func` breaks comparator ties by item-pointer
+/// order (see `gtksortlistmodel.c`'s `sort_func`), so the replica sorts the
+/// rows stably in two passes: ascending pointer order first, then by
+/// `compare_values` with GTK's own negation applied for a descending
+/// primary. Identical pid sequences mean the re-sort is an identity, and
+/// its whole-list commit — the source of the residual refresh flicker — is
+/// safe to skip.
+fn view_order_changed(
+    sort_model: &gtk4::SortListModel,
+    view_sorter: &gtk4::Sorter,
+    sort_columns: &HashMap<usize, SortColumn>,
+) -> bool {
+    let Some(cs) = view_sorter.downcast_ref::<gtk4::ColumnViewSorter>() else {
+        return true;
+    };
+    let Some(col) = cs.primary_sort_column() else {
+        // No active sort: the model passes rows through untouched, and a
+        // kick would be a no-op anyway.
+        return false;
+    };
+    let Some(sort_col) = sort_columns.get(&(col.as_ptr() as usize)) else {
+        return true;
+    };
+    let descending = cs.primary_sort_order() == gtk4::SortType::Descending;
+
+    let n = sort_model.n_items();
+    let mut current = Vec::with_capacity(n as usize);
+    let mut rows: Vec<(usize, ProcessItem)> = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let Some(o) = sort_model.item(i) else {
+            continue;
+        };
+        let row = o.downcast::<ProcessRow>().expect("a ProcessRow");
+        current.push(row.pid());
+        rows.push((row.as_ptr() as usize, row.item()));
+    }
+
+    rows.sort_by_key(|r| r.0);
+    rows.sort_by(|a, b| {
+        let o = ProcessList::compare_values(&a.1, &b.1, *sort_col, descending);
+        if descending {
+            o.reverse()
+        } else {
+            o
+        }
+    });
+
+    // The kick is only needed when the re-sort would actually move rows.
+    current != rows.iter().map(|(_, item)| item.pid).collect::<Vec<_>>()
+}
+
 /// Builds the shared "republish the store from `state`" closure: it updates
 /// the row values in place, kicks the `SortListModel` to re-sort, restores the
 /// scroll offset, re-pins the selection, and refreshes the detail pane.
@@ -865,6 +930,7 @@ fn make_rebuild(
         .expect("ColumnView exposes a sorter");
     let dp_r = dp.clone();
     let adj_r = adj.clone();
+    let sort_columns_r = list.sort_columns.clone();
     Rc::new(move || {
         // Remember the currently selected pid (if any) so the highlight can be
         // re-pinned to the same process after the refresh, in case GTK
@@ -905,16 +971,22 @@ fn make_rebuild(
         // drift away from the CPU% the labels are showing. Firing `changed`
         // makes the `SortListModel` re-run our comparator; `gtk_column_view_
         // sorter_set_column` does exactly this on every header click, so this
-        // reuses the same, proven path. If no column is sorted yet the
-        // sorter reports order NONE and the `changed` signal is a no-op.
+        // reuses the same, proven path.
+        //
+        // F1 gate: the kick's whole-list commit is the residual refresh
+        // flicker (it recycles every row widget), so it fires *only* when
+        // the visible order actually changed. A value-only refresh on an
+        // unchanged order commits nothing and the list stays pixel-stable.
         //
         // Skipped entirely with `--no-resort-kick`: a diagnostic to localize
         // refresh flicker to the re-sort commit versus the membership-update
         // path.
         if no_resort_kick {
             log::debug!("--no-resort-kick: skipping the refresh re-sort kick");
-        } else {
+        } else if view_order_changed(&sort_r, &view_sorter_r, &sort_columns_r) {
             view_sorter_r.changed(gtk4::SorterChange::Different);
+        } else {
+            log::debug!("refresh: visible order unchanged, skipping the re-sort kick");
         }
 
         let adj_idle = adj_r.clone();
@@ -1400,5 +1472,94 @@ mod tests {
             "reset must persist defaults"
         );
         let _ = std::fs::remove_file(temp_settings_path("reset"));
+    }
+
+    /// F1: the order-changed replica must track the *real* `SortListModel`
+    /// view order — that is the premise the kick gate relies on. After a
+    /// converged sort it reports "unchanged"; a value change that would move
+    /// rows reports "changed"; and the kicked re-sort converges back to
+    /// "unchanged" — i.e. the replica and GTK agree, ties included (GTK's
+    /// `sort_func` resolves comparator ties by item-pointer order, which is
+    /// the same order the replica's stable pointer pre-sort establishes).
+    #[test]
+    fn test_view_order_changed_tracks_gtk_view() {
+        // `gtk_column_view_sort_by_column` (which the app likewise relies on)
+        // requires the library to be initialized; that is all we need — no
+        // window is shown and nothing is drawn.
+        gtk4::init().expect("GTK library init");
+
+        let list = build_process_list();
+
+        // pid -> cpu_ticks; 200 and 300 tie, so the tie order is what we are
+        // actually checking here.
+        for (pid, ticks) in [(100i32, 5u64), (200, 3), (300, 3)] {
+            let mut p = crate::process::TaskMgrProcess::new(
+                format!("n{pid}"),
+                pid,
+                1,
+                "u".to_string(),
+                0.0,
+            );
+            p.cpu_ticks = ticks;
+            let item = ProcessItem::new(&p);
+            list.store.append(&ProcessRow::from_item(&item));
+        }
+
+        let view_sorter = list.column_view.sorter().expect("a sorter");
+        // Drive the sort exactly like a header click does; use the GObject
+        // sorter API afterwards for the kick (the same path the refresh takes).
+        list.column_view
+            .sort_by_column(Some(&list.cpu_column), gtk4::SortType::Descending);
+
+        let pids_view = |list: &ListView| -> Vec<i32> {
+            (0..list.sort_model.n_items())
+                .map(|i| {
+                    list.sort_model
+                        .item(i)
+                        .expect("a row")
+                        .downcast::<ProcessRow>()
+                        .expect("a ProcessRow")
+                        .pid()
+                })
+                .collect()
+        };
+
+        // Ties resolve by the column's own tie-break (the Cpu arm: pid,
+        // negated for descending — hence 300 before 200), and the replica
+        // must produce the identical sequence — that is the F1 premise.
+        assert_eq!(pids_view(&list), vec![100, 300, 200]);
+        assert!(
+            !view_order_changed(&list.sort_model, &view_sorter, &list.sort_columns),
+            "after the converged sort the replica must report 'unchanged'"
+        );
+
+        // A value change that would move a row must trip the gate.
+        let row300 = (0..list.store.n_items())
+            .map(|i| {
+                list.store
+                    .item(i)
+                    .expect("a row")
+                    .downcast::<ProcessRow>()
+                    .expect("a ProcessRow")
+            })
+            .find(|r| r.pid() == 300)
+            .expect("row 300");
+        let mut top =
+            crate::process::TaskMgrProcess::new("n300".to_string(), 300, 1, "u".to_string(), 0.0);
+        top.cpu_ticks = 9;
+        row300.set_item(&ProcessItem::new(&top));
+        assert!(
+            view_order_changed(&list.sort_model, &view_sorter, &list.sort_columns),
+            "a reordering value change must be reported"
+        );
+
+        // The kicked re-sort (the same `sorter -> changed` path the refresh
+        // fires) must converge the view back to the replica's target.
+        view_sorter.changed(gtk4::SorterChange::Different);
+        assert_eq!(pids_view(&list), vec![300, 100, 200]);
+        assert!(
+            !view_order_changed(&list.sort_model, &view_sorter, &list.sort_columns),
+            "after the kick the view must match the replica again"
+        );
     }
 }

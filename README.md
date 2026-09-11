@@ -17,6 +17,11 @@ time, and lets you inspect and signal individual processes.
   rows that measure equal — including rows that display the same value — keep
   their position across refreshes instead of swapping back and forth. The
   percentage shown is the live per-interval value.
+- **Stable refresh**: on each refresh the app only re-sorts when the active
+  column's order would actually change. If the values moved but the order is
+  the same, the rows keep their place and the list commits no reflow, so it
+  stays pixel-stable (even scrolled down the list) instead of flickering on
+  every tick.
 - **Show all processes**: toggle between every process on the system and only
   the current user's (default).
 - **Detail view**: click a process to see live metrics in a side pane and send
