@@ -856,15 +856,16 @@ fn build_settings_popover() -> SettingsWidgets {
     }
 }
 
-/// Builds the shared "republish the store from `state`" closure: it updates
-/// the row values in place, kicks the `SortListModel` to re-sort, restores the
-/// scroll offset, re-pins the selection, and refreshes the detail pane.
+/// Builds the shared "republish the store from `state`" closure: it sorts
+/// the fresh values into the active sort column's order (top-style: the app
+/// owns the display order, see `sort_in_display_order`), updates the row
+/// values in place, restores the scroll offset, re-pins the selection, and
+/// refreshes the detail pane.
 fn make_rebuild(
     state: Rc<RefCell<State>>,
     list: &ListView,
     dp: &Rc<DetailLabels>,
     adj: gtk4::Adjustment,
-    no_resort_kick: bool,
 ) -> Rc<dyn Fn()> {
     let store_r = list.store.clone();
     let sel_r = list.selection.clone();
@@ -873,9 +874,8 @@ fn make_rebuild(
     // (top-style display-order target, see `sort_in_display_order`).
     let sort_columns_r = list.sort_columns.clone();
     let state_r = state.clone();
-    // The view's own sorter, captured so the refresh path can ask the
-    // `SortListModel` to re-run it after an in-place value update (see the
-    // `changed` call below).
+    // The view's own sorter, captured so the refresh path can read the
+    // active sort column/direction and build the top-style target order.
     let view_sorter_r = list
         .column_view
         .sorter()
@@ -938,27 +938,6 @@ fn make_rebuild(
         }
         refresh_list::refresh(&store_r, &procs);
 
-        // `refresh` updated the row *values* in place — it deliberately emits
-        // no `items-changed` for a stable-position value update (that is the
-        // anti-flicker contract). But `GtkSortListModel` only re-sorts when
-        // the store fires `items-changed` or its sorter emits `changed`; it
-        // *never* watches item properties. Without this kick the list would
-        // freeze at the order captured during the last membership change and
-        // drift away from the CPU% the labels are showing. Firing `changed`
-        // makes the `SortListModel` re-run our comparator; `gtk_column_view_
-        // sorter_set_column` does exactly this on every header click, so this
-        // reuses the same, proven path. If no column is sorted yet the
-        // sorter reports order NONE and the `changed` signal is a no-op.
-        //
-        // Skipped entirely with `--no-resort-kick`: a diagnostic to localize
-        // refresh flicker to the re-sort commit versus the membership-update
-        // path.
-        if no_resort_kick {
-            log::debug!("--no-resort-kick: skipping the refresh re-sort kick");
-        } else {
-            view_sorter_r.changed(gtk4::SorterChange::Different);
-        }
-
         let adj_idle = adj_r.clone();
         let saved_idle = saved;
         glib::idle_add_local(move || {
@@ -1002,13 +981,7 @@ fn make_rebuild(
 
 /// Builds the main window and wires the refresh timer.
 /// Call from the `activate` handler (main loop thread only).
-///
-/// `no_resort_kick` is the `--no-resort-kick` diagnostic flag: when `true`,
-/// the refresh path leaves the display order untouched after in-place value
-/// updates (rows keep their positions until a membership change re-sorts), so
-/// a flicker test can attribute visible flicker to the re-sort commit
-/// versus the membership-update path.
-pub fn build_window(app: &gtk4::Application, no_resort_kick: bool) -> gtk4::ApplicationWindow {
+pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let state = Rc::new(RefCell::new(State::new()));
 
     let window = gtk4::ApplicationWindow::new(app);
@@ -1070,7 +1043,7 @@ pub fn build_window(app: &gtk4::Application, no_resort_kick: bool) -> gtk4::Appl
     // ---- Shared closure: republish the store from state ------------------------
     let dp_labels = Rc::new(detail.labels);
     let adj = list.list_scroll.vadjustment();
-    let rebuild = make_rebuild(state.clone(), &list, &dp_labels, adj, no_resort_kick);
+    let rebuild = make_rebuild(state.clone(), &list, &dp_labels, adj);
 
     // ---- Row selection handler -------------------------------------------------
     {
