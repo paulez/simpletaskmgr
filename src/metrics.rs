@@ -108,10 +108,10 @@ pub fn cpu_percent(last: &StatBaseline, total: u64, idle: u64) -> Option<f64> {
 /// `CpuTracker::lifetime_avg_percent` (the "first frame" idea) and the disk
 /// graph's `lifetime_rates`.
 ///
-/// `None` when either input is `None` or non-positive — the first sample
+/// `None` when `uptime_secs` is `None` or non-positive — the first sample
 /// can't be computed without a denominator, so the whole thing is *unknown*
 /// rather than a spurious zero. The caller maps `None` to `0.0` for the
-/// graph (matching the old behavior) and to a blank readout for the label.
+/// graph and to a blank readout for the label.
 pub fn lifetime_cpu_percent(
     total: u64,
     idle: u64,

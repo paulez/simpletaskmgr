@@ -1,9 +1,9 @@
 use log::debug;
-use procfs::prelude::Current;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::time::Instant;
 
+use crate::disk_status::read_uptime_secs;
 use crate::process::TaskMgrProcess;
 
 #[derive(Clone)]
@@ -40,18 +40,6 @@ impl CpuTracker {
             process_usage: HashMap::new(),
             tps: procfs::ticks_per_second(),
             start_instant: Instant::now(),
-        }
-    }
-
-    /// Total system uptime in seconds, as read from /proc/uptime.
-    /// Returns 0 if the file can't be read (e.g. in test sandboxes).
-    fn system_uptime_secs(&self) -> f64 {
-        match procfs::Uptime::current() {
-            Ok(u) => u.uptime,
-            Err(e) => {
-                debug!("Can't read /proc/uptime: {}", e);
-                0.0
-            }
         }
     }
 
@@ -131,6 +119,7 @@ impl CpuTracker {
 
         // Use Instant for high-resolution timing
         let current_timestamp = self.start_instant.elapsed().as_secs_f64();
+        let uptime = read_uptime_secs().unwrap_or(0.0);
 
         match self.process_usage.entry(pid) {
             Occupied(mut occ) => {
@@ -154,13 +143,8 @@ impl CpuTracker {
                 } else {
                     debug!("PID {} was reused, resetting CPU baseline", pid);
                     occ.insert(UsageStats::new(utime, stime, current_timestamp));
-                    task_mgr_process.cpu_percent = Self::lifetime_avg_percent(
-                        utime,
-                        stime,
-                        stat.starttime,
-                        self.tps,
-                        self.system_uptime_secs(),
-                    );
+                    task_mgr_process.cpu_percent =
+                        Self::lifetime_avg_percent(utime, stime, stat.starttime, self.tps, uptime);
                 }
             }
             Vacant(vac) => {
@@ -170,7 +154,7 @@ impl CpuTracker {
                     stime,
                     stat.starttime,
                     self.tps,
-                    self.system_uptime_secs(),
+                    read_uptime_secs().unwrap_or(0.0),
                 );
             }
         }
