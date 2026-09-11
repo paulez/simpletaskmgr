@@ -57,6 +57,11 @@ struct ListView {
     selection: gtk4::SingleSelection,
     cpu_column: gtk4::ColumnViewColumn,
     list_scroll: gtk4::ScrolledWindow,
+    /// Every column's widget pointer mapped to its `SortColumn`, so a
+    /// refresh can resolve the *active* sort (read from the view's sorter)
+    /// and build the top-style display-order target with the shared
+    /// `ProcessList::compare_values` comparator.
+    sort_columns: Vec<(usize, SortColumn)>,
 }
 
 /// The widgets of the detail pane (the value labels, the signal buttons, and
@@ -687,6 +692,14 @@ fn build_process_list() -> ListView {
     list_scroll.set_hexpand(true);
     list_scroll.set_vexpand(true);
 
+    // column pointer → `SortColumn`, for the refresh path's active-sort
+    // lookup (top-style display order, see `make_rebuild`).
+    let sort_columns = COLS
+        .iter()
+        .zip(&columns)
+        .map(|((_, _, _, _, sc), col)| (col.as_ptr() as usize, *sc))
+        .collect();
+
     ListView {
         store,
         column_view,
@@ -694,6 +707,7 @@ fn build_process_list() -> ListView {
         selection,
         cpu_column,
         list_scroll,
+        sort_columns,
     }
 }
 
@@ -855,6 +869,9 @@ fn make_rebuild(
     let store_r = list.store.clone();
     let sel_r = list.selection.clone();
     let sort_r = list.sort_model.clone();
+    // column pointer → `SortColumn`, for resolving the active sort below
+    // (top-style display-order target, see `sort_in_display_order`).
+    let sort_columns_r = list.sort_columns.clone();
     let state_r = state.clone();
     // The view's own sorter, captured so the refresh path can ask the
     // `SortListModel` to re-run it after an in-place value update (see the
@@ -893,7 +910,32 @@ fn make_rebuild(
         // clean for the reentrant handler. (The clone is one extra
         // `Vec<ProcessItem>` per tick, within the budget `refresh` already
         // pays cloning items into its rows.)
-        let procs = state_r.borrow().process_list.processes.clone();
+        let mut procs = state_r.borrow().process_list.processes.clone();
+
+        // Top-style (like `top`): the app owns the display order. Sort the
+        // fresh values into the *active* column's order using the shared
+        // `compare_values` arithmetic (the exact `ColumnViewSorter` result,
+        // negated per direction), so the base store arrives at
+        // `refresh_list::refresh` **already in view order** and the
+        // `SortListModel` re-sort below is an identity — no whole-list
+        // commit, which was the residual refresh flicker. When the user
+        // clicks a header, the `SortListModel` re-sorts the base once (one
+        // deliberate commit), and from then on this target order keeps it in
+        // step. Before this change the base store kept the refresh order and
+        // a whole-list re-sort ran on every 0.5–1.5 s tick.
+        let active = view_sorter_r
+            .downcast_ref::<gtk4::ColumnViewSorter>()
+            .and_then(|s| {
+                let col = s.primary_sort_column()?;
+                let sc = sort_columns_r
+                    .iter()
+                    .find(|(p, _)| *p == col.as_ptr() as usize)
+                    .map(|(_, sc)| *sc)?;
+                Some((sc, s.primary_sort_order() == gtk4::SortType::Descending))
+            });
+        if let Some((sc, desc)) = active {
+            ProcessList::sort_in_display_order(&mut procs, sc, desc);
+        }
         refresh_list::refresh(&store_r, &procs);
 
         // `refresh` updated the row *values* in place — it deliberately emits
