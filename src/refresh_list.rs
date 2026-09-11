@@ -5,11 +5,6 @@
 //! `gtk4::ColumnView` flash empty), [`refresh`] diffs the old and new pid
 //! sequence and mutates only the rows whose pid, position, or data changed.
 //!
-//! The caller passes `items` already in the *active sort column's display
-//! order* (top-style, see `ProcessList::sort_in_display_order`), and
-//! [`refresh`] moves the base store into exactly that order — so the
-//! `SortListModel` view on top stays in step and its re-sorts are no-ops.
-//!
 //! Every process keeps **one** [`ProcessRow`] `glib::Object` for its whole
 //! life. A data change writes into that object via
 //! [`ProcessRow::set_item`] (re-emitting the changed properties, so the

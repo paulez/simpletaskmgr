@@ -57,11 +57,6 @@ struct ListView {
     selection: gtk4::SingleSelection,
     cpu_column: gtk4::ColumnViewColumn,
     list_scroll: gtk4::ScrolledWindow,
-    /// Every column's widget pointer mapped to its `SortColumn`, so a
-    /// refresh can resolve the *active* sort (read from the view's sorter)
-    /// and build the top-style display-order target with the shared
-    /// `ProcessList::compare_values` comparator.
-    sort_columns: Vec<(usize, SortColumn)>,
 }
 
 /// The widgets of the detail pane (the value labels, the signal buttons, and
@@ -692,14 +687,6 @@ fn build_process_list() -> ListView {
     list_scroll.set_hexpand(true);
     list_scroll.set_vexpand(true);
 
-    // column pointer → `SortColumn`, for the refresh path's active-sort
-    // lookup (top-style display order, see `make_rebuild`).
-    let sort_columns = COLS
-        .iter()
-        .zip(&columns)
-        .map(|((_, _, _, _, sc), col)| (col.as_ptr() as usize, *sc))
-        .collect();
-
     ListView {
         store,
         column_view,
@@ -707,7 +694,6 @@ fn build_process_list() -> ListView {
         selection,
         cpu_column,
         list_scroll,
-        sort_columns,
     }
 }
 
@@ -856,26 +842,23 @@ fn build_settings_popover() -> SettingsWidgets {
     }
 }
 
-/// Builds the shared "republish the store from `state`" closure: it sorts
-/// the fresh values into the active sort column's order (top-style: the app
-/// owns the display order, see `sort_in_display_order`), updates the row
-/// values in place, restores the scroll offset, re-pins the selection, and
-/// refreshes the detail pane.
+/// Builds the shared "republish the store from `state`" closure: it updates
+/// the row values in place, kicks the `SortListModel` to re-sort, restores the
+/// scroll offset, re-pins the selection, and refreshes the detail pane.
 fn make_rebuild(
     state: Rc<RefCell<State>>,
     list: &ListView,
     dp: &Rc<DetailLabels>,
     adj: gtk4::Adjustment,
+    no_resort_kick: bool,
 ) -> Rc<dyn Fn()> {
     let store_r = list.store.clone();
     let sel_r = list.selection.clone();
     let sort_r = list.sort_model.clone();
-    // column pointer → `SortColumn`, for resolving the active sort below
-    // (top-style display-order target, see `sort_in_display_order`).
-    let sort_columns_r = list.sort_columns.clone();
     let state_r = state.clone();
-    // The view's own sorter, captured so the refresh path can read the
-    // active sort column/direction and build the top-style target order.
+    // The view's own sorter, captured so the refresh path can ask the
+    // `SortListModel` to re-run it after an in-place value update (see the
+    // `changed` call below).
     let view_sorter_r = list
         .column_view
         .sorter()
@@ -910,33 +893,29 @@ fn make_rebuild(
         // clean for the reentrant handler. (The clone is one extra
         // `Vec<ProcessItem>` per tick, within the budget `refresh` already
         // pays cloning items into its rows.)
-        let mut procs = state_r.borrow().process_list.processes.clone();
-
-        // Top-style (like `top`): the app owns the display order. Sort the
-        // fresh values into the *active* column's order using the shared
-        // `compare_values` arithmetic (the exact `ColumnViewSorter` result,
-        // negated per direction), so the base store arrives at
-        // `refresh_list::refresh` **already in view order** and the
-        // `SortListModel` re-sort below is an identity — no whole-list
-        // commit, which was the residual refresh flicker. When the user
-        // clicks a header, the `SortListModel` re-sorts the base once (one
-        // deliberate commit), and from then on this target order keeps it in
-        // step. Before this change the base store kept the refresh order and
-        // a whole-list re-sort ran on every 0.5–1.5 s tick.
-        let active = view_sorter_r
-            .downcast_ref::<gtk4::ColumnViewSorter>()
-            .and_then(|s| {
-                let col = s.primary_sort_column()?;
-                let sc = sort_columns_r
-                    .iter()
-                    .find(|(p, _)| *p == col.as_ptr() as usize)
-                    .map(|(_, sc)| *sc)?;
-                Some((sc, s.primary_sort_order() == gtk4::SortType::Descending))
-            });
-        if let Some((sc, desc)) = active {
-            ProcessList::sort_in_display_order(&mut procs, sc, desc);
-        }
+        let procs = state_r.borrow().process_list.processes.clone();
         refresh_list::refresh(&store_r, &procs);
+
+        // `refresh` updated the row *values* in place — it deliberately emits
+        // no `items-changed` for a stable-position value update (that is the
+        // anti-flicker contract). But `GtkSortListModel` only re-sorts when
+        // the store fires `items-changed` or its sorter emits `changed`; it
+        // *never* watches item properties. Without this kick the list would
+        // freeze at the order captured during the last membership change and
+        // drift away from the CPU% the labels are showing. Firing `changed`
+        // makes the `SortListModel` re-run our comparator; `gtk_column_view_
+        // sorter_set_column` does exactly this on every header click, so this
+        // reuses the same, proven path. If no column is sorted yet the
+        // sorter reports order NONE and the `changed` signal is a no-op.
+        //
+        // Skipped entirely with `--no-resort-kick`: a diagnostic to localize
+        // refresh flicker to the re-sort commit versus the membership-update
+        // path.
+        if no_resort_kick {
+            log::debug!("--no-resort-kick: skipping the refresh re-sort kick");
+        } else {
+            view_sorter_r.changed(gtk4::SorterChange::Different);
+        }
 
         let adj_idle = adj_r.clone();
         let saved_idle = saved;
@@ -981,7 +960,13 @@ fn make_rebuild(
 
 /// Builds the main window and wires the refresh timer.
 /// Call from the `activate` handler (main loop thread only).
-pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
+///
+/// `no_resort_kick` is the `--no-resort-kick` diagnostic flag: when `true`,
+/// the refresh path leaves the display order untouched after in-place value
+/// updates (rows keep their positions until a membership change re-sorts), so
+/// a flicker test can attribute visible flicker to the re-sort commit
+/// versus the membership-update path.
+pub fn build_window(app: &gtk4::Application, no_resort_kick: bool) -> gtk4::ApplicationWindow {
     let state = Rc::new(RefCell::new(State::new()));
 
     let window = gtk4::ApplicationWindow::new(app);
@@ -1043,7 +1028,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // ---- Shared closure: republish the store from state ------------------------
     let dp_labels = Rc::new(detail.labels);
     let adj = list.list_scroll.vadjustment();
-    let rebuild = make_rebuild(state.clone(), &list, &dp_labels, adj);
+    let rebuild = make_rebuild(state.clone(), &list, &dp_labels, adj, no_resort_kick);
 
     // ---- Row selection handler -------------------------------------------------
     {
