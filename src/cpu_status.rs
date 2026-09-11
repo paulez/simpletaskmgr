@@ -110,13 +110,7 @@ pub fn hottest_temp_c(sensor_dir: &Path) -> Option<f64> {
     for entry in entries.flatten() {
         let file_name = entry.file_name().to_string_lossy().into_owned();
         // Match `tempN_input` only — skip `tempN_label`, `tempN_crit`, etc.
-        let Some(index) = file_name.strip_prefix("temp") else {
-            continue;
-        };
-        let Some(index) = index.strip_suffix("_input") else {
-            continue;
-        };
-        if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+        if !is_temp_n(&file_name, "_input") {
             continue;
         }
         if let Some(millideg) = read_f64_file(&entry.path()) {
@@ -127,6 +121,16 @@ pub fn hottest_temp_c(sensor_dir: &Path) -> Option<f64> {
         }
     }
     hottest
+}
+
+/// Whether `name` is a valid `temp<N><suffix>` entry (e.g. `temp1_input`,
+/// `temp2_label`) — `N` is a non-empty run of ASCII digits. Shared by
+/// [`hottest_temp_c`] (suffix `_input`) and [`sensor_label_is_cpu`]
+/// (suffix `_label`) so the digit check has one implementation.
+fn is_temp_n(name: &str, suffix: &str) -> bool {
+    name.strip_prefix("temp")
+        .and_then(|rest| rest.strip_suffix(suffix))
+        .is_some_and(|idx| !idx.is_empty() && idx.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Reads a signed decimal file into an `f64`, e.g. `temp1_input` (millidegrees).
@@ -222,13 +226,8 @@ fn sensor_label_is_cpu(dir: &Path) -> bool {
     };
     for entry in entries.flatten() {
         let file_name = entry.file_name().to_string_lossy().into_owned();
-        let Some(index) = file_name
-            .strip_prefix("temp")
-            .and_then(|rest| rest.strip_suffix("_label"))
-        else {
-            continue;
-        };
-        if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+        // Match `tempN_label` only — skip `tempN_input`, `tempN_crit`, etc.
+        if !is_temp_n(&file_name, "_label") {
             continue;
         }
         if let Ok(label) = std::fs::read_to_string(entry.path()) {
