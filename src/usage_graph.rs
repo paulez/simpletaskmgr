@@ -179,39 +179,18 @@ pub fn sample_x(i: usize, n: usize, fill: usize, capacity: usize, w: f64) -> f64
     w - steps_back * slot
 }
 
-/// Maps a value in `0..=domain_max` to a normalized y position (0..=1) where
-/// `domain_max` is the top (y=0) and `0` is the bottom (y=1). Values are
-/// clamped so they never spill off the chart. A non-positive `domain_max`
-/// maps everything to the bottom (y=1).
+/// Maps a value inside a `(min, max)` band to a normalized y position (0..=1)
+/// where `max` is the top (y=0) and `min` the bottom (y=1). Values are clamped
+/// to the band so they never spill off the chart. A degenerate `min >= max`
+/// (including `max < min`, which is a misuse) maps everything to the bottom,
+/// guarding against a zero-span divisor.
 ///
-/// This generalizes the old percent-only mapping: memory and CPU pass
-/// `domain_max = 100.0`, temperature passes `100.0`, and frequency passes its
-/// own ceiling (`scaling_max_freq` in MHz) so a 3.4 GHz trace sits near the
-/// top rather than 0.85% of the height.
-pub fn frac_of(value: f64, domain_max: f64) -> f64 {
-    if domain_max <= 0.0 {
-        return 1.0;
-    }
-    1.0 - (value.clamp(0.0, domain_max) / domain_max)
-}
-
-/// Maps a 0–100 percent value to a normalized y position (0..=1). Kept as a
-/// thin wrapper over [`frac_of`] (the chart's percent series use it), and it
-/// remains the canonical unit-mapping test target.
-pub fn sample_y_frac(value: f64) -> f64 {
-    frac_of(value, 100.0)
-}
-
-/// Maps a value inside a measured `(min, max)` band to a normalized y
-/// position (0..=1), where `min` is the bottom (y=1) and `max` the top (y=0).
-/// Values are clamped to the band so they never spill off the chart.
-///
-/// This is the generalization of [`frac_of`] for axes that are not anchored
-/// at zero: the auto-scaled temperature and frequency panes pass their
-/// measured `(min, max)` so a 50–85 °C trace spans the full height rather
-/// than sitting in the middle of a 0–100 °C axis. A degenerate `min == max`
-/// maps everything to the bottom (a guard against a zero-span divisor), and a
-/// `max < min` (misused) also resolves to the bottom.
+/// A 0-anchored axis is the `min = 0.0` case: CPU/memory pass `(v, 0.0, 100.0)`,
+/// and frequency its ceiling `(v, 0.0, scaling_max_freq)` so a 3.4 GHz trace
+/// sits near the top rather than 0.85% of the height. The auto-scaled
+/// temperature and frequency panes instead pass their measured `(min, max)` so
+/// a 50–85 °C trace spans the full height rather than the middle of a
+/// 0–100 °C axis.
 pub fn frac_range(value: f64, min: f64, max: f64) -> f64 {
     if max <= min {
         return 1.0;
@@ -519,7 +498,7 @@ impl Default for ChartConfig {
 pub fn axis_tick_mhz(mhz: f64) -> String {
     if mhz >= 1000.0 {
         let ghz = mhz / 1000.0;
-        if (ghz * 10.0).round() == ghz * 10.0 && ghz.fract() == 0.0 {
+        if ghz.fract() == 0.0 {
             format!("{:.0} GHz", ghz)
         } else {
             format!("{:.1} GHz", ghz)
@@ -638,7 +617,7 @@ pub fn shared_floor_domain(series: &[Vec<Option<f64>>], floor: f64) -> (f64, f64
 /// list `paint_disk_pane` and the dual-axis path both render — both the disk
 /// and the metric panes draw their series from the same palette and expose
 /// the same labels, so the tab reads as one coherent set of graphs.
-pub fn legend_items_for_pane(pane: ChartPane, samples: &[Sample]) -> Vec<(String, (u8, u8, u8))> {
+pub fn legend_items_for_pane(pane: ChartPane) -> Vec<(String, (u8, u8, u8))> {
     match pane {
         ChartPane::CpuMem => vec![
             ("CPU".to_string(), palette_color(SERIES_CPU)),
@@ -653,11 +632,11 @@ pub fn legend_items_for_pane(pane: ChartPane, samples: &[Sample]) -> Vec<(String
             ("VRAM".to_string(), palette_color(SERIES_MEM)),
         ],
         ChartPane::GpuTemp => vec![("GPU Temp".to_string(), palette_color(SERIES_TEMP))],
-        ChartPane::DiskThroughput | ChartPane::DiskUtil => disk_names(samples)
-            .into_iter()
-            .enumerate()
-            .map(|(i, label)| (label, palette_color(i)))
-            .collect(),
+        // Disk panes never reach this function: `paint_usage_chart` routes them
+        // to `paint_disk_pane` (which builds its own per-disk legend) before the
+        // dual-axis path below. The arm exists only so the `match` is
+        // exhaustive for the `pub` API; the `Vec::new()` value is never used.
+        ChartPane::DiskThroughput | ChartPane::DiskUtil => Vec::new(),
     }
 }
 
@@ -818,14 +797,8 @@ pub fn axis_tick_mb(mb: f64) -> String {
 /// is their average, so an auto-scaled axis (e.g. a 40–90 °C band) reads as a
 /// real range rather than 0–100.
 fn axis_range_ticks(min: f64, max: f64, format: fn(f64) -> String) -> Vec<(f64, String)> {
-    vec![
-        (frac_range(max, min, max), format(max)),
-        (
-            frac_range((min + max) / 2.0, min, max),
-            format((min + max) / 2.0),
-        ),
-        (frac_range(min, min, max), format(min)),
-    ]
+    let mid = (min + max) / 2.0;
+    vec![(0.0, format(max)), (0.5, format(mid)), (1.0, format(min))]
 }
 
 /// Whether an axis column sits on the left or right edge of the plot.
@@ -1321,7 +1294,7 @@ pub fn paint_usage_chart(
     // Legend band below the plot, drawn by the shared painter and produced by
     // the single pure [`legend_items_for_pane`] so the list we draw and the
     // list the tests observe are the same thing.
-    let items = legend_items_for_pane(pane, samples);
+    let items = legend_items_for_pane(pane);
     paint_legend(
         ctx,
         w,
@@ -1647,8 +1620,7 @@ mod tests {
 
     #[test]
     fn test_legend_items_cpu_mem() {
-        let s = sample(0.0);
-        let items = legend_items_for_pane(ChartPane::CpuMem, &[s]);
+        let items = legend_items_for_pane(ChartPane::CpuMem);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].0, "CPU");
         assert_eq!(items[0].1, palette_color(SERIES_CPU));
@@ -1658,8 +1630,7 @@ mod tests {
 
     #[test]
     fn test_legend_items_freq_temp() {
-        let s = sample(0.0);
-        let items = legend_items_for_pane(ChartPane::FreqTemp, &[s]);
+        let items = legend_items_for_pane(ChartPane::FreqTemp);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].0, "Freq");
         assert_eq!(items[0].1, palette_color(SERIES_FREQ));
@@ -1669,8 +1640,7 @@ mod tests {
 
     #[test]
     fn test_legend_items_gpu_use_vram() {
-        let s = sample(0.0);
-        let items = legend_items_for_pane(ChartPane::GpuUseVram, &[s]);
+        let items = legend_items_for_pane(ChartPane::GpuUseVram);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].0, "Use");
         assert_eq!(items[0].1, palette_color(SERIES_CPU));
@@ -1680,23 +1650,10 @@ mod tests {
 
     #[test]
     fn test_legend_items_gpu_temp() {
-        let s = sample(0.0);
-        let items = legend_items_for_pane(ChartPane::GpuTemp, &[s]);
+        let items = legend_items_for_pane(ChartPane::GpuTemp);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].0, "GPU Temp");
         assert_eq!(items[0].1, palette_color(SERIES_TEMP));
-    }
-
-    #[test]
-    fn test_legend_items_disk() {
-        let mut s = sample(0.0);
-        s.disks = vec![disk("sda", None, None, None), disk("sdb", None, None, None)];
-        let items = legend_items_for_pane(ChartPane::DiskThroughput, &[s]);
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].0, "sda");
-        assert_eq!(items[0].1, palette_color(0));
-        assert_eq!(items[1].0, "sdb");
-        assert_eq!(items[1].1, palette_color(1));
     }
 
     #[test]
@@ -1954,30 +1911,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_sample_y_frac_inverts_and_clamps() {
-        assert_eq!(sample_y_frac(100.0), 0.0);
-        assert_eq!(sample_y_frac(0.0), 1.0);
-        assert_eq!(sample_y_frac(50.0), 0.5);
-        assert_eq!(sample_y_frac(150.0), 0.0, "clamped to top");
-        assert_eq!(sample_y_frac(-20.0), 1.0, "clamped to bottom");
-    }
-
-    #[test]
-    fn test_frac_of_maps_by_domain_and_clamps() {
-        assert!((frac_of(50.0, 100.0) - 0.5).abs() < 1e-9);
-        assert!((frac_of(3200.0, 4000.0) - 0.2).abs() < 1e-9);
-        assert_eq!(frac_of(5000.0, 4000.0), 0.0, "over-domain clamps to top");
-        assert_eq!(frac_of(-10.0, 4000.0), 1.0, "under-domain clamps to bottom");
-        assert_eq!(frac_of(500.0, 0.0), 1.0, "zero domain -> bottom");
-        assert!((sample_y_frac(50.0) - frac_of(50.0, 100.0)).abs() < 1e-9);
-    }
-
-    // ---- measured-band mapping (frac_range + auto_domain) ---------------
+    // ---- value→y mapping (frac_range) -----------------------------------
 
     #[test]
     fn test_frac_range_maps_min_max_and_clamps() {
-        // min is the bottom (y=1), max is the top (y=0).
+        // 0-anchored case (CPU/memory/frequency axes): bottom is 0, top is max.
+        assert_eq!(frac_range(100.0, 0.0, 100.0), 0.0, "max -> top");
+        assert_eq!(frac_range(0.0, 0.0, 100.0), 1.0, "zero -> bottom");
+        assert!(
+            (frac_range(50.0, 0.0, 100.0) - 0.5).abs() < 1e-9,
+            "midpoint"
+        );
+        assert_eq!(frac_range(150.0, 0.0, 100.0), 0.0, "over clamps to top");
+        assert_eq!(frac_range(-20.0, 0.0, 100.0), 1.0, "under clamps to bottom");
+        assert!(
+            (frac_range(3200.0, 0.0, 4000.0) - 0.2).abs() < 1e-9,
+            "freq scale"
+        );
+        assert_eq!(
+            frac_range(5000.0, 0.0, 4000.0),
+            0.0,
+            "freq over-domain clamps"
+        );
+        assert_eq!(frac_range(500.0, 0.0, 0.0), 1.0, "max <= min -> bottom");
+        // Measured band (temperature): min maps to the bottom, max to the top.
         assert_eq!(frac_range(20.0, 20.0, 120.0), 1.0, "min maps to the bottom");
         assert_eq!(frac_range(120.0, 20.0, 120.0), 0.0, "max maps to the top");
         assert!(
@@ -2143,7 +2100,7 @@ mod tests {
         let n = s.len();
         for (i, smp) in s.iter().enumerate() {
             let x = plot.ox + sample_x(i, n, FILL, CAP, plot.w);
-            let y = plot.oy + frac_of(smp.cpu, 100.0) * plot.h;
+            let y = plot.oy + frac_range(smp.cpu, 0.0, 100.0) * plot.h;
             assert!((0.0..=w).contains(&x), "x at sample {i} in [0, {w})");
             assert!((0.0..=h).contains(&y), "y at sample {i} in [0, {h})");
         }
@@ -2165,14 +2122,14 @@ mod tests {
         for (i, v) in vals.iter().enumerate() {
             let v = v.expect("present");
             let x = plot.ox + sample_x(i, vals.len(), FILL, CAP, plot.w);
-            let y = plot.oy + frac_of(v, 4000.0) * plot.h;
+            let y = plot.oy + frac_range(v, 0.0, 4000.0) * plot.h;
             assert!((0.0..=w).contains(&x), "freq x in [0, {w})");
             assert!((0.0..=h).contains(&y), "freq y in [0, {h})");
         }
         let temps: Vec<Option<f64>> = vec![Some(20.0), Some(45.0), Some(75.0), Some(100.0)];
         for v in temps.iter() {
             let v = v.expect("present");
-            let y = plot.oy + frac_of(v, 100.0) * plot.h;
+            let y = plot.oy + frac_range(v, 0.0, 100.0) * plot.h;
             assert!((0.0..=h).contains(&y), "{v} °C must fit in [0, {h})");
         }
     }
@@ -2185,7 +2142,7 @@ mod tests {
         // A lone sample anchors the left edge of the plot (just inside the
         // left gutter), so the trace grows to the right from there.
         let x = plot.ox + sample_x(0, 1, FILL, CAP, plot.w);
-        let y = plot.oy + frac_of(55.0, 100.0) * plot.h;
+        let y = plot.oy + frac_range(55.0, 0.0, 100.0) * plot.h;
         assert_eq!(x, plot.ox, "a lone 'now' sample sits on the left plot edge");
         assert!((0.0..=w).contains(&x), "x in [0, {w}]");
         assert!((0.0..=h).contains(&y));
