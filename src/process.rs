@@ -23,9 +23,10 @@ pub struct TaskMgrProcess {
     /// rounded value are always tied, and the `pid` tie-break keeps their
     /// relative order stable across refreshes — the same combination of a
     /// coarse integer key (`PIDS_TICS_ALL_DELTA`) and stable ordering that
-    /// `top` uses. For a process's first sample (or after a PID-reuse baseline
-    /// reset) this holds the lifetime total `utime + stime`, matching `top`'s
-    /// first-frame behaviour.
+    /// `top` uses. A process's first sample (and after a PID-reuse baseline
+    /// reset) sets this to `0`, so a fresh row starts in the zero group and
+    /// rises to its true bucket once real deltas are measured (see
+    /// `doc/CPU_FIRST_SIGHT_BLANK_LINES.md`).
     pub cpu_ticks: u64,
     /// Share of system memory in percent (`VmRSS / MemTotal * 100`), or
     /// `None` when the RSS can't be read (e.g. another user's kernel thread).

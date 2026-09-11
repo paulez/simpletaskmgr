@@ -104,9 +104,8 @@ pub fn cpu_percent(last: &StatBaseline, total: u64, idle: u64) -> Option<f64> {
 }
 
 /// Computes a system-wide since-boot average CPU% for the very first sample:
-/// `(total - idle)` ticks divided by `uptime_secs * tps`. Mirrors
-/// `CpuTracker::lifetime_avg_percent` (the "first frame" idea) and the disk
-/// graph's `lifetime_rates`.
+/// `(total - idle)` ticks divided by `uptime_secs * tps` — the same "first
+/// frame" idea as the disk graph's `lifetime_rates`.
 ///
 /// `None` when `uptime_secs` is `None` or non-positive — the first sample
 /// can't be computed without a denominator, so the whole thing is *unknown*
@@ -265,7 +264,7 @@ impl SystemMetrics {
     /// CPU% for this interval is computed from the delta since the last call.
     /// The first call has no baseline, so instead of a flat `0.0` it returns
     /// a since-boot lifetime average (`total - idle` ticks / uptime — the
-    /// "first frame" idea behind `CpuTracker::lifetime_avg_percent`) so the
+    /// "first frame" idea, i.e. a real value instead of a flat zero) so the
     /// graph series starts at the left edge with a real value; this maps to
     /// `0.0` only when `/proc/uptime` is unreadable (rare on a real Linux
     /// host), preserving the old behavior in that edge case.
@@ -347,9 +346,8 @@ impl SystemMetrics {
         }
         // The *first* call has no prior baseline. Rather than reporting a
         // flat `0.0` (the old symptom of "CPU stuck at 0 on the first frame"),
-        // return a since-boot lifetime mean — the same "first frame" idea as
-        // `CpuTracker::lifetime_avg_percent` for a freshly-tracked process —
-        // so the graph series starts with a real value at the left edge.
+        // return a since-boot lifetime mean instead, so the graph series
+        // starts with a real value at the left edge.
         // The baseline is recorded unconditionally so the next call measures
         // a proper interval delta.
         let percent = match self.stat_baseline {
@@ -457,10 +455,9 @@ mod tests {
     /// Equivalently: the fraction of the system's wall-clock time spent not
     /// idle. `None` when `uptime_secs` is `None` or non-positive (missing or
     /// bad `/proc/uptime`), when `tps` is `0`, or when `total < idle` (a
-    /// counter regression can't be measured). The `CpuTracker::
-    /// lifetime_avg_percent` analog is `(utime + stime) / elapsed_ticks *
-    /// 100` for a single process; we use `(total - idle)` here for the
-    /// system CPU, which is the same formula.
+    /// counter regression can't be measured). For a single process the
+    /// equivalent would be `(utime + stime) / elapsed_ticks * 100`; for the
+    /// system we use `(total - idle)` with the same structure.
     ///
     /// All cases use `tps = 100` (the common Linux value) and `uptime = 10`:
     /// a wall of `10 × 100 = 1000` ticks. `non_idle` must be `0.5 · 1000`

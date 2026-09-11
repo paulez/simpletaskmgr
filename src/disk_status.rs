@@ -46,9 +46,7 @@ pub fn read_uptime_secs() -> Option<f64> {
 /// All three are `None` when `uptime` is zero or negative (an unreadable
 /// `/proc/uptime`, or a sandbox with no uptime file) — the first sample can't
 /// be computed without a denominator, so the whole row is *unknown* rather
-/// than a spurious zero. Mirrors `CpuTracker::lifetime_avg_percent`, which
-/// also returns `0.0` (here: `None`, to preserve the row's "unknown"
-/// semantics) when its lifetime denominator is non-positive.
+/// than a spurious zero.
 pub fn lifetime_rates(cur: &Counters, uptime: f64) -> (Option<f64>, Option<f64>, Option<f64>) {
     if uptime <= 0.0 {
         return (None, None, None);
@@ -62,8 +60,8 @@ pub fn lifetime_rates(cur: &Counters, uptime: f64) -> (Option<f64>, Option<f64>,
 /// One physical disk's I/O reading.
 ///
 /// The first sample for a device reports a since-boot lifetime rate
-/// (accumulated counters / system uptime — the "first frame" idea behind
-/// `CpuTracker::lifetime_avg_percent`), so the graph series starts at the
+/// (accumulated counters / system uptime — the "first frame" idea, i.e. a
+/// real value instead of a blank), so the graph series starts at the
 /// left edge instead of leaving a blank slot. Subsequent samples measure the
 /// interval since the previous one.
 ///
@@ -242,7 +240,7 @@ impl DiskStatus {
     /// A device seen for the first time records a baseline and reports a
     /// since-boot lifetime rate (accumulated counters / system uptime) so the
     /// graph series starts at the left edge instead of leaving a blank slot —
-    /// the same "first frame" idea as `CpuTracker::lifetime_avg_percent`. If
+    /// the same "first frame" idea as the CPU graph's initial sample. If
     /// `/proc/uptime` is unreadable the first sample falls back to `None`s.
     /// A device whose counters regressed reports `None` rates and refreshes
     /// its baseline. A device that has disappeared is dropped from the

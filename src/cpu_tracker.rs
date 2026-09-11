@@ -3,7 +3,6 @@ use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::disk_status::read_uptime_secs;
 use crate::process::TaskMgrProcess;
 
 #[derive(Clone)]
@@ -43,13 +42,11 @@ impl CpuTracker {
         }
     }
 
-    /// Calculates the CPU sample from tick deltas: the raw tick delta (the
-    /// CPU sort key, see `TaskMgrProcess::cpu_ticks`) and the percent (the
-    /// displayed value).
-    ///
-    /// Returns `None` when the current tick totals are lower than the stored
-    /// baseline, which indicates the PID was reused by a new process and the
-    /// baseline must be reset instead of subtracting (which would underflow).
+    /// Computes a process's CPU% (and tick sort key) using the delta between
+    /// the current and last samples' tick counters. Returns an
+    /// `Option<(ticks, percent)>` so the caller can distinguish a clean
+    /// `Some` result from a PID reuse (a counter that went backwards, which
+    /// would underflow the subtraction).
     fn calculate_cpu_sample(
         recent_utime: u64,
         recent_stime: u64,
@@ -73,34 +70,6 @@ impl CpuTracker {
         Some((total_ticks_delta, (cpu_seconds / time_elapsed) * 100.0))
     }
 
-    /// Computes a process's since-start average CPU% the way `top` does on
-    /// its first frame: `lifetime tick delta / system uptime` (library/pids.c:768-779,
-    /// src/top/top.c:2842-2850). Used instead of 0.0 for a newly-tracked process
-    /// so the list shows a meaningful, non-zero value immediately.
-    ///
-    /// Returns 0.0 if the process's elapsed lifetime is non-positive
-    /// (e.g. /proc/uptime unreadable or stale `starttime`).
-    fn lifetime_avg_percent(
-        utime: u64,
-        stime: u64,
-        start_in_ticks: u64,
-        tps: u64,
-        uptime_secs: f64,
-    ) -> f64 {
-        let total_ticks = match utime.checked_add(stime) {
-            Some(t) => t,
-            None => return 0.0,
-        };
-        // Process age in ticks. `stat.starttime` is already in system ticks;
-        // so process_age_ticks = uptime_ticks - start_in_ticks.
-        let uptime_ticks = (uptime_secs * tps as f64) as u64;
-        let elapsed_ticks = match uptime_ticks.checked_sub(start_in_ticks) {
-            Some(s) if s > 0 => s,
-            _ => return 0.0,
-        };
-        (total_ticks as f64) / (elapsed_ticks as f64) * 100.0
-    }
-
     fn update_history(usage: &mut UsageStats, utime: u64, stime: u64, timestamp: f64) {
         usage.last_ticks = (utime, stime);
         usage.last_timestamp = timestamp;
@@ -108,6 +77,15 @@ impl CpuTracker {
 
     /// Updates `task_mgr_process`'s CPU% (display value) and CPU sort key
     /// (`cpu_ticks`, see its docs) using the tick delta since the last sample.
+    ///
+    /// First sight of a pid (and a pid-reuse baseline reset) set both the
+    /// key and the display to zero: a freshly-appearing process has no
+    /// measured window yet, so it starts in the zero group and rises to its
+    /// true bucket within one or two refreshes. See
+    /// `doc/CPU_FIRST_SIGHT_BLANK_LINES.md` for why we intentionally do
+    /// **not** use `top`'s since-start average here (it sent fresh procs to
+    /// the top of the descending list and triggered whole-list widget
+    /// churn/blank rows in GTK's `SortListModel`).
     ///
     /// Expects a `stat` that was already read (and shared with the caller) so the
     /// `/proc` `stat` file is only opened once per refresh.
@@ -122,7 +100,6 @@ impl CpuTracker {
 
         // Use Instant for high-resolution timing
         let current_timestamp = self.start_instant.elapsed().as_secs_f64();
-        let uptime = read_uptime_secs().unwrap_or(0.0);
 
         match self.process_usage.entry(pid) {
             Occupied(mut occ) => {
@@ -147,26 +124,19 @@ impl CpuTracker {
                 } else {
                     debug!("PID {} was reused, resetting CPU baseline", pid);
                     occ.insert(UsageStats::new(utime, stime, current_timestamp));
-                    // `top` uses the lifetime tick total as a first frame's delta
-                    // for a task not previously seen (`library/pids.c`);
-                    // same here, so the sort key stays a valid tick count.
-                    task_mgr_process.cpu_ticks = utime.saturating_add(stime);
-                    task_mgr_process.cpu_percent =
-                        Self::lifetime_avg_percent(utime, stime, stat.starttime, self.tps, uptime);
+                    // Pid reuse: same treatment as first sight (see above) —
+                    // zero key and zero display until the next measured delta.
+                    task_mgr_process.cpu_ticks = 0;
+                    task_mgr_process.cpu_percent = 0.0;
                 }
             }
             Vacant(vac) => {
                 vac.insert(UsageStats::new(utime, stime, current_timestamp));
-                // First frame: same lifetime-tick sort key as `top` (see
-                // above).
-                task_mgr_process.cpu_ticks = utime.saturating_add(stime);
-                task_mgr_process.cpu_percent = Self::lifetime_avg_percent(
-                    utime,
-                    stime,
-                    stat.starttime,
-                    self.tps,
-                    read_uptime_secs().unwrap_or(0.0),
-                );
+                // First sight: no measured window yet, so start at zero (see
+                // the function docs for why we do not use the lifetime
+                // average here).
+                task_mgr_process.cpu_ticks = 0;
+                task_mgr_process.cpu_percent = 0.0;
             }
         }
     }
@@ -223,59 +193,36 @@ mod tests {
         }
     }
 
-    /// `lifetime_avg_percent` = ticks used over the process's age. Zero for a
-    /// non-positive age and for a u64 tick-sum overflow.
-    #[rstest]
-    #[case::twenty_percent(800, 1200, 90_000, 100, 1000.0, 20.0)]
-    #[case::nonpositive_age(100, 100, 200_000, 100, 1000.0, 0.0)]
-    #[case::zero_uptime(100, 100, 0, 100, 0.0, 0.0)]
-    #[case::overflow(u64::MAX, 1, 90_000, 100, 1000.0, 0.0)]
-    fn test_lifetime_avg_percent(
-        #[case] utime: u64,
-        #[case] stime: u64,
-        #[case] starttime_ticks: u64,
-        #[case] tps: u64,
-        #[case] uptime: f64,
-        #[case] expected: f64,
-    ) {
-        assert_eq!(
-            CpuTracker::lifetime_avg_percent(utime, stime, starttime_ticks, tps, uptime),
-            expected
-        );
-    }
-
-    /// `update_process_cpu` wires the sort key to what `top` does: on first
-    /// sight the lifetime tick total (its "first frame" delta), then the
-    /// per-interval delta; when a baseline reset happens (PID reuse) it falls
-    /// back to the lifetime total again instead of an underflowed delta.
+    /// `update_process_cpu` starts a freshly-seen pid at a zero key/percent
+    /// (no measured window yet), then uses the per-interval delta, and gives
+    /// the same zero treatment on a baseline reset (PID reuse). See
+    /// `doc/CPU_FIRST_SIGHT_BLANK_LINES.md`.
     #[test]
-    fn test_update_process_cpu_sets_ticks_key() {
+    fn test_update_process_cpu_first_sight_and_reuse_zero() {
         let stat = procfs::process::Process::myself().unwrap().stat().unwrap();
-        let lifetime = stat.utime.saturating_add(stat.stime);
         let mut tracker = CpuTracker::new();
-        let mut proc = TaskMgrProcess::new("probe".to_string(), 7, 0, "u".to_string(), 0.0);
+        let mut proc = TaskMgrProcess::new("probe".to_string(), 7, 0, "u".to_string(), 99.0);
 
-        // First sight: lifetime total, and the displayed percent is the
-        // matching since-start average.
+        // First sight: zero key, zero display — the row lands in the zero
+        // group and rises once a real delta is measured.
         tracker.update_process_cpu(&mut proc, &stat);
-        assert_eq!(proc.cpu_ticks, lifetime);
-        assert!(
-            proc.cpu_percent >= 0.0,
-            "lifetime average for a live process"
-        );
+        assert_eq!(proc.cpu_ticks, 0);
+        assert_eq!(proc.cpu_percent, 0.0);
 
         // Second sample with an unchanged tick counter: zero delta, zero key.
         tracker.update_process_cpu(&mut proc, &stat);
         assert_eq!(proc.cpu_ticks, 0);
         assert_eq!(proc.cpu_percent, 0.0);
 
-        // PID reuse: a fresh baseline larger than the live counters means the
-        // next delta would underflow, so reset and use the lifetime total.
+        // PID reuse: a stale baseline larger than the live counters means the
+        // next delta would underflow, so reset and zero the key/percent again
+        // (not an underflowed delta, and not the lifetime total — see doc).
         tracker
             .process_usage
             .insert(7, UsageStats::new(1_000_000, 1_000_000, 1.0));
         tracker.update_process_cpu(&mut proc, &stat);
-        assert_eq!(proc.cpu_ticks, lifetime);
+        assert_eq!(proc.cpu_ticks, 0);
+        assert_eq!(proc.cpu_percent, 0.0);
     }
 
     /// `evict_dead_processes` drops baselines whose pid is no longer alive.
