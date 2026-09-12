@@ -1,40 +1,17 @@
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::rc::Rc;
-
-use gtk4::gio::prelude::*;
 use gtk4::prelude::*;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use crate::config::RefreshInterval;
 use crate::metrics::SystemMetrics;
 use crate::process::ProcessItem;
 use crate::process_list::ProcessList;
-use crate::process_row::ProcessRow;
-use crate::refresh_list;
+use crate::process_view::ProcessView;
 use crate::settings::{settings_path, UserSettings};
 use crate::signal::Signal;
 use crate::usage_graph::{paint_usage_chart, ChartConfig, ChartPane};
-use crate::SortColumn;
 
 const CSS: &str = include_str!("ui.css");
-
-/// The widgets of the detail pane, kept addressable by name so the pane can
-/// be updated from anywhere without tuple index bookkeeping. `pane` is the
-/// `ScrolledWindow` carrying the whole pane so it can be hidden to let the
-/// list expand to full width when nothing is selected.
-#[derive(Clone)]
-struct DetailLabels {
-    pane: gtk4::ScrolledWindow,
-    pid: gtk4::Label,
-    name: gtk4::Label,
-    uid: gtk4::Label,
-    username: gtk4::Label,
-    cpu: gtk4::Label,
-    mem: gtk4::Label,
-    disk_read: gtk4::Label,
-    disk_write: gtk4::Label,
-    status: gtk4::Label,
-}
 
 /// The widgets the `Settings` popover exposes so its change handlers and the
 /// reset path can address them without name lookup.
@@ -44,34 +21,6 @@ struct SettingsWidgets {
     list: gtk4::ListBox,
     rows: Vec<gtk4::ListBoxRow>,
     reset: gtk4::Button,
-}
-
-/// The `ColumnView`-backed process list and the model chain in front of it,
-/// kept addressable so the refresh/timer paths can drive the store and ask the
-/// view to re-sort. `store` holds the concrete `ListStore<ProcessRow>` — both
-/// `refresh_list::refresh` and the `SortListModel`/`SingleSelection` models
-/// built on top of it.
-struct ListView {
-    store: gtk4::gio::ListStore,
-    column_view: gtk4::ColumnView,
-    sort_model: gtk4::SortListModel,
-    selection: gtk4::SingleSelection,
-    cpu_column: gtk4::ColumnViewColumn,
-    list_scroll: gtk4::ScrolledWindow,
-    /// Each column's `as_ptr()` mapped to its `SortColumn`, so the refresh
-    /// path (F1: skip the re-sort kick when the order is unchanged) can
-    /// resolve the active header sort by pointer alone.
-    sort_columns: HashMap<usize, SortColumn>,
-}
-
-/// The widgets of the detail pane (the value labels, the signal buttons, and
-/// the pane's `ScrolledWindow`), so the selection/signal/refresh paths can
-/// update it without holding a list of widget clones.
-struct DetailPane {
-    scroll: gtk4::ScrolledWindow,
-    labels: DetailLabels,
-    sighup: gtk4::Button,
-    sigkill: gtk4::Button,
 }
 
 pub struct State {
@@ -208,10 +157,6 @@ impl State {
         self.metrics.push_sample(gpu);
     }
 
-    fn find(&self, pid: i32) -> Option<&ProcessItem> {
-        self.process_list.processes.iter().find(|p| p.pid == pid)
-    }
-
     /// Sets the show-all filter and persists it. Caller is responsible for
     /// refreshing + republishing so the change takes effect immediately.
     pub fn set_show_all(&mut self, show_all: bool) {
@@ -261,14 +206,6 @@ impl State {
             },
             None => KillStatus::NoSelection,
         }
-    }
-}
-
-fn detail_status(status: &KillStatus) -> String {
-    match status {
-        KillStatus::Sent => "Sent.".to_string(),
-        KillStatus::NoSelection => "No process selected.".to_string(),
-        KillStatus::Failed(m) => m.clone(),
     }
 }
 
@@ -447,355 +384,6 @@ fn build_disk_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::Dra
     (row, vec![left, right])
 }
 
-/// One shared `SignalListItemFactory` for a text column: a single `Label`
-/// whose `label` is property-bound to the row's `ProcessRow` string property
-/// (`prop_name`). Re-texting a cell on refresh is a pure `g_object_notify`.
-///
-/// GTK does not own the `glib::Binding`: dropping the Rust handle does not
-/// disconnect the C-side binding (see `doc/GTK_REFRESH_BUG.md`). The factory
-/// therefore parks the live binding on the label (via
-/// [`crate::cell_label::park`], a thread-local registry that avoids the
-/// `unsafe` of `set_data`/`steal_data`), and retires it on recycle
-/// ([`crate::cell_label::take_and_unbind`]) — both in `connect_unbind`
-/// (the happy path) and as a defensive tripwire at the top of
-/// `connect_bind` (the "persistent wrong-name" bug's signature: a
-/// previous `unbind` never ran, leaving a live stale binding that may
-/// `notify` into the recycled label).
-fn make_cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
-    let f = gtk4::SignalListItemFactory::new();
-    f.connect_setup(move |_f, li| {
-        let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
-        let label = gtk4::Label::new(None);
-        label.set_xalign(0.0);
-        li.set_child(Some(&label));
-    });
-    f.connect_unbind(move |_f, li| {
-        let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
-        let Some(child) = li.child() else {
-            return;
-        };
-        let Ok(label) = child.downcast::<gtk4::Label>() else {
-            return;
-        };
-        // Happy path: retire the parking (and disconnect the binding) so
-        // the recycled label no longer holds a live binding to its
-        // previous source row.
-        let key = label.as_ptr() as usize;
-        crate::cell_label::take_and_unbind(key);
-    });
-    f.connect_bind(move |_f, li| {
-        let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
-        let label = li
-            .child()
-            .expect("this row has a child")
-            .downcast::<gtk4::Label>()
-            .expect("this row's child is a label");
-        let row = li
-            .item()
-            .expect("a row object")
-            .downcast::<ProcessRow>()
-            .expect("a ProcessRow");
-        let key = label.as_ptr() as usize;
-        // Defensive tripwire: a healthy factory always retires the previous
-        // binding in `connect_unbind`, so a parking still alive here means
-        // the previous unbind for this recycled slot did not run — the
-        // stale source's binding could still `notify` into and overwrite
-        // the new one. Retire it (the desync source) and `warn!` the event
-        // so a repro log can confirm this is the path that produced a
-        // persistent wrong-name row. A fresh label has no parking here.
-        if crate::cell_label::take_and_unbind(key).is_some() {
-            log::warn!(
-                "cell recycling: a stale binding to a previous row \
-                 (property: {prop_name}) was still parked on this label \
-                 — the previous unbind did not run; retired the stale \
-                 source before binding a new row",
-            );
-        }
-        // `g_object_bind_property` auto-drops the binding when either the
-        // row object or this cell widget is destroyed. `sync_create`
-        // copies the current value into the label immediately (the factory
-        // may run `setup`/`bind` in either order, so we do not rely on
-        // the `notify` order). Park the binding so a later
-        // `connect_unbind` (and the defensive tripwire at the next
-        // `connect_bind`) can retire the live binding by its `glib::Binding`
-        // rather than by a weak reference.
-        let binding = row
-            .bind_property(prop_name, &label, "label")
-            .sync_create()
-            .build();
-        crate::cell_label::park(key, binding);
-    });
-    f
-}
-
-/// Per-column `Sorter` that drives the native header: a header click asks the
-/// view to sort by that column, and the `SortListModel` re-orders the rows.
-/// All columns share one comparator source of truth —
-/// `ProcessList::compare_values` — so the header ordering can never disagree
-/// with the data.
-///
-/// The comparator also reports whether this column is currently sorted
-/// descending (read live from the view's sorter), which lets the optional-value
-/// columns keep a missing value pinned to the bottom of the list in either
-/// direction (see `ProcessList::compare_values`).
-fn make_column_sorter(
-    sort_col: SortColumn,
-    column: &gtk4::ColumnViewColumn,
-    view_sorter: &gtk4::Sorter,
-) -> gtk4::CustomSorter {
-    let column_ptr = column.as_ptr() as usize;
-    let view_sorter = view_sorter.clone();
-    gtk4::CustomSorter::new(move |a: &glib::Object, b: &glib::Object| {
-        let ra = a.downcast_ref::<ProcessRow>().expect("a ProcessRow");
-        let rb = b.downcast_ref::<ProcessRow>().expect("a ProcessRow");
-        let ia = ra.item();
-        let ib = rb.item();
-        // `true` only when this very column is the active, descending primary
-        // sort; `false` otherwise (ascending, or the sort has moved elsewhere).
-        let descending = view_sorter
-            .downcast_ref::<gtk4::ColumnViewSorter>()
-            .and_then(|cs| {
-                let pc = cs.primary_sort_column()?;
-                (pc.as_ptr() as usize == column_ptr).then_some(cs)
-            })
-            .map(|cs| cs.primary_sort_order() == gtk4::SortType::Descending)
-            .unwrap_or(false);
-        ProcessList::compare_values(&ia, &ib, sort_col, descending).into()
-    })
-}
-
-/// Builds the `ColumnView`-backed process list and its model chain:
-/// `ListStore<ProcessRow> -> SortListModel -> SingleSelection -> ColumnView`.
-///
-/// The header row is the one `GtkColumnView` draws natively: it is
-/// interactive because every column carries a `Sorter` and the view's
-/// `SortListModel` carries the view's own `ColumnViewSorter`. Clicking a
-/// header cell re-sorts exactly that column (and toggles direction on a
-/// second click) entirely inside GTK — no app-side sort state, no custom
-/// header widgets. Columns are resizable via header drag.
-///
-/// The store is spliced in place by `refresh_list::refresh` (the
-/// anti-flicker contract), and the `SortListModel` re-sorts it with a
-/// single remove+re-add `items-changed` signal on a header click — GTK
-/// keeps every row object (and its widgets) alive across both.
-fn build_process_list() -> ListView {
-    let store = gtk4::gio::ListStore::new::<ProcessRow>();
-    let column_view = gtk4::ColumnView::builder().build();
-    // `gtk_column_view_sort_by_column` sorts through this model, and the
-    // header only becomes clickable once the view reports a sorter: the
-    // `ColumnViewSorter` GTK hands out when the view is attached to a model.
-    let sort_model = gtk4::SortListModel::new(
-        Some(store.clone()),
-        Some(column_view.sorter().expect("ColumnView exposes a sorter")),
-    );
-    let selection = gtk4::SingleSelection::new(Some(sort_model.clone()));
-    // `GtkSingleSelection` autoselects the first row by default — so a row is
-    // already selected when the list is first populated. Disable it so
-    // launching shows no selection and the list takes the full width.
-    selection.set_autoselect(false);
-
-    // (title, property of `ProcessRow`, fixed width in px, expand?, sort
-    // column) — column widths keep the numeric columns compact and let the
-    // Name column absorb the remaining width. Every column is user-resizable
-    // by dragging its header.
-    const COLS: [(&str, &str, i32, bool, SortColumn); 7] = [
-        ("PID", "pid", 70, false, SortColumn::Pid),
-        ("User", "username", 90, false, SortColumn::Username),
-        ("Name", "name", -1, true, SortColumn::Name),
-        ("CPU%", "cpu", 70, false, SortColumn::CpuPercent),
-        ("MEM%", "mem", 70, false, SortColumn::MemPercent),
-        ("Disk R", "disk-read", 80, false, SortColumn::DiskRead),
-        ("Disk W", "disk-write", 80, false, SortColumn::DiskWrite),
-    ];
-
-    // The view's own sorter, created once here so each column's comparator can
-    // read the *current* primary sort direction (to keep missing values pinned
-    // to the list bottom in either direction). The same object is reused as the
-    // `SortListModel`'s sorter (see the capture below).
-    let view_sorter = column_view.sorter().expect("ColumnView exposes a sorter");
-
-    let mut columns: Vec<gtk4::ColumnViewColumn> = Vec::new();
-    for (title, prop, width, expand, sort_col) in COLS.iter() {
-        let col = gtk4::ColumnViewColumn::new(Some(title), Some(make_cell_factory(prop)));
-        if *expand {
-            col.set_expand(true);
-        } else if *width > 0 {
-            col.set_fixed_width(*width);
-        }
-        col.set_resizable(true);
-        col.set_sorter(Some(&make_column_sorter(*sort_col, &col, &view_sorter)));
-        column_view.append_column(&col);
-        columns.push(col);
-    }
-    // The CPU% column, kept so the initial sort can address it.
-    let cpu_column = columns[3].clone();
-    column_view.set_model(Some(&selection));
-
-    // GTK starts every *freshly activated* column ascending (the header-click
-    // path sets `inverted = FALSE` for a new column). For a process list that
-    // is backwards on the numeric columns: the interesting value (most CPU,
-    // most RAM, fastest I/O) belongs at the top. Flip a first-time-activated
-    // numeric column to descending, while leaving PID/User/Name ascending and
-    // keeping the second-click toggle. We watch the view sorter's `changed`
-    // and re-issue `sort_by_column` (which honors the direction explicitly)
-    // only for a column that newly became primary and is still ascending; a
-    // toggle or a sort refresh leaves the primary unchanged and is left alone.
-    use std::collections::HashSet;
-    let numeric_ptrs: HashSet<usize> = COLS
-        .iter()
-        .zip(&columns)
-        .filter(|(spec, _)| {
-            matches!(
-                spec.4,
-                SortColumn::CpuPercent
-                    | SortColumn::MemPercent
-                    | SortColumn::DiskRead
-                    | SortColumn::DiskWrite
-            )
-        })
-        .map(|(_, col)| col.as_ptr() as usize)
-        .collect();
-
-    let prev_primary = Rc::new(RefCell::new(None::<usize>));
-    let flipping = Rc::new(RefCell::new(false));
-    let cv = column_view.clone();
-    view_sorter.connect_changed(move |sorter, _change| {
-        // `sort_by_column` below re-emits `changed`; ignore that re-entrancy.
-        if *flipping.borrow() {
-            return;
-        }
-        let Some(s) = sorter.downcast_ref::<gtk4::ColumnViewSorter>() else {
-            return;
-        };
-        let Some(col) = s.primary_sort_column() else {
-            *prev_primary.borrow_mut() = None;
-            return;
-        };
-        let ptr = col.as_ptr() as usize;
-        let new_primary = Some(ptr) != *prev_primary.borrow();
-        *prev_primary.borrow_mut() = Some(ptr);
-        if new_primary
-            && numeric_ptrs.contains(&ptr)
-            && s.primary_sort_order() == gtk4::SortType::Ascending
-        {
-            *flipping.borrow_mut() = true;
-            cv.sort_by_column(Some(&col), gtk4::SortType::Descending);
-            *flipping.borrow_mut() = false;
-        }
-    });
-
-    column_view.add_css_class("process-list");
-
-    let list_scroll = gtk4::ScrolledWindow::new();
-    list_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
-    list_scroll.set_child(Some(&column_view));
-    list_scroll.set_hexpand(true);
-    list_scroll.set_vexpand(true);
-
-    ListView {
-        store,
-        column_view,
-        sort_model,
-        selection,
-        cpu_column,
-        list_scroll,
-        sort_columns: COLS
-            .iter()
-            .zip(&columns)
-            .map(|(spec, col)| (col.as_ptr() as usize, spec.4))
-            .collect(),
-    }
-}
-
-/// Builds the process detail pane: the value labels, the SIGHUP/SIGKILL
-/// buttons, and the pane's `ScrolledWindow`. The pane starts hidden so the
-/// list takes the full width at launch (selection re-shows it via
-/// `apply_detail`).
-fn build_detail_pane() -> DetailPane {
-    let detail_box = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-    detail_box.add_css_class("detail-pane");
-
-    let title = gtk4::Label::new(Some("Process Details"));
-    title.add_css_class("detail-title");
-    detail_box.append(&title);
-
-    fn mk_detail(initial: &str) -> gtk4::Label {
-        let l = gtk4::Label::new(Some(initial));
-        l.add_css_class("detail-row");
-        l.set_xalign(0.0);
-        l
-    }
-    let d_pid = mk_detail("PID: —");
-    let d_name = mk_detail("Name: —");
-    let d_uid = mk_detail("UID: —");
-    let d_user = mk_detail("Username: —");
-    let d_cpu = mk_detail("CPU%: —");
-    let d_mem = mk_detail("MEM%: —");
-    let d_disk_read = mk_detail("Disk read: —");
-    let d_disk_write = mk_detail("Disk write: —");
-    for w in [
-        &d_pid,
-        &d_name,
-        &d_uid,
-        &d_user,
-        &d_cpu,
-        &d_mem,
-        &d_disk_read,
-        &d_disk_write,
-    ] {
-        detail_box.append(w);
-    }
-
-    let btn_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-    btn_box.add_css_class("detail-buttons");
-    let b_sighup = gtk4::Button::new();
-    b_sighup.set_label("Send SIGHUP");
-    b_sighup.add_css_class("signal-btn");
-    b_sighup.add_css_class("suggested-action");
-    let b_sigkill = gtk4::Button::new();
-    b_sigkill.set_label("Send SIGKILL");
-    b_sigkill.add_css_class("signal-btn");
-    b_sigkill.add_css_class("destructive-action");
-    btn_box.append(&b_sighup);
-    btn_box.append(&b_sigkill);
-    detail_box.append(&btn_box);
-
-    let d_status = gtk4::Label::new(Some(""));
-    d_status.add_css_class("detail-status");
-    d_status.set_xalign(0.0);
-    d_status.set_wrap(true);
-    detail_box.append(&d_status);
-
-    let detail_scroll = gtk4::ScrolledWindow::new();
-    detail_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
-    detail_scroll.set_child(Some(&detail_box));
-    detail_scroll.set_hexpand(true);
-    detail_scroll.set_vexpand(true);
-    // Nothing is selected at launch — start with the pane hidden so the
-    // list uses the full width (selection re-shows it via `apply_detail`).
-    detail_scroll.set_visible(false);
-
-    let labels = DetailLabels {
-        pane: detail_scroll.clone(),
-        pid: d_pid,
-        name: d_name,
-        uid: d_uid,
-        username: d_user,
-        cpu: d_cpu,
-        mem: d_mem,
-        disk_read: d_disk_read,
-        disk_write: d_disk_write,
-        status: d_status,
-    };
-
-    DetailPane {
-        scroll: detail_scroll,
-        labels,
-        sighup: b_sighup,
-        sigkill: b_sigkill,
-    }
-}
-
 /// Builds the `Settings` button and its popover (show-all toggle, refresh
 /// interval list, and reset button).
 fn build_settings_popover() -> SettingsWidgets {
@@ -852,193 +440,9 @@ fn build_settings_popover() -> SettingsWidgets {
     }
 }
 
-/// F1 refresh gate: `true` when the `SortListModel`'s *current* row order
-/// differs from the order a re-sort (active header column, live direction)
-/// would produce from the rows' *current* values.
-///
-/// `GtkSortListModel::sort_func` breaks comparator ties by item-pointer
-/// order (see `gtksortlistmodel.c`'s `sort_func`), so the replica sorts the
-/// rows stably in two passes: ascending pointer order first, then by
-/// `compare_values` with GTK's own negation applied for a descending
-/// primary. Identical pid sequences mean the re-sort is an identity, and
-/// its whole-list commit — the source of the residual refresh flicker — is
-/// safe to skip.
-fn view_order_changed(
-    sort_model: &gtk4::SortListModel,
-    view_sorter: &gtk4::Sorter,
-    sort_columns: &HashMap<usize, SortColumn>,
-) -> bool {
-    let Some(cs) = view_sorter.downcast_ref::<gtk4::ColumnViewSorter>() else {
-        return true;
-    };
-    let Some(col) = cs.primary_sort_column() else {
-        // No active sort: the model passes rows through untouched, and a
-        // kick would be a no-op anyway.
-        return false;
-    };
-    let Some(sort_col) = sort_columns.get(&(col.as_ptr() as usize)) else {
-        return true;
-    };
-    let descending = cs.primary_sort_order() == gtk4::SortType::Descending;
-
-    let n = sort_model.n_items();
-    let mut current = Vec::with_capacity(n as usize);
-    let mut rows: Vec<(usize, ProcessItem)> = Vec::with_capacity(n as usize);
-    for i in 0..n {
-        let Some(o) = sort_model.item(i) else {
-            continue;
-        };
-        let row = o.downcast::<ProcessRow>().expect("a ProcessRow");
-        current.push(row.pid());
-        rows.push((row.as_ptr() as usize, row.item()));
-    }
-
-    rows.sort_by_key(|r| r.0);
-    rows.sort_by(|a, b| {
-        let o = ProcessList::compare_values(&a.1, &b.1, *sort_col, descending);
-        if descending {
-            o.reverse()
-        } else {
-            o
-        }
-    });
-
-    // The kick is only needed when the re-sort would actually move rows.
-    current != rows.iter().map(|(_, item)| item.pid).collect::<Vec<_>>()
-}
-
-/// Builds the shared "republish the store from `state`" closure: it updates
-/// the row values in place, kicks the `SortListModel` to re-sort, restores the
-/// scroll offset, re-pins the selection, and refreshes the detail pane.
-fn make_rebuild(
-    state: Rc<RefCell<State>>,
-    list: &ListView,
-    dp: &Rc<DetailLabels>,
-    adj: gtk4::Adjustment,
-    no_resort_kick: bool,
-) -> Rc<dyn Fn()> {
-    let store_r = list.store.clone();
-    let sel_r = list.selection.clone();
-    let sort_r = list.sort_model.clone();
-    let state_r = state.clone();
-    // The view's own sorter, captured so the refresh path can ask the
-    // `SortListModel` to re-run it after an in-place value update (see the
-    // `changed` call below).
-    let view_sorter_r = list
-        .column_view
-        .sorter()
-        .expect("ColumnView exposes a sorter");
-    let dp_r = dp.clone();
-    let adj_r = adj.clone();
-    let sort_columns_r = list.sort_columns.clone();
-    Rc::new(move || {
-        // Remember the currently selected pid (if any) so the highlight can be
-        // re-pinned to the same process after the refresh, in case GTK
-        // dropped or displaced it while mutating the store.
-        let prev_pid: Option<i32> = sel_r
-            .selected_item()
-            .as_ref()
-            .and_then(|o| o.downcast_ref::<ProcessRow>())
-            .map(|r| r.pid());
-
-        // A refresh changes the store's size, and `GtkAdjustment` clamps
-        // `value` to the valid range whenever `upper`/`page` change at layout
-        // time (which is *after* this synchronous call returns). Save the
-        // current offset, and on the next main-loop tick — once GTK has
-        // re-allocated the rows and applied the clamp — restore it if it
-        // drifted. The adjustment auto-clamps to the valid range anyway.
-        let saved = adj_r.value();
-
-        // Clone the process list out *before* the GTK call: `refresh` mutates
-        // the store via `g_list_store_splice` / `insert` / `append`, and those
-        // synchronously re-emit `selected-notify` on the `SingleSelection`.
-        // If we still held a borrow of `state` here, that re-entry's
-        // `borrow_mut` (the selection handler) would hit `RefCell already
-        // borrowed` — and, being inside a GTK trampoline that cannot unwind,
-        // abort the process. Releasing the borrow first keeps the `RefCell`
-        // clean for the reentrant handler. (The clone is one extra
-        // `Vec<ProcessItem>` per tick, within the budget `refresh` already
-        // pays cloning items into its rows.)
-        let procs = state_r.borrow().process_list.processes.clone();
-        refresh_list::refresh(&store_r, &procs);
-
-        // `refresh` updated the row *values* in place — it deliberately emits
-        // no `items-changed` for a stable-position value update (that is the
-        // anti-flicker contract). But `GtkSortListModel` only re-sorts when
-        // the store fires `items-changed` or its sorter emits `changed`; it
-        // *never* watches item properties. Without this kick the list would
-        // freeze at the order captured during the last membership change and
-        // drift away from the CPU% the labels are showing. Firing `changed`
-        // makes the `SortListModel` re-run our comparator; `gtk_column_view_
-        // sorter_set_column` does exactly this on every header click, so this
-        // reuses the same, proven path.
-        //
-        // F1 gate: the kick's whole-list commit is the residual refresh
-        // flicker (it recycles every row widget), so it fires *only* when
-        // the visible order actually changed. A value-only refresh on an
-        // unchanged order commits nothing and the list stays pixel-stable.
-        //
-        // Skipped entirely with `--no-resort-kick`: a diagnostic to localize
-        // refresh flicker to the re-sort commit versus the membership-update
-        // path.
-        if no_resort_kick {
-            log::debug!("--no-resort-kick: skipping the refresh re-sort kick");
-        } else if view_order_changed(&sort_r, &view_sorter_r, &sort_columns_r) {
-            view_sorter_r.changed(gtk4::SorterChange::Different);
-        } else {
-            log::debug!("refresh: visible order unchanged, skipping the re-sort kick");
-        }
-
-        let adj_idle = adj_r.clone();
-        let saved_idle = saved;
-        glib::idle_add_local(move || {
-            if (adj_idle.value() - saved_idle).abs() > 0.5 {
-                adj_idle.set_value(saved_idle);
-            }
-            glib::ControlFlow::Break
-        });
-
-        if let Some(p) = prev_pid {
-            let still_selected = sel_r
-                .selected_item()
-                .as_ref()
-                .is_some_and(|o| o.downcast_ref::<ProcessRow>().is_some_and(|r| r.pid() == p));
-            if !still_selected {
-                // The selection wraps the *sorted* model, so resolve the
-                // position in the `SortListModel`'s space, not the store's.
-                if let Some(i) = (0..sort_r.n_items()).find(|i| {
-                    sort_r
-                        .item(*i)
-                        .and_then(|o| o.downcast::<ProcessRow>().ok())
-                        .is_some_and(|row| row.pid() == p)
-                }) {
-                    // The row's position changed (or its object was
-                    // replaced) and the highlight dropped — re-pin it. We
-                    // deliberately skip the work when the highlight is still
-                    // on the same pid: re-invoking `set_selected` on every
-                    // refresh would fire the `selected` change and make the
-                    // `ColumnView` re-scroll the row into view, which is what
-                    // made the list jump around. (If the *position* of the
-                    // selected row changes, we do re-pin it here and accept
-                    // the one-time scroll as the price of keeping the
-                    // highlight glued to the process.)
-                    sel_r.set_selected(i);
-                }
-            }
-        }
-        apply_detail(&dp_r, &state_r, state_r.borrow().selected_pid);
-    })
-}
-
 /// Builds the main window and wires the refresh timer.
 /// Call from the `activate` handler (main loop thread only).
-///
-/// `no_resort_kick` is the `--no-resort-kick` diagnostic flag: when `true`,
-/// the refresh path leaves the display order untouched after in-place value
-/// updates (rows keep their positions until a membership change re-sorts), so
-/// a flicker test can attribute visible flicker to the re-sort commit
-/// versus the membership-update path.
-pub fn build_window(app: &gtk4::Application, no_resort_kick: bool) -> gtk4::ApplicationWindow {
+pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     let state = Rc::new(RefCell::new(State::new()));
 
     let window = gtk4::ApplicationWindow::new(app);
@@ -1076,8 +480,12 @@ pub fn build_window(app: &gtk4::Application, no_resort_kick: bool) -> gtk4::Appl
     }
     root.append(&switcher);
     root.append(&stack);
-    let list = build_process_list();
-    let detail = build_detail_pane();
+    // ---- Body: the process list + detail pane, one self-contained widget ----
+    // Sorting, selection, row recycling, and the detail pane are all owned by
+    // the view (natively in GTK); the app drives it with one `update` per tick.
+    let view = Rc::new(ProcessView::new());
+    root.append(view.widget());
+
     let settings = build_settings_popover();
 
     // ---- Header bar (titlebar) with the trailing Settings control ---------------
@@ -1085,37 +493,27 @@ pub fn build_window(app: &gtk4::Application, no_resort_kick: bool) -> gtk4::Appl
     header_bar.pack_end(&settings.button);
     window.set_titlebar(Some(&header_bar));
 
-    // ---- Body row (list | detail) ---------------------------------------------
-    let body = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-    body.add_css_class("body");
-    body.append(&list.list_scroll);
-    body.append(&detail.scroll);
+    // ---- Refresh closure: one tick = state refresh + one view update -----------
+    let rebuild: Rc<dyn Fn()> = {
+        let state_u = state.clone();
+        let view_u = view.clone();
+        Rc::new(move || {
+            state_u.borrow_mut().refresh();
+            // Clone the snapshot out *before* the GTK call and drop the borrow
+            // first: `update` may fire the selection callback during its model
+            // commit, and the callback below borrows `state` (spec B2).
+            let procs = state_u.borrow().process_list.processes.clone();
+            view_u.update(&procs);
+        })
+    };
 
-    // ---- Assemble root ---------------------------------------------------------
-    // The graph `Stack` (CPU / Mem, Disk I/O, and GPU when present) sits on top
-    // and the body (list | detail) directly below it; the Settings control lives
-    // in the header bar, so nothing wedges a row between the graph and the list.
-    root.append(&body);
-
-    // ---- Shared closure: republish the store from state ------------------------
-    let dp_labels = Rc::new(detail.labels);
-    let adj = list.list_scroll.vadjustment();
-    let rebuild = make_rebuild(state.clone(), &list, &dp_labels, adj, no_resort_kick);
-
-    // ---- Row selection handler -------------------------------------------------
+    // ---- Selection -> app state -------------------------------------------------
+    // The view owns the detail pane; the app keeps the selected PID (spec D4)
+    // for the kill path. Spec D5: the SIGHUP/SIGKILL buttons are out of scope.
     {
         let state_s = state.clone();
-        let dp_s = dp_labels.clone();
-        let sel_n = list.selection.clone();
-        let sel_inner = sel_n.clone();
-        sel_n.connect_selected_notify(move |_| {
-            let pid = sel_inner
-                .selected_item()
-                .as_ref()
-                .and_then(|o| o.downcast_ref::<ProcessRow>())
-                .map(|r| r.item().pid);
+        view.connect_selection_changed(move |pid| {
             state_s.borrow_mut().selected_pid = pid;
-            apply_detail(&dp_s, &state_s, pid);
         });
     }
 
@@ -1171,110 +569,24 @@ pub fn build_window(app: &gtk4::Application, no_resort_kick: bool) -> gtk4::Appl
                 restart_timer(&state_r, &rebuild_r, &graphs_r);
             }
             sync_settings_widgets(&state_r, &check_w, &list_w, &rows_w);
-            state_r.borrow_mut().refresh();
             rebuild_r();
         });
     }
 
-    // ---- Signal buttons -----------------------------------------------------------
-    {
-        let state_k = state.clone();
-        let dp_k = dp_labels.clone();
-        detail.sighup.connect_clicked(move |_| {
-            let status = state_k.borrow_mut().kill(Signal::Sighup);
-            dp_k.status.set_label(&detail_status(&status));
-        });
-        let state_k = state.clone();
-        let dp_k = dp_labels.clone();
-        let rebuild_k = rebuild.clone();
-        detail.sigkill.connect_clicked(move |_| {
-            let status = state_k.borrow_mut().kill(Signal::Sigkill);
-            dp_k.status.set_label(&detail_status(&status));
-            // A killed process disappears on the next refresh; force one now
-            // so the row is removed immediately rather than waiting up to 1.5s.
-            state_k.borrow_mut().refresh();
-            rebuild_k();
-        });
-    }
-
     // ---- Initial paint -----------------------------------------------------------
-    // Populate the store first (which also sorts it via the SortListModel
-    // once a sort is active), then apply the default sort — CPU% descending,
-    // matching the previous "highest first" launch state. `sort_by_column`
-    // is a no-op on an empty model, so run it after the data exists.
+    // Populate the list from the state we already hold, then start at the top
+    // of the list: GTK's layout pass re-scrolls on the first draw (a raw
+    // `adjustment.set_value(0)` would be clobbered by it), so route through
+    // the view's own `scroll_to` at the "just got mapped" point instead.
     rebuild();
-    list.column_view
-        .sort_by_column(Some(&list.cpu_column), gtk4::SortType::Descending);
-    // GTK4's layout pass re-scrolls the list as the initial sort reorders
-    // rows, leaving it parked in the middle at launch. A raw
-    // `adjustment.set_value(0)` gets clobbered by that layout commit, so
-    // route through GTK's own `scroll_to` at the deterministic "just got
-    // mapped" point — after layout has resolved — instead of fighting it.
-    let cv = list.column_view.clone();
+    let view_map = view.clone();
     let win = window.clone();
-    win.connect_map(move |_| {
-        cv.scroll_to(
-            0,
-            Option::<&gtk4::ColumnViewColumn>::None,
-            gtk4::ListScrollFlags::NONE,
-            None,
-        );
-    });
+    win.connect_map(move |_| view_map.scroll_to_top());
 
     // ---- Refresh timer ------------------------------------------------------------
     restart_timer(&state, &rebuild, &graph_areas);
 
     window
-}
-
-fn apply_detail(dp: &Rc<DetailLabels>, state: &Rc<RefCell<State>>, pid: Option<i32>) {
-    let item = pid.and_then(|p| {
-        let s = state.borrow();
-        s.find(p).cloned()
-    });
-    match item {
-        Some(item) => {
-            dp.pane.set_visible(true);
-            let p = &item.value;
-            dp.pid.set_label(&format!("PID: {}", p.pid));
-            dp.name.set_label(&format!("Name: {}", p.name));
-            dp.uid.set_label(&format!("UID: {}", p.ruid));
-            dp.username.set_label(&format!("Username: {}", p.username));
-            dp.cpu.set_label(&format!("CPU%: {}", p.cpu_percent_str()));
-            dp.mem.set_label(&if p.mem_percent_str().is_empty() {
-                "MEM%: —".to_string()
-            } else {
-                format!("MEM%: {}", p.mem_percent_str())
-            });
-            // An empty speed is not yet measured (first sample) or not
-            // readable — show a placeholder rather than a zero.
-            dp.disk_read.set_label(&if p.disk_read_str().is_empty() {
-                "Disk read: —".to_string()
-            } else {
-                format!("Disk read: {}", p.disk_read_str())
-            });
-            dp.disk_write.set_label(&if p.disk_write_str().is_empty() {
-                "Disk write: —".to_string()
-            } else {
-                format!("Disk write: {}", p.disk_write_str())
-            });
-            dp.status.set_label("");
-        }
-        None => {
-            // No process selected — hide the detail pane so the list takes
-            // the full width.
-            dp.pane.set_visible(false);
-            dp.pid.set_label("PID: —");
-            dp.name.set_label("Name: —");
-            dp.uid.set_label("UID: —");
-            dp.username.set_label("Username: —");
-            dp.cpu.set_label("CPU%: —");
-            dp.mem.set_label("MEM%: —");
-            dp.disk_read.set_label("Disk read: —");
-            dp.disk_write.set_label("Disk write: —");
-            dp.status.set_label("");
-        }
-    }
 }
 
 fn sync_settings_widgets(
@@ -1363,33 +675,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_returns_item() {
-        let s = test_state("find");
-        assert_eq!(
-            s.process_list
-                .processes
-                .iter()
-                .find(|p| p.pid == 123)
-                .map(|p| p.value.name.clone()),
-            Some("name123".to_string())
-        );
-        assert!(
-            s.process_list.processes.iter().all(|p| p.pid != 999),
-            "fixture list does not contain pid 999"
-        );
-    }
-
-    #[test]
-    fn test_detail_status_strings() {
-        assert_eq!(detail_status(&KillStatus::Sent), "Sent.");
-        assert_eq!(
-            detail_status(&KillStatus::NoSelection),
-            "No process selected."
-        );
-        assert_eq!(detail_status(&KillStatus::Failed("boom".into())), "boom");
-    }
-
-    #[test]
     fn test_set_show_all_persists() {
         let mut s = test_state("set_all");
         s.set_show_all(true);
@@ -1472,94 +757,5 @@ mod tests {
             "reset must persist defaults"
         );
         let _ = std::fs::remove_file(temp_settings_path("reset"));
-    }
-
-    /// F1: the order-changed replica must track the *real* `SortListModel`
-    /// view order — that is the premise the kick gate relies on. After a
-    /// converged sort it reports "unchanged"; a value change that would move
-    /// rows reports "changed"; and the kicked re-sort converges back to
-    /// "unchanged" — i.e. the replica and GTK agree, ties included (GTK's
-    /// `sort_func` resolves comparator ties by item-pointer order, which is
-    /// the same order the replica's stable pointer pre-sort establishes).
-    #[test]
-    fn test_view_order_changed_tracks_gtk_view() {
-        // `gtk_column_view_sort_by_column` (which the app likewise relies on)
-        // requires the library to be initialized; that is all we need — no
-        // window is shown and nothing is drawn.
-        gtk4::init().expect("GTK library init");
-
-        let list = build_process_list();
-
-        // pid -> cpu_ticks; 200 and 300 tie, so the tie order is what we are
-        // actually checking here.
-        for (pid, ticks) in [(100i32, 5u64), (200, 3), (300, 3)] {
-            let mut p = crate::process::TaskMgrProcess::new(
-                format!("n{pid}"),
-                pid,
-                1,
-                "u".to_string(),
-                0.0,
-            );
-            p.cpu_ticks = ticks;
-            let item = ProcessItem::new(&p);
-            list.store.append(&ProcessRow::from_item(&item));
-        }
-
-        let view_sorter = list.column_view.sorter().expect("a sorter");
-        // Drive the sort exactly like a header click does; use the GObject
-        // sorter API afterwards for the kick (the same path the refresh takes).
-        list.column_view
-            .sort_by_column(Some(&list.cpu_column), gtk4::SortType::Descending);
-
-        let pids_view = |list: &ListView| -> Vec<i32> {
-            (0..list.sort_model.n_items())
-                .map(|i| {
-                    list.sort_model
-                        .item(i)
-                        .expect("a row")
-                        .downcast::<ProcessRow>()
-                        .expect("a ProcessRow")
-                        .pid()
-                })
-                .collect()
-        };
-
-        // Ties resolve by the column's own tie-break (the Cpu arm: pid,
-        // negated for descending — hence 300 before 200), and the replica
-        // must produce the identical sequence — that is the F1 premise.
-        assert_eq!(pids_view(&list), vec![100, 300, 200]);
-        assert!(
-            !view_order_changed(&list.sort_model, &view_sorter, &list.sort_columns),
-            "after the converged sort the replica must report 'unchanged'"
-        );
-
-        // A value change that would move a row must trip the gate.
-        let row300 = (0..list.store.n_items())
-            .map(|i| {
-                list.store
-                    .item(i)
-                    .expect("a row")
-                    .downcast::<ProcessRow>()
-                    .expect("a ProcessRow")
-            })
-            .find(|r| r.pid() == 300)
-            .expect("row 300");
-        let mut top =
-            crate::process::TaskMgrProcess::new("n300".to_string(), 300, 1, "u".to_string(), 0.0);
-        top.cpu_ticks = 9;
-        row300.set_item(&ProcessItem::new(&top));
-        assert!(
-            view_order_changed(&list.sort_model, &view_sorter, &list.sort_columns),
-            "a reordering value change must be reported"
-        );
-
-        // The kicked re-sort (the same `sorter -> changed` path the refresh
-        // fires) must converge the view back to the replica's target.
-        view_sorter.changed(gtk4::SorterChange::Different);
-        assert_eq!(pids_view(&list), vec![300, 100, 200]);
-        assert!(
-            !view_order_changed(&list.sort_model, &view_sorter, &list.sort_columns),
-            "after the kick the view must match the replica again"
-        );
     }
 }

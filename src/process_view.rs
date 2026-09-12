@@ -25,7 +25,7 @@
 //! kick is free, and a genuine reorder commit is one `items-changed` signal
 //! that GTK can pair with the re-additions to keep all row widgets (spec R2).
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -404,11 +404,6 @@ fn apply_detail(d: &DetailLabels, item: Option<&ProcessItem>) {
         .set_label(&format!("Disk write: {}", dash(&p.disk_write_str())));
 }
 
-/// Sorter kick switch for the `--no-resort-kick` diagnostic: when off,
-/// `update` skips the re-sort kick after value changes (rows then keep
-/// whatever order the model currently has) — used to attribute any flicker
-/// to the reorder commit vs the membership path.
-///
 /// The list + detail view subtree to embed in the window, one process per
 /// [`ViewRow`], with the refresh algorithm of the module docs. Owns no
 /// `State`: the app feeds snapshot data via [`ProcessView::update`] and
@@ -427,7 +422,6 @@ pub struct ProcessView {
     sorter: gtk4::Sorter,
     list_scroll: gtk4::ScrolledWindow,
     detail: DetailLabels,
-    resort_kick: Cell<bool>,
     /// One app callback at a time (last registered wins — spec D4). May fire
     /// *during* `update` (spec B2: the single-selection notify fires inside
     /// the model-change FFI) — registered closures must be re-entrancy safe.
@@ -521,7 +515,6 @@ impl ProcessView {
             sorter,
             list_scroll,
             detail,
-            resort_kick: Cell::new(true),
             callback,
         }
     }
@@ -544,11 +537,6 @@ impl ProcessView {
     #[doc(hidden)]
     pub fn detail_labels(&self) -> &DetailLabels {
         &self.detail
-    }
-
-    /// The `--no-resort-kick` diagnostic switch (see struct docs).
-    pub fn set_resort_kick(&self, enabled: bool) {
-        self.resort_kick.set(enabled);
     }
 
     /// The PID of the currently selected process (`None` if none / not a row).
@@ -644,9 +632,7 @@ impl ProcessView {
 
         // 3) Order: kick the re-sort. GTK commits nothing if the visible
         //    order is unchanged, so the common tick is free (spec T3).
-        if self.resort_kick.get() {
-            self.sorter.changed(gtk4::SorterChange::Different);
-        }
+        self.sorter.changed(gtk4::SorterChange::Different);
 
         // 4) Re-pin the selection by PID (spec R4): GTK kept a *position*;
         //    after the re-sort/replace it may point at another row (or no
