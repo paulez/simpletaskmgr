@@ -155,6 +155,55 @@ fn test_row_notify_only_changed() {
     });
 }
 
+/// A `ProcessItem` with a disk read rate (the fixture's default is `None`).
+fn with_disk_read(mut it: ProcessItem, speed: f64) -> ProcessItem {
+    it.value.disk_read_speed = Some(speed);
+    it
+}
+/// A `ProcessItem` with a disk write rate (the fixture's default is `None`).
+fn with_disk_write(mut it: ProcessItem, speed: f64) -> ProcessItem {
+    it.value.disk_write_speed = Some(speed);
+    it
+}
+
+/// Blank (missing) disk rates stay at the *bottom* of the list in **both**
+/// sort directions (spec S3) — the header click negates the comparator, so
+/// the comparator itself must un-negate the missing-value ranking.
+#[test]
+fn test_blank_disk_rows_last_both_directions() {
+    run_gtk(|| {
+        let pv = ProcessView::new();
+        let blank = item(1, 0);
+        let read10 = with_disk_read(item(2, 0), 10_000.0);
+        let read20 = with_disk_read(item(3, 0), 20_000.0);
+        let w1 = with_disk_write(item(2, 0), 5_000.0);
+        let w2 = with_disk_write(item(3, 0), 9_000.0);
+        pv.update(&[blank.clone(), read10.clone(), read20.clone()]);
+
+        pv.sort_like_click(SortColumn::DiskRead, gtk4::SortType::Ascending);
+        assert_eq!(pv.display_order(), vec![2, 3, 1], "blank last (Disk R asc)");
+
+        pv.sort_like_click(SortColumn::DiskRead, gtk4::SortType::Descending);
+        assert_eq!(
+            pv.display_order(),
+            vec![3, 2, 1],
+            "blank last (Disk R desc)"
+        );
+
+        // Same contract for the write column.
+        pv.update(&[blank, w1, w2]);
+        pv.sort_like_click(SortColumn::DiskWrite, gtk4::SortType::Ascending);
+        assert_eq!(pv.display_order(), vec![2, 3, 1], "blank last (Disk W asc)");
+
+        pv.sort_like_click(SortColumn::DiskWrite, gtk4::SortType::Descending);
+        assert_eq!(
+            pv.display_order(),
+            vec![3, 2, 1],
+            "blank last (Disk W desc)"
+        );
+    });
+}
+
 /// Full lifecycle of the GTK-side algorithm (spec D0/D1, S3, V, R4, D2):
 /// snapshot order, header-sort with a single commit, in-place value refresh
 /// (visually free, row objects stable), reorder refresh (one commit, rows
