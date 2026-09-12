@@ -21,9 +21,9 @@
 //! 5. restore the scroll offset on idle (GTK clamps the adjustment during
 //!    the layout pass that runs after this call returns).
 //!
-//! The `refresh_list` diff/splice engine is therefore unnecessary: the no-op
-//! kick is free, and a genuine reorder commit is one `items-changed` signal
-//! that GTK can pair with the re-additions to keep all row widgets (spec R2).
+//! A separate diff/splice engine is unnecessary: the no-op kick is free,
+//! and a genuine reorder commit is one `items-changed` signal that GTK can
+//! pair with the re-additions to keep all row widgets (spec R2).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -34,7 +34,6 @@ use glib::subclass::prelude::*;
 
 use crate::cell_label;
 use crate::process::{ProcessItem, TaskMgrProcess};
-use crate::process_list::ProcessList;
 use crate::SortColumn;
 use gtk4::gio::prelude::*;
 use gtk4::prelude::*;
@@ -282,7 +281,7 @@ fn cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
 }
 
 /// Per-column `Sorter` driving the native header. All columns share
-/// [`ProcessList::compare_values`] as the sole order source (total order —
+/// [`compare_values`] as the sole order source (total order —
 /// spec S5: equal rows keep their order under stable sort, so no two
 /// "equal" rows can ever swap). Each closes over the **live** sort order so
 /// `None` values are pinned to the bottom in *either* direction (spec S3).
@@ -310,9 +309,104 @@ fn column_sorter(
             })
             .map(|cs| cs.primary_sort_order() == gtk4::SortType::Descending)
             .unwrap_or(false);
-        let ord = ProcessList::compare_values(&ia, &ib, sort_col, descending);
+        let ord = compare_values(&ia, &ib, sort_col, descending);
         ord.into()
     })
+}
+
+/// Compares two rows' values by the given column, in ascending order.
+///
+/// `f64` is compared with `total_cmp` so `NaN` values sort without
+/// panicking (unlike `partial_cmp().unwrap()`). This is the single
+/// source of truth for row ordering: every native `GtkColumnView`
+/// header sorter wraps it. The comparator is a **total** order (spec S5):
+/// equal rows compare `Equal`, so a stable sort never swaps two
+/// "equal" rows.
+///
+/// `descending` reports whether the column is currently sorted
+/// descending (most-first). The always-present columns (`Pid`,
+/// `CpuPercent`, `Name`) ignore it; the columns that may be
+/// empty (`MemPercent`, `DiskRead`, `DiskWrite`) use it to pin a missing
+/// value to the bottom of the visible list in either direction (see
+/// [`rank_optional`]).
+fn compare_values(
+    a: &ProcessItem,
+    b: &ProcessItem,
+    column: SortColumn,
+    descending: bool,
+) -> std::cmp::Ordering {
+    match column {
+        SortColumn::Pid => a.pid.cmp(&b.pid),
+        SortColumn::CpuPercent => {
+            // `top`-style stable ordering: compare the integer tick delta
+            // of the latest sample (coarse — quantized to the sampling
+            // window — so rows that display the same value are tied), and
+            // tie-break on `pid` so tied rows keep a deterministic position
+            // across refreshes instead of swapping. The displayed `f64`
+            // percent is deliberately never compared here, so a `NaN`
+            // value can't disturb the order either.
+            a.value
+                .cpu_ticks
+                .cmp(&b.value.cpu_ticks)
+                .then(a.pid.cmp(&b.pid))
+        }
+        SortColumn::MemPercent => {
+            rank_optional(a.value.mem_percent, b.value.mem_percent, descending)
+        }
+        SortColumn::Name => a.value.name.cmp(&b.value.name),
+        // A missing (`None`) rate is pinned to the bottom of the visible
+        // list however the column points, so rows without I/O data never
+        // float up ahead of rows with a real rate (see [`rank_optional`]).
+        SortColumn::DiskRead => {
+            rank_optional(a.value.disk_read_speed, b.value.disk_read_speed, descending)
+        }
+        SortColumn::DiskWrite => rank_optional(
+            a.value.disk_write_speed,
+            b.value.disk_write_speed,
+            descending,
+        ),
+    }
+}
+
+/// Orders an optional numeric value (CPU-free: MEM% / disk r/w) against
+/// another, always settling the missing (`None`) one at the *bottom* of the
+/// visible list — whichever direction the column is pointed.
+///
+/// GTK4 applies the header's direction itself: for the descending (most-first)
+/// direction it *negates* this comparator's whole result (see
+/// `gtkcolumnviewsorter.c`). So a comparator that put `None` at the bottom in
+/// ascending order would be flipped to the top in descending order. The two
+/// `None`/`Some` cases must therefore return opposite orderings per direction:
+///
+/// * ascending (no negation): report `None` as *greater* ⇒ it lands last;
+/// * descending (negated):    report `None` as *less* ⇒ negation lands it last.
+///
+/// `Some`/`Some` still orders by value (`total_cmp`, `NaN` safe) and `None`/`None`
+/// is `Equal`, in both directions. This replaces the old `unwrap_or(0.0)`
+/// shortcut, which tied a missing rate with a real zero and let it surface at
+/// the top of a data-first (descending) sort — the "empty rows first" bug.
+fn rank_optional(a: Option<f64>, b: Option<f64>, descending: bool) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        (None, None) => std::cmp::Ordering::Equal,
+        // `a` is the missing side: rank it last (greater when ascending,
+        // least-then-negated-to-last when descending).
+        (None, Some(_)) => {
+            if descending {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        }
+        // Mirror of the arm above for the case where `b` is the missing side.
+        (Some(_), None) => {
+            if descending {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Less
+            }
+        }
+    }
 }
 
 /// `DetailLabels` keeps the detail-pane labels addressable, and the pane

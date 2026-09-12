@@ -32,8 +32,8 @@
 //! produced a desync.
 //!
 //! All three accessor functions take a `usize` key. To obtain the key
-//! from any `glib::Object` (e.g. `gtk4::Label`, `ProcessRow`), the
-//! caller runs `obj.as_ptr() as usize` — both steps are *safe*.
+//! from any `glib::Object` (e.g. `gtk4::Label`, or a model row object),
+//! the caller runs `obj.as_ptr() as usize` — both steps are *safe*.
 //!
 //! # Leak profile
 //!
@@ -164,12 +164,7 @@ glib::wrapper! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::ProcessItem;
     use glib::prelude::*;
-
-    fn item(pid: i32) -> ProcessItem {
-        crate::testutil::test_item(pid)
-    }
 
     /// The parking key (an `as_ptr` pointer cast to `usize`) is unique
     /// per `glib::Object` and stable across calls for the same object.
@@ -193,8 +188,9 @@ mod tests {
 
         assert!(take(key).is_none());
 
-        let row = crate::process_row::ProcessRow::from_item(&item(1));
-        let binding = row
+        let src = glib::Object::new::<TestTarget>();
+        src.set_property("name", glib::Value::from("name1"));
+        let binding = src
             .bind_property("name", &target, "name")
             .sync_create()
             .build();
@@ -212,7 +208,8 @@ mod tests {
         reset_for_tests();
         let target = glib::Object::new::<TestTarget>();
         let key = target.as_ptr() as usize;
-        let src = crate::process_row::ProcessRow::from_item(&item(1));
+        let src = glib::Object::new::<TestTarget>();
+        src.set_property("name", glib::Value::from("name1"));
 
         let binding = src
             .bind_property("name", &target, "name")
@@ -226,7 +223,7 @@ mod tests {
 
     /// The exact desync scenario from the GTK refresh investigation:
     /// a recycled "target" whose *previous* binding is not disconnected
-    /// would let a stale `ProcessRow`'s `notify` still write into it.
+    /// would let a stale source row's `notify` still write into it.
     /// Retiring the previous binding on every bind/unbind cycle must fully
     /// seal off the stale source.
     ///
@@ -239,8 +236,10 @@ mod tests {
         reset_for_tests();
         let target = glib::Object::new::<TestTarget>();
         let key = target.as_ptr() as usize;
-        let row_a = crate::process_row::ProcessRow::from_item(&item(1));
-        let row_b = crate::process_row::ProcessRow::from_item(&item(2));
+        let row_a = glib::Object::new::<TestTarget>();
+        row_a.set_property("name", glib::Value::from("name1"));
+        let row_b = glib::Object::new::<TestTarget>();
+        row_b.set_property("name", glib::Value::from("name2"));
 
         // Phase 1: factory binds the target to row A and parks it.
         let binding_a = row_a
@@ -263,13 +262,11 @@ mod tests {
             .build();
         park(key, binding_b);
 
-        // Phase 4: stale row A changes (a task-manager refresh that
-        // re-notifies row A). Binding A was retired in Phase 2, so row B's
-        // `notify` remains the only writer into the target's `name`
+        // Phase 4: the stale source changes (a task-manager refresh that
+        // re-notifies source A). Binding A was retired in Phase 2, so source
+        // B's `notify` remains the only writer into the target's `name`
         // property.
-        let mut item_a = item(1);
-        item_a.value.name = "STALE".into();
-        row_a.set_item(&item_a);
+        row_a.set_property("name", glib::Value::from("STALE"));
 
         // The target's `name` should be row B's value (from the *second*
         // binding), not row A's value (from the retired first binding).
