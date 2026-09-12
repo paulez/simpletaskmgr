@@ -97,3 +97,29 @@ leaves the tree uncommitted, which the user cannot pull or test.
 - Validate logic with tests (do not run the app to confirm behavior); use the
   **Graphical Verification** section only to eyeball layout/UI changes
 - Always update README.md when adding/modifying features
+
+## GUI Visual Validation (GTK / Wayland)
+
+To test and visually validate GUI changes, **do not execute `cargo run` directly in the interactive shell**, as this will attempt to open windows on the user's active GNOME session.
+
+Instead, use the project helper script `./tools/test_ui_render.sh`. It runs the application headlessly inside an isolated `cage` compositor (using `WLR_BACKENDS=headless`) and saves screenshots directly into the `./screenshots/` directory.
+
+### Prerequisites
+The system must have the following packages installed:
+* `cage` (Wayland kiosk compositor)
+* `grim` (Wayland screenshot utility)
+
+### Usage
+
+Run the script by passing one or multiple delay targets (in seconds) as arguments to capture the UI at specific points in time:
+
+```bash
+# Default capture (single screenshot after 2.5 seconds)
+./tools/test_ui_render.sh
+
+# Multiple captures over time (e.g., at 0s, 1s, 3s, and 5s)
+./tools/test_ui_render.sh 0 1 3 5
+
+## Relevant sources
+- top source at ~/git/procps
+- gtk4 source at /usr/include/gtk-4.0/
