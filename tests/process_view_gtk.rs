@@ -1,0 +1,294 @@
+//! Widget-level tests for the process view (`src/process_view.rs`).
+//!
+//! GTK must be initialized exactly once per process, on one thread, and its
+//! main context stays owned by that thread for the process lifetime. libtest
+//! runs each test on a fresh thread, so **all** GTK work in this binary is
+//! funneled through one long-lived worker thread (`run_gtk` below): each test
+//! closure creates everything it needs, asserts locally, and returns plain
+//! data — the GTK objects never cross threads. Keep each test self-contained
+//! for that reason.
+//!
+//! This is its own test binary, so its GTK state is isolated from the lib's
+//! unit tests. Run with the usual `cargo test`.
+
+use std::any::Any;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::sync::{mpsc, mpsc::Sender, Mutex};
+use std::thread;
+
+use gtk4::prelude::*;
+use simpletaskmgr::process::{ProcessItem, TaskMgrProcess};
+use simpletaskmgr::process_view::{ProcessView, ViewRow};
+use simpletaskmgr::SortColumn;
+
+/// A job for the GTK worker: runs and yields the result or the panic payload.
+#[allow(clippy::type_complexity)]
+type Job = (
+    Box<dyn FnOnce() -> Result<Box<dyn Any + Send>, Box<dyn Any + Send>> + Send>,
+    Sender<Result<Box<dyn Any + Send>, Box<dyn Any + Send>>>,
+);
+
+static WORKER: Mutex<Option<Sender<Job>>> = Mutex::new(None);
+
+/// Run `f` on the process's dedicated GTK worker thread (initialized once, on
+/// first call) and return its result. A panic inside `f` is re-thrown at the
+/// call site.
+fn run_gtk<R>(f: impl FnOnce() -> R + std::marker::Send + 'static) -> R
+where
+    R: std::marker::Send + 'static,
+{
+    let worker_tx = {
+        let mut guard = WORKER.lock().unwrap();
+        match guard.as_ref() {
+            Some(tx) => tx.clone(),
+            None => {
+                let (tx, rx) = mpsc::channel::<Job>();
+                thread::Builder::new()
+                    .name("process-view-gtk".into())
+                    .spawn(move || {
+                        gtk4::init().expect("GTK available in the test env");
+                        for (work, reply) in rx {
+                            let _ = reply.send(work());
+                        }
+                    })
+                    .expect("spawning the GTK worker thread");
+                let _ = guard.insert(tx.clone());
+                tx
+            }
+        }
+    };
+    let (reply_tx, reply_rx) = mpsc::channel();
+    worker_tx
+        .send((
+            Box::new(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+                    .map(|r| Box::new(r) as Box<dyn Any + Send>)
+                    .map_err(|payload| payload as Box<dyn Any + Send>)
+            }),
+            reply_tx,
+        ))
+        .expect("the GTK worker is alive");
+    match reply_rx.recv() {
+        Ok(Ok(r)) => *r.downcast::<R>().expect("the result type matches"),
+        Ok(Err(payload)) => std::panic::resume_unwind(payload),
+        Err(_) => panic!("the GTK worker died"),
+    }
+}
+
+/// A `ProcessItem` whose CPU percent renders at the tracker's scale
+/// (`cpu_ticks / 100.0`), e.g. 10 ticks -> "0.1%", 11 ticks -> "0.1%"
+/// (same displayed text).
+fn item(pid: i32, cpu_ticks: u64) -> ProcessItem {
+    itemp(pid, cpu_ticks as f64 / 100.0, cpu_ticks)
+}
+
+/// A `ProcessItem` with an explicit CPU percent and ticks.
+fn itemp(pid: i32, cpu_percent: f64, cpu_ticks: u64) -> ProcessItem {
+    let mut p = TaskMgrProcess::new(
+        "procname".to_string(),
+        pid,
+        1000,
+        "paul".to_string(),
+        cpu_percent,
+    );
+    p.cpu_ticks = cpu_ticks;
+    ProcessItem::new(&p)
+}
+
+#[test]
+fn test_row_roundtrip_and_identity() {
+    run_gtk(|| {
+        let it = item(123, 42);
+        let r = ViewRow::from_item(&it);
+        assert_eq!(r.item(), it);
+        assert_eq!(r.pid(), 123);
+        assert!(r.has_value(&it));
+        let other = item(999, 42);
+        assert!(!r.has_value(&other));
+    });
+}
+
+#[test]
+fn test_row_properties_mirror_data() {
+    run_gtk(|| {
+        let r = ViewRow::from_item(&itemp(123, 10.0, 4_294_967));
+        let pid: String = r.property("pid");
+        let name: String = r.property("name");
+        let cpu: String = r.property("cpu");
+        let mem: String = r.property("mem");
+        let rd: String = r.property("disk-read");
+        let wr: String = r.property("disk-write");
+        assert_eq!(pid, "123");
+        assert_eq!(name, "procname");
+        assert_eq!(cpu, "10.0%");
+        assert_eq!(mem, "", "unknown MEM% shows blank");
+        assert_eq!(rd, "", "unknown disk rate shows blank");
+        assert_eq!(wr, "", "unknown disk rate shows blank");
+    });
+}
+
+#[test]
+fn test_row_notify_only_changed() {
+    run_gtk(|| {
+        let r = ViewRow::from_item(&item(1, 10));
+        let fired = Rc::new(RefCell::new(Vec::<i32>::new()));
+        let f = fired.clone();
+        r.connect_notify_local(Some("cpu"), move |_row, _| {
+            f.borrow_mut().push(1);
+        });
+
+        // Different ticks, same displayed percentage -> no notify at all.
+        let same_display = item(1, 11); // still "1.0%" at 100 ms scale
+        assert_ne!(r.item(), same_display);
+        r.set_item(&same_display);
+        assert!(fired.borrow().is_empty(), "same text must not notify");
+
+        let other = itemp(1, 90.0, 90_000);
+        r.set_item(&other);
+        assert!(!fired.borrow().is_empty(), "changed text must notify");
+        let n = fired.borrow().len();
+
+        // Re-setting the same value -> no extra notify.
+        r.set_item(&other);
+        assert_eq!(fired.borrow().len(), n);
+    });
+}
+
+/// Full lifecycle of the GTK-side algorithm (spec D0/D1, S3, V, R4, D2):
+/// snapshot order, header-sort with a single commit, in-place value refresh
+/// (visually free, row objects stable), reorder refresh (one commit, rows
+/// survive), selection follow-by-PID with reentrant callbacks, and
+/// drop-selection on removal.
+#[test]
+fn test_process_view_refresh_selection_detail() {
+    run_gtk(|| {
+        let pv = ProcessView::new();
+
+        // Selection events, as the app would observe them. These may fire
+        // reentrantly from within `update` (spec B2); pushing into an
+        // `Rc<RefCell>` shared with the closure is exactly that.
+        let events = Rc::new(RefCell::new(Vec::<Option<i32>>::new()));
+        let ev = events.clone();
+        pv.connect_selection_changed(move |sel| {
+            ev.borrow_mut().push(sel);
+        });
+
+        // D0/D1: snapshot order, no initial selection, pane hidden.
+        // (Distinct CPU ticks keep the expected order deterministic — GTK's
+        // descending flip also reverses any tied pair's tie-break order.)
+        let a = item(100, 60);
+        let b = item(200, 30);
+        let c = item(300, 50);
+        pv.update(&[a.clone(), b.clone(), c.clone()]);
+        assert_eq!(pv.display_order(), vec![100, 200, 300]);
+        assert!(
+            pv.row_of(100).is_some() && pv.row_of(200).is_some() && pv.row_of(300).is_some(),
+            "all rows present in the store"
+        );
+        assert!(pv.selected_pid().is_none(), "no selection at startup (D1)");
+        assert!(!pv.detail_labels().pane.is_visible());
+        assert!(events.borrow().is_empty(), "no selection callback yet");
+
+        // S3: a header click sorts once and commits exactly one change.
+        let commits = Rc::new(Cell::new(0u32));
+        let c2 = commits.clone();
+        pv.sort_model()
+            .connect_items_changed(move |_m, _pos, _rem, _add| {
+                c2.set(c2.get() + 1);
+            });
+        pv.sort_like_click(SortColumn::CpuPercent, gtk4::SortType::Descending);
+        assert_eq!(pv.display_order(), vec![100, 300, 200]);
+        assert_eq!(commits.get(), 1, "one commit for the initial sort");
+
+        // V: value-only refresh (values change, order does not) is visually
+        // free and keeps the row objects.
+        let b_same = item(200, 29);
+        pv.update(&[a.clone(), b_same.clone(), c.clone()]);
+        assert_eq!(pv.display_order(), vec![100, 300, 200]);
+        assert_eq!(commits.get(), 1, "value-only refresh commits nothing");
+
+        // R: a refresh that changes order commits exactly once, and each
+        // surviving process keeps its row object (the display is the same set
+        // of rows reordered, not a rebuild).
+        let b2 = item(200, 70);
+        let before_b = pv.row_of(200).expect("row 200");
+        pv.update(&[a.clone(), b2.clone(), c.clone()]);
+        assert_eq!(pv.display_order(), vec![200, 100, 300]);
+        assert_eq!(commits.get(), 2, "one commit for the reorder");
+        let after_b = pv.row_of(200).expect("row 200");
+        assert!(
+            before_b == after_b,
+            "surviving rows keep their object identity"
+        );
+
+        // R4/D2: selection follows its PID through refreshes and reorders,
+        // with the callback firing on every real change.
+        pv.selection().set_selected(0); // now pid 200 (top row)
+        assert_eq!(pv.selected_pid(), Some(200));
+        assert!(
+            *events.borrow().last().expect("select fired the callback") == Some(200),
+            "select fires the callback"
+        );
+        assert!(pv.detail_labels().pane.is_visible());
+
+        // Re-pin: pid 200 drops out of the top after a refresh — the
+        // selection rides the process, not the slot (spec R4).
+        pv.selection().set_selected(
+            pv.display_order()
+                .iter()
+                .position(|p| *p == 200)
+                .expect("row 200 is visible") as u32,
+        );
+        let a2 = item(100, 80);
+        let c2item = item(300, 90);
+        events.borrow_mut().clear();
+        pv.update(&[a2.clone(), b2.clone(), c2item.clone()]);
+        assert_eq!(pv.display_order(), vec![300, 100, 200]);
+        assert_eq!(
+            pv.selected_pid(),
+            Some(200),
+            "selection must follow its PID"
+        );
+        assert!(
+            *events
+                .borrow()
+                .last()
+                .expect("the re-pin fired the callback")
+                == Some(200),
+            "re-pinned selection fires the callback"
+        );
+
+        // D2/D-fall: deselect via the sentinel; then the selected PID
+        // leaves the list — the selection clears, the pane hides, and a
+        // `None` event fires (spec B2 reentrancy during `update`).
+        pv.selection().set_selected(u32::MAX);
+        assert!(pv.selected_pid().is_none(), "sentinel clears the selection");
+        assert!(
+            events
+                .borrow()
+                .last()
+                .expect("the deselect fired the callback")
+                .is_none(),
+            "deselect fires the callback"
+        );
+        assert!(!pv.detail_labels().pane.is_visible());
+
+        // Select, then have that very PID removed.
+        pv.selection().set_selected(0); // pid 300
+        assert_eq!(pv.selected_pid(), Some(300));
+        events.borrow_mut().clear();
+        pv.update(&[a2.clone(), b2.clone()]);
+        assert_eq!(pv.display_order(), vec![100, 200]);
+        assert!(pv.selected_pid().is_none(), "gone PID deselects");
+        assert!(
+            events
+                .borrow()
+                .last()
+                .expect("the deselect fired the callback")
+                .is_none(),
+            "deselect fires the callback (B2 reentrancy during update)"
+        );
+        assert!(!pv.detail_labels().pane.is_visible());
+    });
+}

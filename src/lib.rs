@@ -9,6 +9,7 @@ pub mod metrics;
 pub mod process;
 pub mod process_list;
 pub mod process_row;
+pub mod process_view;
 pub mod refresh_list;
 pub mod settings;
 pub mod signal;
