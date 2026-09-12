@@ -2,30 +2,31 @@
 
 A lightweight, interactive Linux process manager built with Rust and a GTK 4
 interface. It lists running processes, tracks their resource usage in real
-time, and lets you inspect and signal individual processes.
+time, and lets you inspect individual processes in a live detail pane.
 
 ## Features
 
-- **Process list**: PID, user (RUID), name, CPU%, MEM%, and per-process disk
-  read/write speed; auto-refreshes in place, flicker-free. The name is the
+- **Process list**: PID, name, CPU%, MEM%, and per-process disk read/write
+  speed; auto-refreshes in place, flicker-free. The name is the
   full program name (`argv[0]`), not truncated to the kernel's 15-char `comm`.
-- **Sortable columns**: click any header to sort; numeric columns default
-  highest-first. Rows with no value for a column (blank MEM%/Disk) always stay
-  at the bottom, in either sort direction.
+- **Sortable columns**: click any header to sort; click again to flip the
+  direction. The list starts in the system's natural order (roughly PID
+  order); there is no pre-selected sort. Rows with no value for a column
+  (blank MEM%/Disk) always stay at the bottom, in either sort direction.
 - **Calm CPU ordering**: the CPU% column orders rows by each process's integer
   tick delta of the sample window (ties settle by PID, in `top`'s style), so
   rows that measure equal — including rows that display the same value — keep
   their position across refreshes instead of swapping back and forth. The
   percentage shown is the live per-interval value.
-- **Stable refresh**: on each refresh the app only re-sorts when the active
-  column's order would actually change. If the values moved but the order is
-  the same, the rows keep their place and the list commits no reflow, so it
-  stays pixel-stable (even scrolled down the list) instead of flickering on
-  every tick.
+- **Stable refresh**: on every refresh the values update in place and a
+  re-sort is only committed when the visible order under the active column
+  actually changes. If the values moved but the order is the same, the rows
+  keep their place and the list commits no reflow, so it stays pixel-stable
+  (even scrolled down the list) instead of flickering on every tick.
 - **Show all processes**: toggle between every process on the system and only
   the current user's (default).
-- **Detail view**: click a process to see live metrics in a side pane and send
-  SIGHUP or SIGKILL to it.
+- **Detail view**: click a process to see its live metrics in a side pane
+  (PID, name, CPU%, MEM%, and disk read/write speed).
 - **Resource graph**: always-on charts of system CPU & memory, and CPU
   frequency & temperature, over the last few minutes. Every pane carries a
   colour swatch + label legend below its plot so each series is identified
