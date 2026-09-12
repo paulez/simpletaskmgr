@@ -3,6 +3,8 @@ use log::{info, LevelFilter};
 use simplelog::*;
 
 use gtk4::prelude::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Resolve the log level from the program arguments.
 ///
@@ -36,7 +38,8 @@ fn main() {
         .application_id("org.simpletaskmgr.simpletaskmgr")
         .build();
     app.connect_activate(move |app| {
-        let win = simpletaskmgr::ui::build_window(app);
+        let state = Rc::new(RefCell::new(simpletaskmgr::ui::State::new()));
+        let win = simpletaskmgr::ui::build_window(app, &state);
         win.set_visible(true);
     });
     let _ = app.run_with_args(&gtk_argv);

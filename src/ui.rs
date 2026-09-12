@@ -29,6 +29,12 @@ pub struct State {
     pub selected_pid: Option<i32>,
     pub settings: UserSettings,
     pub save_path: std::path::PathBuf,
+    /// Total number of [`State::refresh`] calls this state has performed.
+    /// Cadence diagnostic: a correctly wired tick performs **exactly one**
+    /// refresh — a second per tick shrinks the CPU-delta window to the
+    /// first refresh's own duration, inflating every reported %CPU (the
+    /// cadence test in `tests/process_view_gtk.rs` pins this down).
+    pub refresh_count: u64,
     pub timer_id: Cell<Option<glib::SourceId>>,
     /// Top of the frequency-axis domain in MHz, read once at launch from
     /// `scaling_max_freq`. The fallback (4.0 GHz) covers hosts without a
@@ -54,10 +60,19 @@ pub enum KillStatus {
 }
 
 impl State {
-    fn new() -> Self {
+    /// Constructs state at the conventional settings location.
+    pub fn new() -> Self {
         Self::with_settings_path(settings_path())
     }
+}
 
+impl Default for State {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl State {
     /// Constructs state that loads and persists settings at `path`.
     /// Production code uses the conventional location via [`State::new`];
     /// tests point this at a temporary path so they never touch the real
@@ -92,6 +107,7 @@ impl State {
             freq_max_mhz: crate::cpu_status::read_max_freq_mhz().unwrap_or(4000.0),
             mem_max_mb: crate::metrics::read_mem_total_mb().unwrap_or(16.0 * 1024.0),
             gpu_available,
+            refresh_count: 0,
         }
     }
 
@@ -126,6 +142,7 @@ impl State {
             freq_max_mhz: crate::cpu_status::read_max_freq_mhz().unwrap_or(4000.0),
             mem_max_mb: crate::metrics::read_mem_total_mb().unwrap_or(16.0 * 1024.0),
             gpu_available: false,
+            refresh_count: 0,
         }
     }
 
@@ -142,6 +159,7 @@ impl State {
     /// tests must avoid — the integration tests (which run in a single
     /// process outside the parallel test pool) exercise it instead.
     pub fn refresh(&mut self) {
+        self.refresh_count += 1;
         self.process_list.update_process_list();
         // Per-tick GPU read. On non-GPU hosts (rocm-smi absent or no card0)
         // the startup probe already determined `gpu_available == false`, so
@@ -223,9 +241,11 @@ fn restart_timer(
     let state_t = state.clone();
     let rebuild_t = rebuild.clone();
     let graphs = graph_areas.to_vec();
-    let state_cb = state_t.clone();
     let id = glib::timeout_add_local(interval, move || {
-        state_cb.borrow_mut().refresh();
+        // One tick = exactly one `rebuild` (= one `State::refresh` + one
+        // view update). A second `state.refresh()` here would shrink the
+        // CPU-delta window of the tick to the first refresh's own duration,
+        // inflating every reported %CPU (see the cadence test).
         rebuild_t();
         for a in &graphs {
             a.queue_draw();
@@ -440,11 +460,15 @@ fn build_settings_popover() -> SettingsWidgets {
     }
 }
 
-/// Builds the main window and wires the refresh timer.
-/// Call from the `activate` handler (main loop thread only).
-pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
-    let state = Rc::new(RefCell::new(State::new()));
-
+/// Builds the main window and wires the refresh timer around `state`.
+/// Call from the `activate` handler (main loop thread only). The `state`
+/// parameter is the app's single source of truth (created in `main`) so
+/// tests can inspect it — e.g. assert the one-refresh-per-tick cadence via
+/// [`State::refresh_count`].
+pub fn build_window(
+    app: &gtk4::Application,
+    state: &Rc<RefCell<State>>,
+) -> gtk4::ApplicationWindow {
     let window = gtk4::ApplicationWindow::new(app);
     window.set_title(Some("Simple Task Manager"));
     window.set_default_size(940, 600);
@@ -462,8 +486,8 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     // restart always lands there. The GPU tab is added only when a GPU was
     // actually detected (see `gpu_available`); the other two are present on
     // every host.
-    let (cpu_row, mut graph_areas) = build_cpu_graph_row(&state);
-    let (disk_row, disk_areas) = build_disk_graph_row(&state);
+    let (cpu_row, mut graph_areas) = build_cpu_graph_row(state);
+    let (disk_row, disk_areas) = build_disk_graph_row(state);
     graph_areas.extend(disk_areas);
     let gpu_available = state.borrow().gpu_available;
 
@@ -474,7 +498,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     stack.add_titled(&disk_row, Some("disk"), "Disk I/O");
     stack.set_visible_child_name("cpu");
     if gpu_available {
-        let (gpu_row, gpu_areas) = build_gpu_graph_row(&state);
+        let (gpu_row, gpu_areas) = build_gpu_graph_row(state);
         graph_areas.extend(gpu_areas);
         stack.add_titled(&gpu_row, Some("gpu"), "GPU");
     }
@@ -532,9 +556,8 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
         settings.check.connect_toggled(move |chk| {
             let active = chk.is_active();
             state_t.borrow_mut().set_show_all(active);
-            // Refresh now so the filter change takes effect immediately rather
-            // than waiting up to the next refresh tick.
-            state_t.borrow_mut().refresh();
+            // Rebuild now (one refresh) so the filter change takes effect
+            // immediately rather than waiting up to the next refresh tick.
             rebuild_t();
         });
     }
@@ -549,6 +572,8 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
                     let changed = state_c.borrow_mut().set_refresh_interval(*interval);
                     if changed {
                         restart_timer(&state_c, &rebuild_c, &graphs_c);
+                        // Apply immediately: one refresh + view update.
+                        rebuild_c();
                     }
                 }
             }
@@ -584,7 +609,7 @@ pub fn build_window(app: &gtk4::Application) -> gtk4::ApplicationWindow {
     win.connect_map(move |_| view_map.scroll_to_top());
 
     // ---- Refresh timer ------------------------------------------------------------
-    restart_timer(&state, &rebuild, &graph_areas);
+    restart_timer(state, &rebuild, &graph_areas);
 
     window
 }

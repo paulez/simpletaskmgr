@@ -50,6 +50,7 @@ The data layer (`process.rs`, `process_list.rs`, `cpu_tracker.rs`,
 | R3 | Scroll position is preserved across a refresh (within the new bounds). |
 | R4 | The selection follows the **process** (by PID), not a position: re-sorted, replaced, or reordered refreshes keep the user's process selected; a vanished process clears the selection and hides the detail pane. |
 | R5 | Refresh works for any snapshot size, including the empty snapshot, and is idempotent on identical data (a second refresh of the same data is a no-op). |
+| R6 | **One refresh per tick**: each timer firing produces exactly one `State::refresh` (one data read) and one view update. A second refresh per tick shrinks the CPU-delta window to the first refresh's own duration, inflating every reported %CPU (the cadence test in `tests/process_view_gtk.rs` pins this down). |
 
 ### D — Selection & detail pane
 

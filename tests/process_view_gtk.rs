@@ -351,3 +351,44 @@ fn test_process_view_refresh_selection_detail() {
         assert!(!pv.detail_labels().pane.is_visible());
     });
 }
+
+/// Refresh cadence (guards a past double-refresh regression): with the real
+/// production wiring — `ui::build_window`, including the app's own 1.5 s
+/// `glib::timeout` — the initial build performs exactly one
+/// `State::refresh`, and a 3.2 s window sees exactly the two scheduled
+/// ticks. A second refresh per tick (timer pre-refresh + rebuild refresh)
+/// shrinks the CPU-delta window to the first refresh's own duration, which
+/// inflates every reported %CPU (the app measures itself 4x its real usage
+/// and idle processes read 0%).
+#[test]
+fn test_refresh_cadence_one_per_tick() {
+    let n = run_gtk(|| {
+        let app = gtk4::Application::builder().build();
+        let path = std::env::temp_dir().join(format!("stgm_cadence_{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let state = Rc::new(RefCell::new(simpletaskmgr::ui::State::with_settings_path(
+            path.clone(),
+        )));
+        let window = simpletaskmgr::ui::build_window(&app, &state);
+        assert_eq!(
+            state.borrow().refresh_count,
+            1,
+            "the initial build performs exactly one refresh"
+        );
+        // The worker loop blocks on its job queue, so spin the main loop here
+        // until 3.2 s elapse, letting the 1.5 s timer source fire (two ticks).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(3_200);
+        while std::time::Instant::now() < deadline {
+            let _ = glib::MainContext::default().iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let n = state.borrow().refresh_count - 1;
+        drop(window);
+        let _ = std::fs::remove_file(&path);
+        n
+    });
+    assert!(
+        (1..=2).contains(&n),
+        "3.2 s holds two 1.5 s ticks; saw {n} refreshes (a double refresh per tick reads 4+)",
+    );
+}
