@@ -204,11 +204,11 @@ fn test_blank_disk_rows_last_both_directions() {
     });
 }
 
-/// Full lifecycle of the GTK-side algorithm (spec D0/D1, S3, V, R4, D2):
-/// snapshot order, header-sort with a single commit, in-place value refresh
-/// (visually free, row objects stable), reorder refresh (one commit, rows
-/// survive), selection follow-by-PID with reentrant callbacks, and
-/// drop-selection on removal.
+/// Full lifecycle of the GTK-side algorithm (spec D1, S7, V, R4, D2):
+/// default CPU% descending, header re-click is a no-op commit, in-place
+/// value refresh (visually free, row objects stable), reorder refresh (one
+/// commit, rows survive), selection follow-by-PID with reentrant callbacks,
+/// and drop-selection on removal.
 #[test]
 fn test_process_view_refresh_selection_detail() {
     run_gtk(|| {
@@ -223,14 +223,18 @@ fn test_process_view_refresh_selection_detail() {
             ev.borrow_mut().push(sel);
         });
 
-        // D0/D1: snapshot order, no initial selection, pane hidden.
-        // (Distinct CPU ticks keep the expected order deterministic — GTK's
-        // descending flip also reverses any tied pair's tie-break order.)
+        // S7: the view opens sorted by CPU% descending (top-style), no
+        // initial selection, pane hidden. (Distinct CPU ticks keep the
+        // expected order deterministic.)
         let a = item(100, 60);
         let b = item(200, 30);
         let c = item(300, 50);
         pv.update(&[a.clone(), b.clone(), c.clone()]);
-        assert_eq!(pv.display_order(), vec![100, 200, 300]);
+        assert_eq!(
+            pv.display_order(),
+            vec![100, 300, 200],
+            "default sort is CPU% descending (S7)"
+        );
         assert!(
             pv.row_of(100).is_some() && pv.row_of(200).is_some() && pv.row_of(300).is_some(),
             "all rows present in the store"
@@ -239,7 +243,9 @@ fn test_process_view_refresh_selection_detail() {
         assert!(!pv.detail_labels().pane.is_visible());
         assert!(events.borrow().is_empty(), "no selection callback yet");
 
-        // S3: a header click sorts once and commits exactly one change.
+        // S2 (header click): clicking the active CPU header again re-sets
+        // the same state; GTK commits nothing when the order is unchanged
+        // (spec T3) — so the refresh ticks below start from zero commits.
         let commits = Rc::new(Cell::new(0u32));
         let c2 = commits.clone();
         pv.sort_model()
@@ -248,14 +254,18 @@ fn test_process_view_refresh_selection_detail() {
             });
         pv.sort_like_click(SortColumn::CpuPercent, gtk4::SortType::Descending);
         assert_eq!(pv.display_order(), vec![100, 300, 200]);
-        assert_eq!(commits.get(), 1, "one commit for the initial sort");
+        assert_eq!(
+            commits.get(),
+            0,
+            "redundant click on the active sort: no commit"
+        );
 
         // V: value-only refresh (values change, order does not) is visually
         // free and keeps the row objects.
         let b_same = item(200, 29);
         pv.update(&[a.clone(), b_same.clone(), c.clone()]);
         assert_eq!(pv.display_order(), vec![100, 300, 200]);
-        assert_eq!(commits.get(), 1, "value-only refresh commits nothing");
+        assert_eq!(commits.get(), 0, "value-only refresh commits nothing");
 
         // R: a refresh that changes order commits exactly once, and each
         // surviving process keeps its row object (the display is the same set
@@ -264,7 +274,7 @@ fn test_process_view_refresh_selection_detail() {
         let before_b = pv.row_of(200).expect("row 200");
         pv.update(&[a.clone(), b2.clone(), c.clone()]);
         assert_eq!(pv.display_order(), vec![200, 100, 300]);
-        assert_eq!(commits.get(), 2, "one commit for the reorder");
+        assert_eq!(commits.get(), 1, "one commit for the reorder");
         let after_b = pv.row_of(200).expect("row 200");
         assert!(
             before_b == after_b,

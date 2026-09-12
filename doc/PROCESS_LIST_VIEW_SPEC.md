@@ -39,7 +39,7 @@ The data layer (`process.rs`, `process_list.rs`, `cpu_tracker.rs`,
 | S4 | Ties are broken by **PID**, so the visible order is deterministic and stable across refreshes. |
 | S5 | The comparator is a **total order** (consistent, antisymmetric). GTK's sort panics on an inconsistent comparator — this is a hard requirement, not a preference. |
 | S6 | CPU % is ordered by the measured **delta ticks** (not the rounded percent): rows that display the same value keep a deterministic order and CPU-usage ties differ only by PID. |
-| S7 | Default order before the user sorts: the snapshot's order, which is PID-ascending on a live host. **Deliberate simplification**: the old view started "CPU % descending"; not required by the essentials. |
+| S7 | Default order at startup: **CPU % descending** (heaviest first, `top`-style) — matching the old view and user request, so the list is useful without any interaction. |
 
 ### R — Refresh
 

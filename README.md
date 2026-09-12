@@ -9,9 +9,9 @@ time, and lets you inspect individual processes in a live detail pane.
 - **Process list**: PID, name, CPU%, MEM%, and per-process disk read/write
   speed; auto-refreshes in place, flicker-free. The name is the
   full program name (`argv[0]`), not truncated to the kernel's 15-char `comm`.
-- **Sortable columns**: click any header to sort; click again to flip the
-  direction. The list starts in the system's natural order (roughly PID
-  order); there is no pre-selected sort. Rows with no value for a column
+- **Sortable columns**: the list opens sorted by CPU%, heaviest first
+  (`top`-style); click any other header to sort by that column (click
+  again to flip the direction). Rows with no value for a column
   (blank MEM%/Disk) always stay at the bottom, in either sort direction.
 - **Calm CPU ordering**: the CPU% column orders rows by each process's integer
   tick delta of the sample window (ties settle by PID, in `top`'s style), so

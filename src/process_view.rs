@@ -562,6 +562,25 @@ impl ProcessView {
             column_view.append_column(&col);
         }
         column_view.set_model(Some(&selection));
+
+        // S7: the list opens sorted by CPU%, highest-first (`top`-style).
+        // `sort_by_column` *sets* the state (no toggle), then ordinary
+        // header clicks work as documented (spec S2).
+        let cpu_title = Self::COLUMNS
+            .iter()
+            .find(|c| c.4 == SortColumn::CpuPercent)
+            .expect("CPU% is in COLUMNS")
+            .0;
+        let cols = column_view.columns();
+        let cpu_col = (0..cols.n_items())
+            .filter_map(|i| {
+                cols.item(i)
+                    .and_then(|o| o.downcast::<gtk4::ColumnViewColumn>().ok())
+                    .filter(|c| c.title().as_deref() == Some(cpu_title))
+            })
+            .next()
+            .expect("the CPU% column was appended above");
+        column_view.sort_by_column(Some(&cpu_col), gtk4::SortType::Descending);
         column_view.add_css_class("process-list");
 
         let list_scroll = gtk4::ScrolledWindow::new();
