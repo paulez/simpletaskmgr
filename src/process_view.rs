@@ -507,7 +507,35 @@ fn apply_detail(d: &DetailLabels, item: Option<&ProcessItem>) {
 /// the same slot (a plain `RefCell::clone()` would be a copy, not a share).
 type SelectionCallback = Rc<RefCell<Option<Rc<dyn Fn(Option<i32>)>>>>;
 
-/** Scroll the column view so the top row is at the very top (S8). */
+/// Queue the S8 scroll-to-top so it runs on the *next* main-loop idle.
+/// GTK settles a header click through the ColumnViewSorter `primary-sort-*`
+/// properties first and commits the re-sort *after* (`gtk_sorter_changed`);
+/// ListBase pins its per-item anchor from the *current* model order, so a
+/// scroll made before the commit anchors the old top row's identity and the
+/// viewport lands wherever that row moved to. An idle runs after the
+/// commit, when row 0 is already the new top row. `scrolled` counts the
+/// executions (a test/diagnostic hook; a refresh tick must never schedule
+/// one — R3).
+fn scroll_view_to_top_later(
+    column_view: &gtk4::ColumnView,
+    rows: &gtk4::SortListModel,
+    scrolled: &Rc<Cell<u32>>,
+) {
+    let cv = column_view.clone();
+    let rows = rows.clone();
+    let scrolled = scrolled.clone();
+    glib::idle_add_local(move || {
+        if rows.n_items() > 0 {
+            scroll_column_view_to_top(&cv);
+            scrolled.set(scrolled.get() + 1);
+        }
+        glib::ControlFlow::Break
+    });
+}
+
+/// Scroll the column view so the top row is at the very top (S8). The
+/// empty-list guard lives in the deferral layer; `scroll_to(0)` asserts on
+/// an empty list in release GTK builds too, so we never call it bare.
 fn scroll_column_view_to_top(column_view: &gtk4::ColumnView) {
     column_view.scroll_to(
         0,
@@ -528,6 +556,9 @@ pub struct ProcessView {
     /// flipped) — the trigger for the S8 scroll-to-top. Diagnostic/test
     /// hook: an update-tick invalidation must **not** count as one (R3).
     sort_changes: Rc<Cell<u32>>,
+    /// Executed S8 scroll-tops (the deferred idle ran with a non-empty
+    /// list). Diagnostic/test hook for the deferral itself.
+    scrolls_done: Rc<Cell<u32>>,
     list_scroll: gtk4::ScrolledWindow,
     detail: DetailLabels,
     /// One app callback at a time (last registered wins — spec D4). May fire
@@ -567,6 +598,7 @@ impl ProcessView {
         // the top on them brings the new first row into view immediately,
         // without ever fighting a refresh (R3).
         let sort_changes = Rc::new(Cell::new(0u32));
+        let scrolls_done = Rc::new(Cell::new(0u32));
         {
             let view_sorter = sorter
                 .downcast_ref::<gtk4::ColumnViewSorter>()
@@ -574,20 +606,18 @@ impl ProcessView {
             let cv = column_view.clone();
             let sm = sort_model.clone();
             let count = sort_changes.clone();
+            let done = scrolls_done.clone();
             view_sorter.connect_primary_sort_column_notify(move |_| {
                 count.set(count.get() + 1);
-                if sm.n_items() > 0 {
-                    scroll_column_view_to_top(&cv);
-                }
+                scroll_view_to_top_later(&cv, &sm, &done);
             });
             let cv = column_view.clone();
             let sm = sort_model.clone();
             let count = sort_changes.clone();
+            let done = scrolls_done.clone();
             view_sorter.connect_primary_sort_order_notify(move |_| {
                 count.set(count.get() + 1);
-                if sm.n_items() > 0 {
-                    scroll_column_view_to_top(&cv);
-                }
+                scroll_view_to_top_later(&cv, &sm, &done);
             });
         }
         let selection = gtk4::SingleSelection::new(Some(sort_model.clone()));
@@ -671,6 +701,7 @@ impl ProcessView {
             selection,
             sorter,
             sort_changes,
+            scrolls_done,
             list_scroll,
             detail,
             callback,
@@ -711,14 +742,25 @@ impl ProcessView {
     }
 
     /// Start the first paint at the top of the list (spec R3 initial state).
+    /// Safe on an empty list (the initial map can precede the first
+    /// snapshot).
     pub fn scroll_to_top(&self) {
-        scroll_column_view_to_top(&self.column_view);
+        if self.sort_model.n_items() > 0 {
+            scroll_column_view_to_top(&self.column_view);
+        }
     }
 
     /// Number of genuine sort changes (primary column or direction flipped;
-    /// S8 scrolls to the top on each). Test hook for that invariant.
+    /// S8 schedules a scroll to the top on each). Test hook for that
+    /// invariant.
     pub fn sort_change_count(&self) -> u32 {
         self.sort_changes.get()
+    }
+
+    /// Number of executed S8 scroll-tops (the deferred idle ran with a
+    /// non-empty list) — the *deferred* half of `sort_change_count`.
+    pub fn scroll_done_count(&self) -> u32 {
+        self.scrolls_done.get()
     }
 
     /// One refresh tick (spec R): update survivors in place, apply the

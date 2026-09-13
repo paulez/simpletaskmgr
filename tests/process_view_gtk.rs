@@ -399,8 +399,10 @@ fn test_refresh_cadence_one_per_tick() {
 /// so the new first row is immediately visible. The one thing that must NOT
 /// trigger that scroll is a refresh tick: an update's `Sorter::changed`
 /// invalidation fires neither property, so the user's scroll position survives
-/// (R3). `sort_change_count` is the observable the harness uses: it bumps once
-/// per scroll-to-top, so it stands in for the scroll itself.
+/// (R3). The observables are the S8 counters: `sort_change_count` bumps when
+/// a real sort change *schedules* the top-scroll, and `scroll_done_count`
+/// when the deferred scroll actually *runs* (its idle fires — after the
+/// re-sort commit) — a tick must move neither.
 #[test]
 fn test_sort_change_scrolls_to_top_but_ticks_do_not() {
     run_gtk(|| {
@@ -411,30 +413,63 @@ fn test_sort_change_scrolls_to_top_but_ticks_do_not() {
         pv.update(&[a, b.clone(), c.clone()]);
         assert_eq!(pv.display_order(), vec![3, 2, 1], "CPU% desc at startup");
 
-        // Switching the active column is a genuine sort change -> scroll to top.
-        let before = pv.sort_change_count();
+        // Switching the active column is a genuine sort change -> schedule.
+        let sched = pv.sort_change_count();
+        let done = pv.scroll_done_count();
         pv.sort_like_click(SortColumn::MemPercent, gtk4::SortType::Descending);
         assert!(
-            pv.sort_change_count() > before,
-            "a header click on a new column must scroll the list to the top",
+            pv.sort_change_count() > sched,
+            "a header click on a new column must schedule the S8 scroll",
+        );
+        assert_eq!(
+            pv.scroll_done_count(),
+            done,
+            "the scroll is deferred — still not executed while the click settles",
         );
 
         // Flipping the direction of the active column is a genuine change too.
-        let before = pv.sort_change_count();
+        let sched = pv.sort_change_count();
         pv.sort_like_click(SortColumn::MemPercent, gtk4::SortType::Ascending);
         assert!(
-            pv.sort_change_count() > before,
-            "a direction flip must scroll the list to the top",
+            pv.sort_change_count() > sched,
+            "a direction flip must schedule the S8 scroll",
         );
 
-        // The critical negative: a refresh tick must NOT fire, or every
-        // refresh would yank the user back to the top (R3).
-        let before = pv.sort_change_count();
-        pv.update(&[item(1, 300), b, c]); // new tick, fresh values
+        // Run the queued idles: the scheduled scrolls now execute (post-commit)
+        // and — and only then — the done counter moves.
+        let done = pv.scroll_done_count();
+        while glib::MainContext::default().iteration(false) {}
+        assert!(
+            pv.scroll_done_count() > done,
+            "the deferred scrolls run once their idles fire",
+        );
+
+        // The critical negative: a refresh tick must NOT schedule (or run)
+        // a scroll, or every refresh would yank the user back to the top
+        // (R3) — even when the tick genuinely reorders the list. Sort by
+        // CPU% again first, so the reorder is observable (the active sort is
+        // MEM% asc, where all three rows tie).
+        pv.sort_like_click(SortColumn::CpuPercent, gtk4::SortType::Descending);
+        while glib::MainContext::default().iteration(false) {}
+        let sched = pv.sort_change_count();
+        let done = pv.scroll_done_count();
+        pv.update(&[item(1, 999), b.clone(), c.clone()]);
+        assert_eq!(
+            pv.display_order(),
+            vec![1, 3, 2],
+            "pid 1 strictly heaviest: real reorder committed"
+        );
+        pv.update(&[item(1, 0), b, c]); // …and back to [3, 2, 1]: another real reorder
+        assert_eq!(pv.display_order(), vec![3, 2, 1]);
         assert_eq!(
             pv.sort_change_count(),
-            before,
-            "a refresh tick must not scroll the list to the top",
+            sched,
+            "a refresh tick must not schedule the S8 scroll",
+        );
+        assert_eq!(
+            pv.scroll_done_count(),
+            done,
+            "a refresh tick must not run a pending S8 scroll",
         );
     });
 }

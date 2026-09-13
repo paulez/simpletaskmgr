@@ -40,7 +40,7 @@ The data layer (`process.rs`, `process_list.rs`, `cpu_tracker.rs`,
 | S5 | The comparator is a **total order** (consistent, antisymmetric). GTK's sort panics on an inconsistent comparator — this is a hard requirement, not a preference. |
 | S6 | CPU % is ordered by the measured **delta ticks** (not the rounded percent): rows that display the same value keep a deterministic order and CPU-usage ties differ only by PID. |
 | S7 | Default order at startup: **CPU % descending** (heaviest first, `top`-style) — matching the old view and user request, so the list is useful without any interaction. |
-| S8 | A header click **scrolls the list back to the top**, so the new first row (e.g. the highest-MEM process after clicking MEM%) is visible immediately. Refresh ticks never do this — a tick's invalidation is not a sort change, so the user's scroll position survives refreshes (R3). |
+| S8 | A header click **scrolls the list back to the top**, so the new first row (e.g. the highest-MEM process after clicking MEM%) is visible immediately. Refresh ticks never do this — a tick's invalidation is not a sort change, so the user's scroll position survives refreshes (R3). The scroll is **deferred to a `glib::idle`**: GTK settles the click through the sorter's `primary-sort-column`/`order` notifies first and commits the re-sort afterward; ListBase keeps its anchor item on screen by *identity*, so a scroll executed before the commit would pin the *old* first row and the viewport would land wherever that row moved to (the reported bug). An idle runs after the commit, when row 0 is already the new top row. |
 
 ### R — Refresh
 
