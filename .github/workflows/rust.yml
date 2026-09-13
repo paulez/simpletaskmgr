@@ -20,7 +20,11 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y libgtk-4-dev pkg-config
-    - name: Build
-      run: cargo build --verbose
+    - name: Format check
+      run: cargo fmt --check
+    - name: Lint
+      run: cargo clippy --all-targets
     - name: Run tests
       run: cargo test --verbose
+    - name: Build
+      run: cargo build --verbose
