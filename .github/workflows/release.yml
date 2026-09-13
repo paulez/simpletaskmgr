@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Required for `gh release create` to publish the release
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+      options: --user root
+    steps:
+    - name: Install build dependencies (Debian 13)
+      run: |
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          ca-certificates \
+          curl \
+          git \
+          build-essential \
+          pkg-config \
+          rustc \
+          cargo \
+          libgtk-4-dev \
+          gh
+        rustc --version
+        cargo --version
+    - uses: actions/checkout@v4
+    - name: Verify tag matches Cargo.toml version
+      id: version
+      run: |
+        tag="${GITHUB_REF_NAME#v}"
+        version="$(grep -m1 '^version[[:space:]]*=' Cargo.toml | cut -d'"' -f2)"
+        if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::Cargo.toml version '$version' is not full semver (expected X.Y.Z)"
+          exit 1
+        fi
+        if [ "$tag" != "$version" ]; then
+          echo "::error::Tag '${GITHUB_REF_NAME}' does not match Cargo.toml version '$version'"
+          exit 1
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+    - name: Build release binary
+      run: cargo build --release --locked
+    - name: Package artifacts
+      run: |
+        V="${{ steps.version.outputs.version }}"
+        PKG="simpletaskmgr-${V}-x86_64-linux"
+        mkdir -p "dist/${PKG}"
+        cp target/release/simpletaskmgr "dist/${PKG}/"
+        cp README.md LICENSE "dist/${PKG}/"
+        tar -czf "dist/${PKG}.tar.gz" -C dist "${PKG}"
+        ( cd dist && sha256sum "${PKG}.tar.gz" > SHA256SUMS && cat SHA256SUMS )
+    - name: Create GitHub release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        V="${{ steps.version.outputs.version }}"
+        # `gh release create` attaches the source tarball/zip for the tag
+        # automatically, plus the binary artifacts listed below.
+        gh release create "v${V}" \
+          --title "v${V}" \
+          --generate-notes \
+          "dist/simpletaskmgr-${V}-x86_64-linux.tar.gz" \
+          "dist/SHA256SUMS"
