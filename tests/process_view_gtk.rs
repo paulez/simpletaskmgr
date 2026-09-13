@@ -392,3 +392,49 @@ fn test_refresh_cadence_one_per_tick() {
         "3.2 s holds two 1.5 s ticks; saw {n} refreshes (a double refresh per tick reads 4+)",
     );
 }
+
+/// S8: a header click (new column, direction flip, or even a redundant re-click)
+/// settles the sort through the `ColumnViewSorter`'s `primary-sort-column` /
+/// `primary-sort-order` properties, and the view scrolls to the top on each —
+/// so the new first row is immediately visible. The one thing that must NOT
+/// trigger that scroll is a refresh tick: an update's `Sorter::changed`
+/// invalidation fires neither property, so the user's scroll position survives
+/// (R3). `sort_change_count` is the observable the harness uses: it bumps once
+/// per scroll-to-top, so it stands in for the scroll itself.
+#[test]
+fn test_sort_change_scrolls_to_top_but_ticks_do_not() {
+    run_gtk(|| {
+        let pv = ProcessView::new();
+        let a = item(1, 100);
+        let b = item(2, 200);
+        let c = item(3, 300);
+        pv.update(&[a, b.clone(), c.clone()]);
+        assert_eq!(pv.display_order(), vec![3, 2, 1], "CPU% desc at startup");
+
+        // Switching the active column is a genuine sort change -> scroll to top.
+        let before = pv.sort_change_count();
+        pv.sort_like_click(SortColumn::MemPercent, gtk4::SortType::Descending);
+        assert!(
+            pv.sort_change_count() > before,
+            "a header click on a new column must scroll the list to the top",
+        );
+
+        // Flipping the direction of the active column is a genuine change too.
+        let before = pv.sort_change_count();
+        pv.sort_like_click(SortColumn::MemPercent, gtk4::SortType::Ascending);
+        assert!(
+            pv.sort_change_count() > before,
+            "a direction flip must scroll the list to the top",
+        );
+
+        // The critical negative: a refresh tick must NOT fire, or every
+        // refresh would yank the user back to the top (R3).
+        let before = pv.sort_change_count();
+        pv.update(&[item(1, 300), b, c]); // new tick, fresh values
+        assert_eq!(
+            pv.sort_change_count(),
+            before,
+            "a refresh tick must not scroll the list to the top",
+        );
+    });
+}

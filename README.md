@@ -11,8 +11,11 @@ time, and lets you inspect individual processes in a live detail pane.
   full program name (`argv[0]`), not truncated to the kernel's 15-char `comm`.
 - **Sortable columns**: the list opens sorted by CPU%, heaviest first
   (`top`-style); click any other header to sort by that column (click
-  again to flip the direction). Rows with no value for a column
-  (blank MEM%/Disk) always stay at the bottom, in either sort direction.
+  again to flip the direction). Clicking a header also scrolls the list
+  back to the top, so the new first row (e.g. the heaviest-MEM process
+  after clicking MEM%) is visible right away. Rows with no value for a
+  column (blank MEM%/Disk) always stay at the bottom, in either sort
+  direction.
 - **Calm CPU ordering**: the CPU% column orders rows by each process's integer
   tick delta of the sample window (ties settle by PID, in `top`'s style), so
   rows that measure equal — including rows that display the same value — keep

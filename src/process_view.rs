@@ -25,7 +25,7 @@
 //! and a genuine reorder commit is one `items-changed` signal that GTK can
 //! pair with the re-additions to keep all row widgets (spec R2).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -507,6 +507,16 @@ fn apply_detail(d: &DetailLabels, item: Option<&ProcessItem>) {
 /// the same slot (a plain `RefCell::clone()` would be a copy, not a share).
 type SelectionCallback = Rc<RefCell<Option<Rc<dyn Fn(Option<i32>)>>>>;
 
+/** Scroll the column view so the top row is at the very top (S8). */
+fn scroll_column_view_to_top(column_view: &gtk4::ColumnView) {
+    column_view.scroll_to(
+        0,
+        Option::<&gtk4::ColumnViewColumn>::None,
+        gtk4::ListScrollFlags::NONE,
+        None,
+    );
+}
+
 pub struct ProcessView {
     root: gtk4::Box,
     column_view: gtk4::ColumnView,
@@ -514,6 +524,10 @@ pub struct ProcessView {
     sort_model: gtk4::SortListModel,
     selection: gtk4::SingleSelection,
     sorter: gtk4::Sorter,
+    /// Count of genuine sort-state changes (primary column or direction
+    /// flipped) — the trigger for the S8 scroll-to-top. Diagnostic/test
+    /// hook: an update-tick invalidation must **not** count as one (R3).
+    sort_changes: Rc<Cell<u32>>,
     list_scroll: gtk4::ScrolledWindow,
     detail: DetailLabels,
     /// One app callback at a time (last registered wins — spec D4). May fire
@@ -546,6 +560,36 @@ impl ProcessView {
         // SortListModel gets the view's own ColumnViewSorter.
         let sorter = column_view.sorter().expect("ColumnView exposes its sorter");
         let sort_model = gtk4::SortListModel::new(Some(store.clone()), Some(sorter.clone()));
+        // S8: every header click settles the sort through these two
+        // properties (new primary column, direction flip, or even a
+        // redundant re-click) — and only header clicks do: an update-tick
+        // invalidation kick (`Sorter::changed`) fires neither. Scrolling to
+        // the top on them brings the new first row into view immediately,
+        // without ever fighting a refresh (R3).
+        let sort_changes = Rc::new(Cell::new(0u32));
+        {
+            let view_sorter = sorter
+                .downcast_ref::<gtk4::ColumnViewSorter>()
+                .expect("ColumnView's sorter is a GTK 4.10+ ColumnViewSorter");
+            let cv = column_view.clone();
+            let sm = sort_model.clone();
+            let count = sort_changes.clone();
+            view_sorter.connect_primary_sort_column_notify(move |_| {
+                count.set(count.get() + 1);
+                if sm.n_items() > 0 {
+                    scroll_column_view_to_top(&cv);
+                }
+            });
+            let cv = column_view.clone();
+            let sm = sort_model.clone();
+            let count = sort_changes.clone();
+            view_sorter.connect_primary_sort_order_notify(move |_| {
+                count.set(count.get() + 1);
+                if sm.n_items() > 0 {
+                    scroll_column_view_to_top(&cv);
+                }
+            });
+        }
         let selection = gtk4::SingleSelection::new(Some(sort_model.clone()));
         selection.set_autoselect(false); // nothing selected at startup (spec D1)
         selection.set_can_unselect(true); // allow the NO_SELECTION sentinel (spec D2)
@@ -626,6 +670,7 @@ impl ProcessView {
             sort_model,
             selection,
             sorter,
+            sort_changes,
             list_scroll,
             detail,
             callback,
@@ -667,12 +712,13 @@ impl ProcessView {
 
     /// Start the first paint at the top of the list (spec R3 initial state).
     pub fn scroll_to_top(&self) {
-        self.column_view.scroll_to(
-            0,
-            Option::<&gtk4::ColumnViewColumn>::None,
-            gtk4::ListScrollFlags::NONE,
-            None,
-        );
+        scroll_column_view_to_top(&self.column_view);
+    }
+
+    /// Number of genuine sort changes (primary column or direction flipped;
+    /// S8 scrolls to the top on each). Test hook for that invariant.
+    pub fn sort_change_count(&self) -> u32 {
+        self.sort_changes.get()
     }
 
     /// One refresh tick (spec R): update survivors in place, apply the
