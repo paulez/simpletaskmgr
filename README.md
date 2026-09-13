@@ -106,6 +106,29 @@ Unknown or corrupt files fall back to the defaults; a missing file is created
 on your first change. Change settings at runtime via the **Settings** popover
 in the toolbar (with a "Reset to defaults" action).
 
+## Releases
+
+Releases are published automatically from a version tag. To cut a release
+(e.g. `1.0.0`):
+
+1. Bump `version` in `Cargo.toml` to a full semver value (`X.Y.Z`) and commit
+   (passing the usual `cargo test` / `cargo clippy` / `cargo fmt --check` gate).
+2. Tag and push:
+
+   ```bash
+   git tag v1.0.0
+   git push origin main --tags
+   ```
+3. The `release` workflow runs on `Debian 13` (x86_64), verifies the tag
+   matches the `Cargo.toml` version (and fails if they don't), and publishes
+   a GitHub release containing:
+   - `simpletaskmgr-<version>-x86_64-linux.tar.gz` (binary, README, LICENSE)
+   - `SHA256SUMS`
+   - the automatic source tarball/zip for the tag
+
+Every push to `main` and pull request also runs the standard gate
+(format, clippy, tests, build) via the `rust` workflow.
+
 ## License
 
 MIT OR Apache-2.0
