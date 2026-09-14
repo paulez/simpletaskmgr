@@ -735,7 +735,15 @@ pub fn build_window(
     rebuild();
     let view_map = view.clone();
     let win = window.clone();
-    win.connect_map(move |_| view_map.scroll_to_top());
+    win.connect_map(move |_| {
+        view_map.scroll_to_top();
+        // Headless render check: with this env var set, pre-select the first
+        // row so `tools/test_ui_render.sh` screenshots capture the detail
+        // pane (which is hidden until a row is selected).
+        if std::env::var_os("SIMPLETASKMGR_RENDER_SELECT_FIRST").is_some() {
+            view_map.selection().set_selected(0);
+        }
+    });
 
     // ---- Refresh timer ------------------------------------------------------------
     restart_timer(state, &rebuild, &graph_areas);

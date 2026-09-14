@@ -155,3 +155,10 @@ the target version changes. Prereleases publish as GitHub **pre-releases**
   the delivery tests, but has no button. SIGCONT/SIGSTOP/SIGUSR1/SIGUSR2 are
   not in the enum at all. See `doc/PROCESS_LIST_VIEW_SPEC.md` (D5).
 
+
+## Notes
+
+- **The app is a single instance (GApplication).** If an old instance is
+  still open, a fresh `cargo run` brings that old window to the front and
+  exits silently, so you would keep testing the old build. Close the
+  running instance before (re)starting a new one.
