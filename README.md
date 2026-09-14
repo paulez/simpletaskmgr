@@ -28,11 +28,16 @@ time, and lets you inspect individual processes in a live detail pane.
   (even scrolled down the list) instead of flickering on every tick.
 - **Show all processes**: toggle between every process on the system and only
   the current user's (default).
-- **Detail view**: click a process to see its live metrics in a side pane
-  (PID, name, CPU%, MEM%, and disk read/write speed), plus **Terminate**
-  (SIGTERM, graceful) and **Kill** (SIGKILL, forced) buttons to signal the
-  selected process — the outcome ("SIGTERM sent to pid 1234" or the
-  error, e.g. EPERM) is reported in the pane's status line.
+- **Detail view**: click a process to see its live metrics in a side pane —
+  PID, name, full **command line** (selectable to copy), **state**
+  (Running/Sleeping/…), **thread count**, **nice value**, **PPID**, CPU%,
+  MEM% **and absolute resident memory**, disk read/write speed, and its
+  **start time** with a running **uptime**. Unknown values (e.g. a kernel
+  thread's command line) show a placeholder rather than a misleading zero.
+  The pane also carries **Terminate** (SIGTERM, graceful) and **Kill**
+  (SIGKILL, forced) buttons to signal the selected process — the outcome
+  ("SIGTERM sent to pid 1234" or the error, e.g. EPERM) is reported in the
+  pane's status line.
 - **Resource graph**: always-on charts of system CPU & memory, and CPU
   frequency & temperature, over the last few minutes. Every pane carries a
   colour swatch + label legend below its plot so each series is identified

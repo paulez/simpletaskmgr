@@ -417,10 +417,18 @@ pub struct DetailLabels {
     pub pane: gtk4::ScrolledWindow,
     pub pid: gtk4::Label,
     pub name: gtk4::Label,
+    pub command: gtk4::Label,
+    pub state: gtk4::Label,
+    pub threads: gtk4::Label,
+    pub ppid: gtk4::Label,
+    pub nice: gtk4::Label,
     pub cpu: gtk4::Label,
     pub mem: gtk4::Label,
+    pub rss: gtk4::Label,
     pub disk_read: gtk4::Label,
     pub disk_write: gtk4::Label,
+    pub started: gtk4::Label,
+    pub uptime: gtk4::Label,
     /// `Terminate` button (SIGTERM) — spec D5.
     pub terminate: gtk4::Button,
     /// `Kill` button (SIGKILL) — spec D5.
@@ -447,11 +455,38 @@ fn build_detail_pane() -> DetailLabels {
     }
     let d_pid = mk_row("PID: —");
     let d_name = mk_row("Name: —");
+    // The command line can be arbitrarily long: wrap it and let the user
+    // select/copy it (e.g. to paste into a `kill` command manually).
+    let d_command = mk_row("Command: —");
+    d_command.set_wrap(true);
+    d_command.set_selectable(true);
+    let d_state = mk_row("State: —");
+    let d_threads = mk_row("Threads: —");
+    let d_ppid = mk_row("PPID: —");
+    let d_nice = mk_row("Nice: —");
     let d_cpu = mk_row("CPU%: —");
     let d_mem = mk_row("MEM%: —");
+    let d_rss = mk_row("Memory: —");
     let d_disk_read = mk_row("Disk read: —");
     let d_disk_write = mk_row("Disk write: —");
-    for row in [&d_pid, &d_name, &d_cpu, &d_mem, &d_disk_read, &d_disk_write] {
+    let d_started = mk_row("Started: —");
+    let d_uptime = mk_row("Uptime: —");
+    for row in [
+        &d_pid,
+        &d_name,
+        &d_command,
+        &d_state,
+        &d_threads,
+        &d_ppid,
+        &d_nice,
+        &d_cpu,
+        &d_mem,
+        &d_rss,
+        &d_disk_read,
+        &d_disk_write,
+        &d_started,
+        &d_uptime,
+    ] {
         box_v.append(row);
     }
 
@@ -487,18 +522,28 @@ fn build_detail_pane() -> DetailLabels {
         pane,
         pid: d_pid,
         name: d_name,
+        command: d_command,
+        state: d_state,
+        threads: d_threads,
+        ppid: d_ppid,
+        nice: d_nice,
         cpu: d_cpu,
         mem: d_mem,
+        rss: d_rss,
         disk_read: d_disk_read,
         disk_write: d_disk_write,
+        started: d_started,
+        uptime: d_uptime,
         terminate,
         kill,
         status,
     }
 }
 
-/// Fill the pane fields from `item`; clear and hide when `None` (spec D2/D3). Show
-/// "—" for unknown values (spec V4).
+/// Fill the pane fields from `item`; clear and hide when `None` (spec D2/D3),
+/// showing `"—"` for unknown values (spec V4). Uptime is computed against the
+/// current wall clock so the displayed age grows with real time even if the
+/// snapshot is a moment stale.
 fn dash(s: &str) -> String {
     if s.is_empty() {
         "—".to_string()
@@ -507,28 +552,72 @@ fn dash(s: &str) -> String {
     }
 }
 
+/// Nice value with an explicit sign on non-zero values (`+5`, `-2`), like
+/// `top`/`ps` show; zero stays `0`.
+fn nice_str(nice: i64) -> String {
+    if nice > 0 {
+        format!("+{nice}")
+    } else {
+        nice.to_string()
+    }
+}
+
+fn now_epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn apply_detail(d: &DetailLabels, item: Option<&ProcessItem>) {
-    let Some(p) = item else {
+    if item.is_none() {
         d.pane.set_visible(false);
-        for l in [&d.pid, &d.name, &d.cpu, &d.mem, &d.disk_read, &d.disk_write] {
+        for l in [
+            &d.pid,
+            &d.name,
+            &d.command,
+            &d.state,
+            &d.threads,
+            &d.ppid,
+            &d.nice,
+            &d.cpu,
+            &d.mem,
+            &d.rss,
+            &d.disk_read,
+            &d.disk_write,
+            &d.started,
+            &d.uptime,
+        ] {
             l.set_label("");
         }
         d.status.set_label("");
         return;
-    };
+    }
+    let p: &TaskMgrProcess = &item.expect("checked above").value;
     d.pane.set_visible(true);
     d.status.set_label("");
-    let p: &TaskMgrProcess = &p.value;
+    let now = now_epoch_secs();
     d.pid.set_label(&format!("PID: {}", p.pid));
     d.name.set_label(&format!("Name: {}", p.name));
+    d.command
+        .set_label(&format!("Command: {}", dash(&p.cmdline_str())));
+    d.state.set_label(&format!("State: {}", p.state_str()));
+    d.threads.set_label(&format!("Threads: {}", p.threads));
+    d.ppid.set_label(&format!("PPID: {}", p.ppid));
+    d.nice.set_label(&format!("Nice: {}", nice_str(p.nice)));
     d.cpu
         .set_label(&format!("CPU%: {}", dash(&p.cpu_percent_str())));
     d.mem
         .set_label(&format!("MEM%: {}", dash(&p.mem_percent_str())));
+    d.rss.set_label(&format!("Memory: {}", dash(&p.rss_str())));
     d.disk_read
         .set_label(&format!("Disk read: {}", dash(&p.disk_read_str())));
     d.disk_write
         .set_label(&format!("Disk write: {}", dash(&p.disk_write_str())));
+    d.started
+        .set_label(&format!("Started: {}", dash(&p.started_str())));
+    d.uptime
+        .set_label(&format!("Uptime: {}", dash(&p.elapsed_str(now))));
 }
 
 /// The list + detail view subtree to embed in the window, one process per

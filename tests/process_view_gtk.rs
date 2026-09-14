@@ -527,3 +527,87 @@ fn test_signal_buttons_forward_and_status() {
         );
     });
 }
+
+#[test]
+fn test_detail_pane_renders_free_tier_fields() {
+    // The detail pane renders the free-tier per-process details from the
+    // data a selection carries; unknown fields fall back to the `—`
+    // placeholder (spec V4), and the command line row is selectable.
+    run_gtk(|| {
+        let pv = ProcessView::new();
+
+        // A fully-populated row: every field present so we can assert the
+        // exact rendered text of each row.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut p = TaskMgrProcess::new("myapp".to_string(), 1234, 1000, "paul".to_string(), 12.3);
+        p.cmdline = Some("myapp --flag value".to_string());
+        p.state = 'S';
+        p.threads = 4;
+        p.nice = 5;
+        p.ppid = 777;
+        p.mem_percent = Some(1.5);
+        p.rss_kb = Some(314_572);
+        p.start_epoch = Some(now - 5);
+        let full = ProcessItem::new(&p);
+        pv.update(std::slice::from_ref(&full));
+        pv.selection().set_selected(0);
+
+        let d = pv.detail_labels();
+        assert!(d.pane.is_visible());
+        assert_eq!(d.pid.label(), "PID: 1234");
+        assert_eq!(d.name.label(), "Name: myapp");
+        assert_eq!(d.command.label(), "Command: myapp --flag value");
+        assert!(
+            d.command.is_selectable(),
+            "the command line row is selectable for copy-paste"
+        );
+        assert_eq!(d.state.label(), "State: Sleeping");
+        assert_eq!(d.threads.label(), "Threads: 4");
+        assert_eq!(d.ppid.label(), "PPID: 777");
+        assert_eq!(d.nice.label(), "Nice: +5", "positive nice signs explicitly");
+        assert_eq!(d.mem.label(), "MEM%: 1.5%");
+        assert_eq!(
+            d.rss.label(),
+            "Memory: 307.2 MiB",
+            "314572 KiB renders as MiB"
+        );
+        assert!(
+            d.started.label().starts_with("Started: ") && d.started.label() != "Started: —",
+            "a known start time renders (got {:?})",
+            d.started.label().as_str()
+        );
+        assert!(
+            d.uptime.label().starts_with("Uptime: ") && d.uptime.label() != "Uptime: —",
+            "a known start time renders an age (got {:?})",
+            d.uptime.label().as_str()
+        );
+
+        // A data-free row (kernel thread / zombie with no cmdline, no RSS,
+        // no birth time) renders the `—` placeholder on every unknown field,
+        // while the always-present stat fields still show their values.
+        let bare = item(5678, 10);
+        pv.update(std::slice::from_ref(&bare));
+        pv.selection()
+            .set_selected(pv.display_order().iter().position(|x| *x == 5678).unwrap() as u32);
+        let d = pv.detail_labels();
+        assert_eq!(d.pid.label(), "PID: 5678");
+        assert_eq!(
+            d.command.label(),
+            "Command: —",
+            "absent cmdline -> placeholder"
+        );
+        assert_eq!(d.threads.label(), "Threads: 0");
+        assert_eq!(d.ppid.label(), "PPID: 0");
+        assert_eq!(d.nice.label(), "Nice: 0", "zero nice stays unsigned");
+        assert_eq!(d.rss.label(), "Memory: —", "absent RSS -> placeholder");
+        assert_eq!(
+            d.started.label(),
+            "Started: —",
+            "absent start -> placeholder"
+        );
+        assert_eq!(d.uptime.label(), "Uptime: —", "absent start -> no age");
+    });
+}
