@@ -37,6 +37,32 @@ pub struct TaskMgrProcess {
     pub disk_read_speed: Option<f64>,
     /// Disk write speed in bytes/second, or `None` when no rate is known yet.
     pub disk_write_speed: Option<f64>,
+    /// The full command line (`argv` joined by single spaces), or `None` when
+    /// the process has no readable cmdline — kernel threads and zombies have
+    /// an empty one. Shown as its own row in the detail pane.
+    pub cmdline: Option<String>,
+    /// The process state (`/proc/<pid>/stat` field 3): one of `R` (running),
+    /// `S` (sleeping), `D` (disk sleep), `Z` (zombie), `T` (stopped),
+    /// `t` (traced), `I` (idle kernel thread), `P` (parked kernel thread).
+    /// Displayed through [`state_name`].
+    pub state: char,
+    /// The number of threads in the process (`/proc/<pid>/stat` field 20).
+    /// `0` when the row was not built from a real `stat` (test fixtures).
+    pub threads: u64,
+    /// The process's scheduling priority, signed (lower runs sooner); the
+    /// conventional range is `-20..19`.
+    pub nice: i64,
+    /// The parent process's PID (`/proc/<pid>/stat` field 4). `0` when the
+    /// row was not built from a real `stat` (test fixtures).
+    pub ppid: i32,
+    /// The resident set size in KiB (`VmRSS`), or `None` when it could not
+    /// be read (e.g. another user's kernel thread). Displayed alongside the
+    /// MEM% as the absolute memory use.
+    pub rss_kb: Option<u64>,
+    /// The process start time as Unix seconds, or `None` when it could not
+    /// be derived (no `/proc/uptime`, or a counter regression). Shown as a
+    /// wall-clock timestamp plus the process's age ("uptime").
+    pub start_epoch: Option<i64>,
 }
 
 impl TaskMgrProcess {
@@ -51,6 +77,13 @@ impl TaskMgrProcess {
             mem_percent: None,
             disk_read_speed: None,
             disk_write_speed: None,
+            cmdline: None,
+            state: 'S',
+            threads: 0,
+            nice: 0,
+            ppid: 0,
+            rss_kb: None,
+            start_epoch: None,
         }
     }
 
@@ -74,6 +107,39 @@ impl TaskMgrProcess {
     pub fn disk_write_str(&self) -> String {
         format_disk_speed(self.disk_write_speed)
     }
+
+    /// The full command line, or `""` when none was captured (kernel thread,
+    /// zombie) — the UI then shows its `"—"` placeholder.
+    pub fn cmdline_str(&self) -> String {
+        self.cmdline.clone().unwrap_or_default()
+    }
+
+    /// The process state formatted for humans, e.g. `"Sleeping"`.
+    pub fn state_str(&self) -> String {
+        state_name(self.state)
+    }
+
+    /// The resident set size formatted like `"312 MB"`, or `""` when unknown.
+    pub fn rss_str(&self) -> String {
+        format_size_kb(self.rss_kb)
+    }
+
+    /// The process's age relative to `now_epoch` (Unix seconds) formatted
+    /// like `"2h 3m"`, or `""` when the start time is unknown.
+    pub fn elapsed_str(&self, now_epoch: i64) -> String {
+        self.start_epoch
+            .map(|start| elapsed_secs_str(now_epoch.saturating_sub(start)))
+            .unwrap_or_default()
+    }
+
+    /// The start time label (local wall-clock) — the time of day for a
+    /// process started today, or the date plus a shorter time for one from
+    /// another day — or `""` when the birth time is unknown so the UI shows
+    /// its `"—"` placeholder. Delegates to the free [`start_time_str`] with
+    /// this row's stored epoch.
+    pub fn started_str(&self) -> String {
+        start_time_str(self.start_epoch)
+    }
 }
 
 /// Formats a bytes/second rate with a unit suffix, e.g. `"12.3 KiB/s"`.
@@ -95,6 +161,137 @@ pub fn format_disk_speed(bytes_per_sec: Option<f64>) -> String {
         format!("{value:.0} {}", UNITS[idx])
     } else {
         format!("{value:.1} {}", UNITS[idx])
+    }
+}
+
+/// Maps a `/proc/<pid>/stat` state letter to a human name.
+///
+/// Mirrors the kernel's letter codes (`R`/`S`/`D`/`Z`/`T`/`t`/`I`/`P`); an
+/// unrecognized letter is passed through rather than dropped so a future
+/// kernel state doesn't silently read as a different one below it.
+pub fn state_name(c: char) -> String {
+    match c {
+        'R' => "Running".to_string(),
+        'S' => "Sleeping".to_string(),
+        'D' => "Disk sleep".to_string(),
+        'Z' => "Zombie".to_string(),
+        'T' => "Stopped".to_string(),
+        't' => "Traced".to_string(),
+        'I' => "Idle kernel".to_string(),
+        'P' => "Parked kernel".to_string(),
+        other => format!("Unknown ({other})"),
+    }
+}
+
+/// Formats an absolute memory size given in **KiB** with a unit suffix, e.g.
+/// `"312 MB"`. `None` (unreadable) formats to the empty string so the UI can
+/// show a blank cell instead of a misleading zero. Sizes under 1 MiB are
+/// shown in KiB; the detail pane is the only user and human memory readings
+/// are almost always ≥ 1 MiB, so KiB is kept for small kernel threads.
+pub fn format_size_kb(kb: Option<u64>) -> String {
+    let Some(kb) = kb else {
+        return String::new();
+    };
+    let bytes = kb.saturating_mul(1024);
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut idx = 0usize;
+    while value >= 1024.0 && idx < UNITS.len() - 1 {
+        value /= 1024.0;
+        idx += 1;
+    }
+    if idx == 0 {
+        format!("{value:.0} {}", UNITS[idx])
+    } else {
+        format!("{value:.1} {}", UNITS[idx])
+    }
+}
+
+/// Formats a process age in whole seconds as a compact duration, e.g. `"2h
+/// 3m"`, `"45s"`. Sub-second ages collapse to `"0s"`; negatives (a start time
+/// in the future, which must not happen) clamp to zero rather than render a
+/// nonsense negative duration.
+pub fn elapsed_secs_str(secs: i64) -> String {
+    let secs = secs.max(0);
+    let d = secs / 86_400;
+    let h = (secs % 86_400) / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if d > 0 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
+        format!("{h}h {m}m")
+    } else if m > 0 {
+        format!("{m}m {s}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// Derives the process start time as **Unix seconds** from its
+/// `stat.starttime` (clock ticks *since boot*, not an epoch)
+///
+/// The conversion is `now - age`, where `age = uptime - starttime/tps` is the
+/// process's age in seconds at the moment `/proc/uptime` was read and `tps` is
+/// the host's clock ticks per second. `None` when `uptime` is `None`
+/// (`/proc/uptime` unreadable), `tps` is `0`, the age is negative (a counter
+/// regression), or the arithmetic would overflow.
+pub fn parse_stat_start_time(
+    now_epoch: i64,
+    uptime_secs: Option<f64>,
+    starttime_ticks: u64,
+    tps: u64,
+) -> Option<i64> {
+    let up = uptime_secs?;
+    let tps = if tps == 0 { return None } else { tps };
+    let secs_since_boot = starttime_ticks as f64 / tps as f64;
+    let age = up - secs_since_boot;
+    if age < 0.0 {
+        return None;
+    }
+    let age_secs = age as i64;
+    now_epoch.checked_sub(age_secs)
+}
+
+/// Formats a start time (Unix seconds) for display.
+///
+/// Delegates to [`format_time_at`] with the host's local UTC offset, so the
+/// label reads local wall-clock time (a process manager's audience reads
+/// local time). Returns `""` for `None` so the UI can show its `"—"`
+/// placeholder.
+pub fn start_time_str(epoch_secs: Option<i64>) -> String {
+    let Some(secs) = epoch_secs else {
+        return String::new();
+    };
+    use chrono::Local;
+    let now = Local::now();
+    let offset = now.offset().utc_minus_local();
+    format_time_at(secs, now.timestamp(), offset)
+}
+
+/// Pure formatting of a start time with an explicit UTC offset and `now`
+/// reference — testable without touching the host's timezone.
+///
+/// Within the same local calendar day as `now` only the time is shown (the
+/// common case for a freshly started process); otherwise the date is
+/// included so a process from days ago isn't mistaken for one from hours
+/// ago. `""` when the offset is out of range for a [`chrono::FixedOffset`]
+/// or a timestamp is invalid.
+pub fn format_time_at(secs: i64, now_secs: i64, offset_secs: i32) -> String {
+    use chrono::{FixedOffset, TimeZone};
+    let Some(tz) = FixedOffset::east_opt(offset_secs) else {
+        return String::new();
+    };
+    let Some(dt) = tz.timestamp_opt(secs, 0).latest() else {
+        return String::new();
+    };
+    let Some(now) = tz.timestamp_opt(now_secs, 0).latest() else {
+        return String::new();
+    };
+    if dt.format("%Y-%m-%d").to_string() == now.format("%Y-%m-%d").to_string() {
+        dt.format("%H:%M:%S").to_string()
+    } else {
+        dt.format("%Y-%m-%d %H:%M").to_string()
     }
 }
 
@@ -159,6 +356,13 @@ pub(crate) fn build_task_mgr_process(
         mem_percent: None,
         disk_read_speed: None,
         disk_write_speed: None,
+        cmdline: None,
+        state: stat.state,
+        threads: stat.num_threads.max(0) as u64,
+        nice: stat.nice,
+        ppid: stat.ppid,
+        rss_kb: None,
+        start_epoch: None,
     }
 }
 
@@ -352,5 +556,119 @@ mod tests {
             resolve_process_name("some-comm-name", Some(cmdline.as_slice())),
             "some-comm-name"
         );
+    }
+
+    /// Kernel state letters map to their conventional names; an unfamiliar
+    /// letter is passed through (labeled) rather than silently mis-rendered.
+    #[test]
+    fn test_state_name_maps_kernel_letters() {
+        for (letter, name) in [
+            ('R', "Running"),
+            ('S', "Sleeping"),
+            ('D', "Disk sleep"),
+            ('Z', "Zombie"),
+            ('T', "Stopped"),
+            ('t', "Traced"),
+            ('I', "Idle kernel"),
+            ('P', "Parked kernel"),
+        ] {
+            assert_eq!(state_name(letter), name, "state {letter}");
+        }
+        // An unknown letter keeps its identity in the label.
+        assert_eq!(state_name('Q'), "Unknown (Q)");
+    }
+
+    /// Absolute memory sizes render with a binary unit suffix and one decimal
+    /// place (KiB and up); `None` and sub-KiB stay unambiguous.
+    #[test]
+    fn test_format_size_kb_units() {
+        assert_eq!(format_size_kb(None), "", "None → blank cell");
+        assert_eq!(format_size_kb(Some(512)), "512.0 KiB", "512 KiB");
+        assert_eq!(format_size_kb(Some(3072)), "3.0 MiB", "3 MiB");
+        assert_eq!(
+            format_size_kb(Some(314_572)),
+            "307.2 MiB",
+            "307.2 MiB (314572 KiB)"
+        );
+        assert_eq!(
+            format_size_kb(Some(1_610_612_736)),
+            "1.5 TiB",
+            "1536 GiB input promotes to TiB (1536 GiB >= 1024 GiB)"
+        );
+    }
+
+    /// Ages render compactly: days+hours, hours+minutes, minutes+seconds,
+    /// then seconds; a negative age (start in the future) clamps to `0s`.
+    #[test]
+    fn test_elapsed_secs_str_compacts() {
+        assert_eq!(elapsed_secs_str(0), "0s");
+        assert_eq!(elapsed_secs_str(45), "45s");
+        assert_eq!(elapsed_secs_str(5_400), "1h 30m", "5400s = 1h 30m");
+        assert_eq!(
+            elapsed_secs_str(86_400 + 2 * 3600 + 90),
+            "1d 2h",
+            "day + hour drops minutes"
+        );
+        assert_eq!(elapsed_secs_str(-100), "0s", "negative clamps to 0s");
+    }
+
+    /// The start time is `now - (uptime - starttime/tps)`: the process's
+    /// birth, not a tick count. `None` guards a missing `/proc/uptime`, a
+    /// zero tick rate, and a counter regression (future start).
+    #[test]
+    fn test_parse_stat_start_time() {
+        // `now` = 5000s, `uptime` = 1000s, born 10000 ticks ago at 100 Hz
+        // (100s after boot) → the process started 900s before `now` → 4100.
+        assert_eq!(
+            parse_stat_start_time(5_000, Some(1000.0), 10_000, 100),
+            Some(4_100)
+        );
+        // `now` = 1000s, `uptime` = 1000s, born 5000 ticks (50s) after boot
+        // → age 950s → start = 1000 - 950 = 50 (just after the epoch).
+        assert_eq!(
+            parse_stat_start_time(1_000, Some(1_000.0), 5_000, 100),
+            Some(50)
+        );
+        assert_eq!(
+            parse_stat_start_time(5_000, None, 10_000, 100),
+            None,
+            "no /proc/uptime → unknown"
+        );
+        assert_eq!(
+            parse_stat_start_time(5_000, Some(1000.0), 10_000, 0),
+            None,
+            "zero ticks/sec is unusable"
+        );
+        // Started after now: `starttime/tps > uptime` (e.g. `uptime` read
+        // before boot) → a regression the caller must drop, not show as a
+        // negative age.
+        assert_eq!(
+            parse_stat_start_time(5_000, Some(10.0), 10_000, 100),
+            None,
+            "counter regression → None, not a future timestamp"
+        );
+        // Sub-second precision floors to whole seconds: born 1.37s after
+        // boot (137 ticks at 100 Hz), system up 150s → age 148s (truncated)
+        // → start = 150 - 148 = 2s after the epoch.
+        assert_eq!(
+            parse_stat_start_time(150, Some(150.0), 137, 100),
+            Some(2),
+            "1.37s birth with 150s uptime → start = epoch + 2s"
+        );
+    }
+
+    /// `format_time_at` shows the time alone within a day; the date plus
+    /// shorter time once the day differs, given an explicit UTC offset so the
+    /// result is host-timezone independent (testable deterministically).
+    #[test]
+    fn test_format_time_at_same_day_vs_cross_day() {
+        // `secs` = 2024-01-03 08:10:00 UTC; same-day and different-day `now`.
+        let secs = 1_704_269_400;
+        let now_same = 1_704_294_000; // 2024-01-03 15:00 UTC (same day)
+        let now_next = 1_704_380_400; // 2024-01-04 15:00 UTC (different day)
+        assert_eq!(format_time_at(secs, now_same, 0), "08:10:00");
+        assert_eq!(format_time_at(secs, now_next, 0), "2024-01-03 08:10");
+        // A +2h offset keeps both points on local day 01-03 (10:10 / 17:10).
+        assert_eq!(format_time_at(secs, now_same, 7_200), "10:10:00");
     }
 }

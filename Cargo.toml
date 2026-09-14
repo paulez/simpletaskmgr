@@ -12,6 +12,7 @@ simplelog = "0.12.2"
 users = "0.11.0"
 anyhow = "1.0.104"
 libc = "0.2.189"
+chrono = "0.4"
 cairo-rs = "0.22"
 glib = "0.22"
 serde = { version = "1", features = ["derive"] }

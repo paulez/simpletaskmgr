@@ -1,7 +1,11 @@
 use crate::cpu_tracker::CpuTracker;
+use crate::disk_status::read_uptime_secs;
 use crate::io_tracker::IoTracker;
 use crate::metrics::read_mem_total_kb;
-use crate::process::{build_task_mgr_process, resolve_process_name, ProcessItem, TaskMgrProcess};
+use crate::process::{
+    build_task_mgr_process, parse_stat_start_time, resolve_process_name, ProcessItem,
+    TaskMgrProcess,
+};
 use anyhow::{Context, Result};
 use log::{debug, warn};
 use procfs::process;
@@ -81,8 +85,17 @@ impl ProcessList {
         let current_uid = self.users_cache.get_current_uid();
         debug!("Current UID: {}", current_uid);
 
-        // Read once per refresh and reuse for every row's MEM%.
+        // Read once per refresh and reuse for every row's MEM% and birth time.
         let mem_total_kb = read_mem_total_kb();
+        // `stat.starttime` is clock ticks *since boot*, so a birth time needs
+        // the host's uptime and ticks-per-second (read once per refresh
+        // alongside the MEM% total) plus a `now` reference taken once too.
+        let uptime_secs = read_uptime_secs();
+        let tps = procfs::ticks_per_second();
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(i64::MAX);
 
         let all_processes_iter = process::all_processes().context("Can't read /proc filesystem")?;
         let mut all_processes = Vec::new();
@@ -144,8 +157,11 @@ impl ProcessList {
                 // `stat.comm` is kernel-capped at 15 chars, so the row's name
                 // is re-derived from the process's `argv[0]` when the cmdline is
                 // readable; the fallback is `comm` (kernel threads, zombies).
-                task_mgr_process.name =
-                    resolve_process_name(&stat.comm, proc.cmdline().ok().as_deref());
+                // The same cmdline read feeds the detail pane's full command
+                // line (empty for kernel threads and zombies).
+                let cmdline = proc.cmdline().ok().filter(|v| !v.is_empty());
+                task_mgr_process.name = resolve_process_name(&stat.comm, cmdline.as_deref());
+                task_mgr_process.cmdline = cmdline.map(|argv| argv.join(" "));
                 self.cpu_tracker
                     .update_process_cpu(&mut task_mgr_process, &stat);
                 // MEM% = VmRSS / MemTotal * 100 (top-style). `top` reads this
@@ -159,9 +175,15 @@ impl ProcessList {
                         let rss_kb = statm.resident.saturating_mul(procfs::page_size() / 1024);
                         if rss_kb > 0 {
                             task_mgr_process.mem_percent = Some(mem_percent_of(rss_kb, total));
+                            task_mgr_process.rss_kb = Some(rss_kb);
                         }
                     }
                 }
+                // Birth time: `now - (uptime - starttime/tps)`; `None` (a blank
+                // cell) when any piece is unreadable or a counter has
+                // regressed.
+                task_mgr_process.start_epoch =
+                    parse_stat_start_time(now_epoch, uptime_secs, stat.starttime, tps);
                 // /proc/[pid]/io is only readable for self-owned processes
                 // (EACCES otherwise), so skip the read entirely for other
                 // users' processes — the rate column stays blank. As root
@@ -349,5 +371,92 @@ mod tests {
         assert!(list.show_all);
         list.set_show_all(false);
         assert!(!list.show_all);
+    }
+
+    /// Refreshing fills the detail-pane "free tier" fields from the already-
+    /// read `stat`/`cmdline`: our own process's row must carry a full command
+    /// line, a valid state letter, ≥ 1 thread, a sane nice, a PPID, an
+    /// absolute RSS, and a birth time in the recent past.
+    #[test]
+    fn test_refresh_populates_detail_fields_for_our_own_process() {
+        // Our process is `cargo test`, which is the current user, so it is
+        // in the `show_all == false` (default) set.
+        let mut list = ProcessList::new();
+        let row = list
+            .refresh_process_list()
+            .expect("refresh")
+            .into_iter()
+            .find(|p| p.pid == std::process::id() as i32)
+            .expect("our own process must be in the list");
+
+        assert!(
+            row.cmdline.as_ref().is_some_and(|c| !c.is_empty()),
+            "our process has a readable cmdline (got {:?})",
+            row.cmdline
+        );
+        assert!(
+            matches!(
+                row.state,
+                'R' | 'S' | 'D' | 'Z' | 'T' | 't' | 'I' | 'P' | 'W' | 'X'
+            ),
+            "state {:?} is a recognized kernel letter",
+            row.state
+        );
+        assert!(row.threads >= 1, "a live process has at least one thread");
+        assert!(
+            (-20..=19).contains(&row.nice),
+            "nice within -20..19 (got {})",
+            row.nice
+        );
+        assert!(row.ppid >= 1, "our process has a parent");
+        assert!(
+            row.rss_kb.is_some_and(|kb| kb > 0),
+            "RSS in KiB (got {:?})",
+            row.rss_kb
+        );
+        let start = row.start_epoch.expect("birth time should be derived");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        assert!(
+            start <= now && now - start < 3_600,
+            "birth time {} is in the recent past (now {})",
+            start,
+            now
+        );
+    }
+
+    /// `TaskMgrProcess` defaults its detail-pane fields to "unknown" when
+    /// constructed directly (`new`), so a fixture row renders blanks, but a
+    /// real `stat` (via `build_task_mgr_process`) fills the state, threads,
+    /// nice, and PPID.
+    #[test]
+    fn test_new_defaults_detail_fields_unknown_but_stat_fills_them() {
+        let default_row = TaskMgrProcess::new("x".into(), 1, 0, "u".into(), 0.0);
+        assert!(default_row.cmdline.is_none());
+        assert!(default_row.rss_kb.is_none());
+        assert!(default_row.start_epoch.is_none());
+        assert_eq!(default_row.threads, 0);
+        assert_eq!(default_row.ppid, 0);
+
+        // Read our own real `stat` and confirm `build_task_mgr_process` fills
+        // the `stat`-derived fields (cmdline/RSS/start are set by the caller).
+        use procfs::process::all_processes;
+        let me = all_processes()
+            .expect("/proc")
+            .find_map(|r| r.ok().filter(|p| p.pid() == std::process::id() as i32))
+            .expect("our own process")
+            .stat()
+            .expect("stat");
+        let built = build_task_mgr_process(&me, 0, "u".to_string());
+        assert!(
+            matches!(built.state, 'R' | 'S' | 'D' | 'Z' | 'T' | 't' | 'I' | 'P'),
+            "state {:?}",
+            built.state
+        );
+        assert!(built.threads >= 1);
+        assert_eq!(built.ppid, me.ppid, "PPID copied straight from stat");
+        assert_eq!(built.nice, me.nice, "nice copied straight from stat");
     }
 }
