@@ -83,7 +83,7 @@ impl State {
     /// unit-test cost of `State` that involves an external binary, and the
     /// `/proc/[pid]` walk in `ProcessList::init()` is the one expensive live
     /// I/O call — both are exercised by integration tests, not unit tests
-    /// (see `doc/TEST_FD_LIMIT_FIX_PLAN.md`).
+    /// (see `tests/integration_tests.rs`).
     pub fn with_settings_path(path: std::path::PathBuf) -> Self {
         let settings = UserSettings::load(&path);
         let mut process_list = ProcessList::init();

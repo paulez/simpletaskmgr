@@ -98,8 +98,8 @@ Same category as above: this code exists specifically so the
 user has a row selected, refreshes, and the row stays in the list, the
 selection should stay. If we removed this code and GTK's default
 autoselect fired, the UI would jump to row 0 on every refresh — that
-is exactly the kind of regression the doc/TEST_FD_LIMIT_BUG.md and
-GTK_REFRESH_BUG.md investigations were written around.
+is exactly the kind of regression the cell-binding and refresh-flicker
+investigations (see `doc/REORDER_FLICKER.md`) were written around.
 
 Revisit condition: a GTK release that makes `SingleSelection` not
 autoselect on `items-changed`, or a user-visible bug that this code

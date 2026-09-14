@@ -214,7 +214,7 @@ mod imp {
 /// to the row's string property `prop`.
 ///
 /// GTK does not own a `glib::Binding`: dropping the Rust handle does *not*
-/// dispose the binding (`doc/GTK_REFRESH_BUG.md`). The factory therefore
+/// dispose the binding. The factory therefore
 /// parks the live binding in the label (via [`cell_label::park`]) and
 /// disposes it on recycle (`[`cell_label::take_and_unbind`]`) — in
 /// `connect_unbind` on the happy path and as a defensive tripwire in
@@ -267,7 +267,7 @@ fn cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
         }
         // `g_object_bind_property` auto-drops the binding when either the row
         // object or the cell widget is destroyed — but GTK keeps the binding
-        // C-side by itself (`doc/GTK_REFRESH_BUG.md`), so park the handle to
+        // C-side by itself, so park the handle to
         // let `connect_unbind` retire it by reference. `sync_create` copies
         // the current value into the label immediately (setup and bind may
         // run in either order).

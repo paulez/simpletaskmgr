@@ -67,7 +67,7 @@ The data layer (`process.rs`, `process_list.rs`, `cpu_tracker.rs`,
 
 | # | Requirement |
 |---|-------------|
-| B1 | **Cell-slot binding hygiene**: GTK recycles row widgets. A data binding created for a recycled cell slot must be discarded the moment the slot is recycled again, so a stale binding can never point at another process's data. (Leaking the bindings instead is what this project already suffered — `GTK_REFRESH_BUG`.) |
+| B1 | **Cell-slot binding hygiene**: GTK recycles row widgets. A data binding created for a recycled cell slot must be discarded the moment the slot is recycled again, so a stale binding can never point at another process's data. (Leaking the bindings instead is what this project already suffered.) |
 | B2 | **Re-entrancy**: a refresh may fire the selection callback into the app (GTK changes the selection position synchronously during a store commit). No app borrow, no `&State` RefCell, may be held across the GTK call; the callback must be safe to run while a refresh is in flight. |
 | B3 | **Degradation**: unreadable fields degrade to an empty cell (V3), never to a failed refresh or panic. |
 | B4 | All diagnostics via the `log` crate (`error!`/`warn!`/`debug!`), never `println!`/`dbg!`. |
