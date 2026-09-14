@@ -547,8 +547,6 @@ fn test_detail_pane_renders_free_tier_fields() {
         p.state = 'S';
         p.threads = 4;
         p.nice = 5;
-        p.ppid = 777;
-        p.mem_percent = Some(1.5);
         p.rss_kb = Some(314_572);
         p.start_epoch = Some(now - 5);
         let full = ProcessItem::new(&p);
@@ -557,7 +555,6 @@ fn test_detail_pane_renders_free_tier_fields() {
 
         let d = pv.detail_labels();
         assert!(d.pane.is_visible());
-        assert_eq!(d.pid.label(), "PID: 1234");
         assert_eq!(d.name.label(), "Name: myapp");
         assert_eq!(d.command.label(), "Command: myapp --flag value");
         assert!(
@@ -566,9 +563,7 @@ fn test_detail_pane_renders_free_tier_fields() {
         );
         assert_eq!(d.state.label(), "State: Sleeping");
         assert_eq!(d.threads.label(), "Threads: 4");
-        assert_eq!(d.ppid.label(), "PPID: 777");
         assert_eq!(d.nice.label(), "Nice: +5", "positive nice signs explicitly");
-        assert_eq!(d.mem.label(), "MEM%: 1.5%");
         assert_eq!(
             d.rss.label(),
             "Memory: 307.2 MiB",
@@ -593,14 +588,12 @@ fn test_detail_pane_renders_free_tier_fields() {
         pv.selection()
             .set_selected(pv.display_order().iter().position(|x| *x == 5678).unwrap() as u32);
         let d = pv.detail_labels();
-        assert_eq!(d.pid.label(), "PID: 5678");
         assert_eq!(
             d.command.label(),
             "Command: —",
             "absent cmdline -> placeholder"
         );
         assert_eq!(d.threads.label(), "Threads: 0");
-        assert_eq!(d.ppid.label(), "PPID: 0");
         assert_eq!(d.nice.label(), "Nice: 0", "zero nice stays unsigned");
         assert_eq!(d.rss.label(), "Memory: —", "absent RSS -> placeholder");
         assert_eq!(

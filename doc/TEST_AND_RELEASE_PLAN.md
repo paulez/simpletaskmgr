@@ -15,11 +15,13 @@ section for the summary).
 - **A failure pop-up** when a signal cannot be delivered (EPERM/ESRCH):
   the pane status line and a dismissible dialog both report the error;
   the process is left exactly as it was.
-- **Expanded process detail pane**: on top of the existing CPU%/MEM%/disk
-  rows, the pane now shows the full command line (wrapping, selectable to
-  copy), state (Sleeping/Running/…), thread count, signed nice, PPID,
-  absolute memory (RSS in a human unit), start time, and a running uptime;
-  unknown values render a `—` placeholder, never a misleading zero.
+- **Expanded, compact process detail pane**: the pane now shows the full
+  command line (wrapping, selectable to copy), state (Sleeping/Running/…),
+  thread count, signed nice, absolute memory (RSS in a human unit), start
+  time, and a running uptime — while the values the row already shows
+  (PID, CPU%, MEM%, disk speed) stay in the list, keeping the pane compact
+  enough to fit the window at default size; unknown values render a `—`
+  placeholder, never a misleading zero.
 - Signal delivery is covered by unit tests, an integration test, and a
   live test (send SIGTERM to a spawned `sleep` and assert it exits).
 
@@ -51,7 +53,7 @@ gate is the definition of done for each commit.
 
 | # | Scenario | Expected |
 |---|---|---|
-| 1 | Start app; select a process | Detail pane shows PID, name, command line, state, threads, nice, PPID, CPU%, MEM%, memory, disk R/W, started, uptime, and the two signal buttons. |
+| 1 | Start app; select a process | Detail pane shows name, command line, state, threads, nice, memory, started, uptime, and the two signal buttons — and **fits the window at default size** (no inner scrolling; PID/CPU%/MEM%/disk columns from the list are not duplicated). |
 | 2 | Click **Terminate** on a long-running benign process you own (e.g. `sleep 300` started from a terminal) | Pane status line shows `SIGTERM sent to pid N`; the process exits; the list row disappears within one refresh; graph tabs unaffected. |
 | 3 | Click **Kill** on the same kind of process | `SIGKILL sent to pid N`; process exits immediately; row disappears. |
 | 4 | Click **Terminate** on a root-owned process (e.g. `gnome-terminal-server`) while running unprivileged | Button does **not** crash the app; the pane status line **and the pop-up error dialog** both show an EPERM-derived message (the send failed, no process changed); dismissing the dialog leaves the pane and list intact. |

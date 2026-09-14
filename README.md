@@ -28,11 +28,13 @@ time, and lets you inspect individual processes in a live detail pane.
   (even scrolled down the list) instead of flickering on every tick.
 - **Show all processes**: toggle between every process on the system and only
   the current user's (default).
-- **Detail view**: click a process to see its live metrics in a side pane —
-  PID, name, full **command line** (selectable to copy), **state**
-  (Running/Sleeping/…), **thread count**, **nice value**, **PPID**, CPU%,
-  MEM% **and absolute resident memory**, disk read/write speed, and its
-  **start time** with a running **uptime**. Unknown values (e.g. a kernel
+- **Detail view**: click a process to see more in a side pane — name,
+  full **command line** (selectable to copy), **state**
+  (Running/Sleeping/…), **thread count**, **nice value**,
+  **absolute resident memory** (RSS in a human unit), and its
+  **start time** with a running **uptime**. Values the list row already
+  shows (PID, CPU%, MEM%, disk speed) stay in the list, keeping the pane
+  compact enough to fit the default window. Unknown values (e.g. a kernel
   thread's command line) show a placeholder rather than a misleading zero.
   The pane also carries **Terminate** (SIGTERM, graceful) and **Kill**
   (SIGKILL, forced) buttons to signal the selected process — the outcome
