@@ -54,9 +54,20 @@ pub struct State {
 
 #[derive(Debug)]
 pub enum KillStatus {
+    /// The signal was delivered to the selected process.
     Sent,
+    /// No process was selected.
     NoSelection,
-    Failed(String),
+    /// `kill(2)` refused the delivery.
+    Failed {
+        /// The signal that was requested.
+        signal: Signal,
+        /// The pid the signal was aimed at.
+        pid: i32,
+        /// The OS error from `kill(2)` (e.g. EPERM for a process owned by
+        /// another user, ESRCH if it already left).
+        cause: std::io::Error,
+    },
 }
 
 impl State {
@@ -220,11 +231,92 @@ impl State {
         match self.selected_pid {
             Some(pid) => match crate::signal::send_signal(pid, sig) {
                 Ok(()) => KillStatus::Sent,
-                Err(e) => KillStatus::Failed(format!("{} failed: {e:?}", sig.name())),
+                Err(e) => KillStatus::Failed {
+                    signal: sig,
+                    pid,
+                    // `send_signal` wraps the `kill(2)` OS error in an
+                    // anyhow context; recover the root cause so the UI can
+                    // distinguish EPERM / ESRCH / anything else.
+                    cause: e
+                        .root_cause()
+                        .downcast_ref::<std::io::Error>()
+                        .map(|io| match io.raw_os_error() {
+                            Some(code) => std::io::Error::from_raw_os_error(code),
+                            None => std::io::Error::other(io.to_string()),
+                        })
+                        .unwrap_or_else(|| std::io::Error::other(e.root_cause().to_string())),
+                },
             },
             None => KillStatus::NoSelection,
         }
     }
+}
+
+/// The error pop-up's title and detail for a failed signal delivery.
+/// `kill(2)`'s specific errors get a plain-language line; the user's
+/// real-world case (signalling a process owned by another user, EPERM)
+/// is spelled out.
+pub fn describe_failure(sig: Signal, pid: i32, cause: &std::io::Error) -> (String, String) {
+    let name = sig.name();
+    match cause.raw_os_error() {
+        Some(code) if code == libc::EPERM => (
+            format!("No permission to send {name} to pid {pid}"),
+            format!("The process is owned by another user, so the signal was rejected.\n\n{cause}"),
+        ),
+        Some(code) if code == libc::ESRCH => (
+            format!("Pid {pid} is no longer running"),
+            format!("{name} could not be delivered: {cause}"),
+        ),
+        _ => (
+            format!("Could not send {name} to pid {pid}"),
+            cause.to_string(),
+        ),
+    }
+}
+
+/// Show the modal error pop-up for a failed signal delivery, parented to
+/// the main window.
+///
+/// Built from core GTK widgets rather than the `Dialog`/`MessageDialog`
+/// family: GTK deprecated that family (4.10) and its replacement
+/// `gtk4::AlertDialog` exposes no synchronous response hook in our gtk-rs
+/// binding, so a hand-rolled transient, modal window is the simplest
+/// deprecation-free equivalent. The OK button holds only a weak reference
+/// to the window to avoid a signal-handler reference cycle.
+pub fn show_failure_popup(window: &impl IsA<gtk4::Window>, title: &str, detail: &str) {
+    let dialog = gtk4::Window::builder()
+        .transient_for(window)
+        .modal(true)
+        .resizable(false)
+        .default_width(420)
+        .title(title)
+        .build();
+
+    let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    body.set_margin_top(24);
+    body.set_margin_end(24);
+    body.set_margin_bottom(12);
+    body.set_margin_start(24);
+
+    let icon = gtk4::Image::from_icon_name("dialog-error-symbolic");
+    let detail_label = gtk4::Label::new(Some(detail));
+    detail_label.set_wrap(true);
+    detail_label.set_selectable(true);
+
+    let ok = gtk4::Button::with_label("OK");
+    // Keep the dialog alive past this function and destroy it on click.
+    let held = RefCell::new(Some(dialog.clone()));
+    ok.connect_clicked(move |_| {
+        if let Some(dlg) = held.borrow_mut().take() {
+            dlg.destroy();
+        }
+    });
+
+    body.append(&icon);
+    body.append(&detail_label);
+    body.append(&ok);
+    dialog.set_child(Some(&body));
+    dialog.present();
 }
 
 /// (Re)starts the refresh timer at the interval currently held in `state`.
@@ -551,6 +643,7 @@ pub fn build_window(
         let view_s = view.clone();
         let view_in = view_s.clone(); // the closure's own handle (receiver borrows view_s)
         let rebuild_s = rebuild.clone();
+        let window_in = window.clone();
         view_s.connect_signal_requested(move |sig| {
             let status = state_s.borrow_mut().kill(sig);
             let pid = state_s.borrow().selected_pid;
@@ -565,7 +658,14 @@ pub fn build_window(
                 // still handle the impossible case gracefully instead of
                 // assuming.
                 (_, KillStatus::NoSelection) => {}
-                (_, KillStatus::Failed(reason)) => view_in.set_status(&reason),
+                // Delivery failed (EPERM on another user's process, ESRCH
+                // when the process left in the meantime, …): report it in the
+                // pane's status line *and* surface an error pop-up.
+                (_, KillStatus::Failed { signal, pid, cause }) => {
+                    view_in.set_status(&format!("{} failed: {cause}", signal.name()));
+                    let (title, detail) = describe_failure(signal, pid, &cause);
+                    show_failure_popup(&window_in, &title, &detail);
+                }
             }
         });
     }
@@ -714,17 +814,118 @@ mod tests {
     }
 
     /// A signal to a pid that will not resolve to a live process reports
-    /// `Failed` (the syscall returns ESRCH/EPERM) — never a panic and never a
-    /// false `Sent`.
+    /// `Failed` with the OS error (ESRCH) — never a panic and never a false
+    /// `Sent`.
     #[test]
     fn test_kill_unknown_pid_reports_failure() {
         let mut s = test_state("kill_unknown");
         // A pid far beyond typical allocations that is not going to be live.
         s.selected_pid = Some(2_147_483_647);
-        let status = s.kill(Signal::Sighup);
+        match s.kill(Signal::Sighup) {
+            KillStatus::Failed { cause, .. } => {
+                assert_eq!(
+                    cause.raw_os_error(),
+                    Some(libc::ESRCH),
+                    "no such pid must surface ESRCH, got {cause:?}"
+                );
+            }
+            other => panic!("signalling a dead pid must report Failed, got {other:?}"),
+        }
+    }
+
+    /// The error pop-up text: EPERM (another user's process) is the user's
+    /// real-world case and must be named as such; ESRCH and anything else
+    /// fall back to the raw OS error.
+    #[test]
+    fn test_describe_failure_messages() {
+        let eperm = std::io::Error::from_raw_os_error(libc::EPERM);
+        let (title, detail) = describe_failure(Signal::Sigterm, 999, &eperm);
+        assert!(title.contains("No permission"), "{title}");
+        assert!(title.contains("SIGTERM"), "{title}");
+        assert!(detail.to_lowercase().contains("another user"), "{detail}");
+
+        let esrch = std::io::Error::from_raw_os_error(libc::ESRCH);
+        let (t2, _d2) = describe_failure(Signal::Sigkill, 999, &esrch);
+        assert!(t2.contains("no longer running"), "{t2}");
+
+        let other = std::io::Error::other("boom");
+        let (t3, d3) = describe_failure(Signal::Sigkill, 999, &other);
+        assert!(t3.contains("SIGKILL") && t3.contains("pid 999"), "{t3}");
+        assert_eq!(d3, "boom");
+    }
+
+    /// The pop-up is a self-contained modal window parented to the main
+    /// window, carrying the failure title/detail, and its OK button
+    /// disposes the dialog. (GTK is initialized on this test's own thread,
+    /// like any other unit test in the binary — no main loop is involved.)
+    #[test]
+    fn test_failure_popup_is_modal_and_ok_dismisses() {
+        let _ = gtk4::init();
+        let parent = gtk4::Window::default();
+        let title = "No permission to send Terminate to pid 1";
+        let detail = "The process is owned by another user.";
+        let before = gtk4::Window::list_toplevels().len();
+
+        show_failure_popup(&parent, title, detail);
+
+        let toplevels = gtk4::Window::list_toplevels();
+        assert_eq!(
+            toplevels.len(),
+            before + 1,
+            "pop-up must add one top-level window"
+        );
+        let popup = toplevels
+            .iter()
+            .find_map(|w| {
+                w.downcast_ref::<gtk4::Window>()
+                    .filter(|win| win.title().map(|t| t.to_string()) == Some(title.to_string()))
+            })
+            .expect("the new toplevel is the pop-up")
+            .clone();
+        assert!(popup.is_modal(), "the pop-up is modal");
         assert!(
-            matches!(status, KillStatus::Failed(_)),
-            "signalling a dead pid must report Failed, got {status:?}"
+            popup
+                .transient_for()
+                .is_some_and(|t| std::ptr::eq(t.as_ptr(), parent.as_ptr())),
+            "the pop-up is parented to the main window"
+        );
+
+        let vbox = popup
+            .child()
+            .expect("a single body widget")
+            .downcast::<gtk4::Box>()
+            .expect("the body is a vertical Box");
+        let detail_label = vbox
+            .first_child()
+            .expect("first child (icon)")
+            .next_sibling()
+            .expect("detail label")
+            .downcast::<gtk4::Label>()
+            .expect("a detail label");
+        assert_eq!(
+            detail_label.label().as_str(),
+            detail,
+            "the detail text is shown verbatim"
+        );
+        assert!(detail_label.is_selectable(), "the error text is copyable");
+
+        let ok = detail_label
+            .next_sibling()
+            .expect("OK button")
+            .downcast::<gtk4::Button>()
+            .expect("an OK button");
+        assert_eq!(ok.label().map(|s| s.to_string()), Some("OK".to_string()));
+
+        // Emits the same signal GTK's release path fires on a real pointer
+        // click (the headless test env never realizes the window, so
+        // `activate` alone cannot reach it).
+        assert!(popup.is_visible(), "the pop-up is presented");
+        ok.emit_by_name::<()>("clicked", &[] as &[&dyn gtk4::glib::value::ToValue]);
+        assert!(!popup.is_visible(), "clicking OK disposes the pop-up");
+        assert_eq!(
+            gtk4::Window::list_toplevels().len(),
+            before,
+            "the disposed pop-up is gone from the toplevels"
         );
     }
 
