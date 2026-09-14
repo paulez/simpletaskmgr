@@ -1,9 +1,10 @@
 # Test & Release Plan (1.0.0)
 
 Status: in preparation. This document is the checklist walked before and
-during the 1.0.0 tag. It covers what is tested, how, and the exact release
-mechanics (the `release` workflow publishes from a tag — see the README's
-`## Releases` section for the summary).
+during each step of the `1.0.0-beta.1` → `1.0.0-rc.1` → `1.0.0` ladder.
+It covers what is tested, how, and the exact release mechanics (the
+`release` workflow publishes from a tag — see the README's `## Releases`
+section for the summary).
 
 ## What 1.0.0 delivers over 0.1
 
@@ -11,6 +12,14 @@ mechanics (the `release` workflow publishes from a tag — see the README's
   pane: `Signal::Sigterm` added to `Signal`, the detail pane offers the
   two buttons with a status line, and the app-side handler delivers via
   `kill(2)` through the existing `State::kill` path (spec D5 implemented).
+- **A failure pop-up** when a signal cannot be delivered (EPERM/ESRCH):
+  the pane status line and a dismissible dialog both report the error;
+  the process is left exactly as it was.
+- **Expanded process detail pane**: on top of the existing CPU%/MEM%/disk
+  rows, the pane now shows the full command line (wrapping, selectable to
+  copy), state (Sleeping/Running/…), thread count, signed nice, PPID,
+  absolute memory (RSS in a human unit), start time, and a running uptime;
+  unknown values render a `—` placeholder, never a misleading zero.
 - Signal delivery is covered by unit tests, an integration test, and a
   live test (send SIGTERM to a spawned `sleep` and assert it exits).
 
@@ -42,14 +51,16 @@ gate is the definition of done for each commit.
 
 | # | Scenario | Expected |
 |---|---|---|
-| 1 | Start app; select a process | Detail pane shows PID, name, CPU%, MEM%, disk R/W, and the two signal buttons. |
+| 1 | Start app; select a process | Detail pane shows PID, name, command line, state, threads, nice, PPID, CPU%, MEM%, memory, disk R/W, started, uptime, and the two signal buttons. |
 | 2 | Click **Terminate** on a long-running benign process you own (e.g. `sleep 300` started from a terminal) | Pane status line shows `SIGTERM sent to pid N`; the process exits; the list row disappears within one refresh; graph tabs unaffected. |
 | 3 | Click **Kill** on the same kind of process | `SIGKILL sent to pid N`; process exits immediately; row disappears. |
-| 4 | Click **Terminate** on a root-owned process (e.g. `gnome-terminal-server`) while running unprivileged | Button does **not** crash the app; status line shows an EPERM-derived message (the send failed, no process changed). |
+| 4 | Click **Terminate** on a root-owned process (e.g. `gnome-terminal-server`) while running unprivileged | Button does **not** crash the app; the pane status line **and the pop-up error dialog** both show an EPERM-derived message (the send failed, no process changed); dismissing the dialog leaves the pane and list intact. |
 | 5 | Click **Terminate** then immediately **Kill** on the same target (if it survived) | Second click behaves correctly for the (possibly now-zombie) pid; no assertion/abort. |
 | 6 | Deselect (click header / empty area) | Detail pane hidden (NO_SELECTION); status line resets on the next selection. |
 | 7 | Select a *different* process right after a failed delivery | Status line is cleared by the selection change (no stale red text). |
 | 8 | Fast refresh (0.5 s) while clicking | Signals still delivered to the selected PID (pinning), not to a shifted row. |
+| 9 | Select the running `simpletaskmgr` itself | Detail pane: full command line visible, State `Sleeping`, Threads ≥ 1, Memory a human-readable size consistent with the MEM% column, Started a plausible time, Uptime climbing across refreshes. |
+| 10 | Select a kernel thread (e.g. a `kworker` row) | Unknown fields show the `—` placeholder (command line is empty); a negative nice renders signed (e.g. `Nice: -20`). |
 
 ### 3. Signal-delivery correctness (unit/integration)
 
@@ -85,10 +96,29 @@ sha256sum -c SHA256SUMS
 ```
 
 - Binary runs unmodified (GTK 4.18 present); list, tabs, and the detail
-  pane all appear.
-- One **Terminate** click against a `sleep 300` process works end-to-end.
+  pane all appear — select a row and confirm the full field set (command
+  line, state, threads, nice, memory, started, uptime) renders.
+- One **Terminate** click against a `sleep 300` process works end-to-end,
+  and a failed one (root-owned target) pops the error dialog.
 - No GPU tab is shown on a machine without `rocm-smi` (correct hiding),
   and the rest of the app is unaffected.
+
+Before the prerelease is published, the same artifact can be produced
+locally (exactly what the workflow does):
+
+```bash
+cargo build --release --locked
+cd /tmp && rm -rf rtest && mkdir -p rtest/dist && cd -
+V=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+PKG="simpletaskmgr-${V}-x86_64-linux"
+mkdir -p "/tmp/rtest/dist/${PKG}"
+cp target/release/simpletaskmgr "/tmp/rtest/dist/${PKG}/"
+cp README.md LICENSE "/tmp/rtest/dist/${PKG}/"
+tar -czf "/tmp/rtest/dist/${PKG}.tar.gz" -C /tmp/rtest/dist "${PKG}"
+(cd /tmp/rtest/dist && sha256sum "${PKG}.tar.gz" > SHA256SUMS)
+```
+
+and transferred to the VM for the checks above.
 
 ## Release mechanics (checklist)
 
