@@ -37,8 +37,11 @@ jobs:
       run: |
         tag="${GITHUB_REF_NAME#v}"
         version="$(grep -m1 '^version[[:space:]]*=' Cargo.toml | cut -d'"' -f2)"
-        if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-          echo "::error::Cargo.toml version '$version' is not full semver (expected X.Y.Z)"
+        # Full X.Y.Z, or a semver prerelease (X.Y.Z-beta.1, X.Y.Z-rc.2, ...).
+        # Build metadata (+...) is not supported: it would create two
+        # artifacts indistinguishable under the same X.Y.Z[-prerelease].
+        if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+          echo "::error::Cargo.toml version '$version' is not valid semver (X.Y.Z or X.Y.Z-prerelease, e.g. 1.0.0-rc.1)"
           exit 1
         fi
         if [ "$tag" != "$version" ]; then
@@ -64,8 +67,10 @@ jobs:
         V="${{ steps.version.outputs.version }}"
         # `gh release create` attaches the source tarball/zip for the tag
         # automatically, plus the binary artifacts listed below.
-        gh release create "v${V}" \
-          --title "v${V}" \
-          --generate-notes \
+        # A prerelease (e.g. 1.0.0-rc.1) is marked as such so it is not
+        # offered as "Latest" until the final version ships.
+        ARGS=(--title "v${V}" --generate-notes)
+        [[ "$V" == *-* ]] && ARGS+=(--prerelease)
+        gh release create "v${V}" "${ARGS[@]}" \
           "dist/simpletaskmgr-${V}-x86_64-linux.tar.gz" \
           "dist/SHA256SUMS"

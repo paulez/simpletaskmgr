@@ -77,6 +77,8 @@ Already covered, but re-run and re-verify:
 ### 5. Release-artifact verification (on a clean Debian 13 x86_64 VM/container)
 
 ```bash
+# For a prerelease the package name carries its version — for
+# 1.0.0-beta.1 that is simpletaskmgr-1.0.0-beta.1-x86_64-linux.
 tar xzf simpletaskmgr-1.0.0-x86_64-linux.tar.gz
 sha256sum -c SHA256SUMS
 ./simpletaskmgr-1.0.0-x86_64-linux/
@@ -90,11 +92,21 @@ sha256sum -c SHA256SUMS
 
 ## Release mechanics (checklist)
 
-1. **Version bump**: `version = "1.0.0"` in `Cargo.toml`, commit (gate
-   green). `Cargo.lock` updates in the same commit.
-2. **Tag**: `git tag v1.0.0`, `git push origin main --tags`.
+The 1.0.0 line ships through a prerelease ladder (SemVer; each step sorts
+below the next): `1.0.0-beta.1` → `1.0.0-rc.1` (→ `1.0.0-rc.2` if rc.1
+surfaces issues) → `1.0.0`. Each step is the *same* procedure below; only
+the target version changes. Prereleases publish as GitHub **pre-releases**
+(never "Latest"); the final `1.0.0` supersedes them and becomes Latest.
+
+1. **Version bump**: `version = "<target>"` in `Cargo.toml` —
+   `1.0.0-beta.1` for the first public build, `1.0.0` for the final —
+   commit (gate green). `Cargo.lock` updates in the same commit (the root
+   package entry; required or CI's `--locked` build fails).
+2. **Tag**: `git tag v<target>`, `git push origin main --tags`.
 3. **`release.yml`** runs on Debian 13 (x86_64), verifies the tag matches
-   `Cargo.toml` (fails loudly otherwise), and publishes:
+   `Cargo.toml` — full `X.Y.Z` **or** `X.Y.Z-prerelease` (fails loudly
+   otherwise) — and publishes for a prerelease: mark it `--prerelease` so
+   it is not offered as "Latest":
    - `simpletaskmgr-1.0.0-x86_64-linux.tar.gz` (binary + README + LICENSE)
    - `SHA256SUMS`
    - automatic source tarball/zip

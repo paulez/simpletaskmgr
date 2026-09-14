@@ -116,23 +116,32 @@ in the toolbar (with a "Reset to defaults" action).
 
 ## Releases
 
-Releases are published automatically from a version tag. To cut a release
-(e.g. `1.0.0`):
+Releases are published automatically from a version tag. Versions follow
+SemVer — including a prerelease ladder into the first stable release:
+`1.0.0-beta.1` → `1.0.0-rc.1` (→ `1.0.0-rc.2`) → `1.0.0`. Every prerelease
+sorts below `1.0.0`, and the final release supersedes them.
 
-1. Bump `version` in `Cargo.toml` to a full semver value (`X.Y.Z`) and commit
-   (passing the usual `cargo test` / `cargo clippy` / `cargo fmt --check` gate).
+To cut any of them (e.g. `1.0.0-rc.1`, or the final `1.0.0`):
+
+1. Bump `version` in `Cargo.toml` to the target (`X.Y.Z` or
+   `X.Y.Z-prerelease`) and commit (passing the usual
+   `cargo test` / `cargo clippy` / `cargo fmt --check` gate; the
+   `Cargo.lock` root entry updates in the same commit).
 2. Tag and push:
 
    ```bash
-   git tag v1.0.0
+   git tag v1.0.0-rc.1
    git push origin main --tags
    ```
 3. The `release` workflow runs on `Debian 13` (x86_64), verifies the tag
-   matches the `Cargo.toml` version (and fails if they don't), and publishes
-   a GitHub release containing:
+   matches the `Cargo.toml` version (and fails if they don't), and
+   publishes a GitHub release containing:
    - `simpletaskmgr-<version>-x86_64-linux.tar.gz` (binary, README, LICENSE)
    - `SHA256SUMS`
    - the automatic source tarball/zip for the tag
+
+   Prerelease versions are published as GitHub **pre-releases**, so they
+   are never offered as "Latest" — the final `1.0.0` is.
 
 Every push to `main` and pull request also runs the standard gate
 (format, clippy, tests, build) via the `rust` workflow.
