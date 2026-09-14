@@ -29,7 +29,10 @@ time, and lets you inspect individual processes in a live detail pane.
 - **Show all processes**: toggle between every process on the system and only
   the current user's (default).
 - **Detail view**: click a process to see its live metrics in a side pane
-  (PID, name, CPU%, MEM%, and disk read/write speed).
+  (PID, name, CPU%, MEM%, and disk read/write speed), plus **Terminate**
+  (SIGTERM, graceful) and **Kill** (SIGKILL, forced) buttons to signal the
+  selected process — the outcome ("SIGTERM sent to pid 1234" or the
+  error, e.g. EPERM) is reported in the pane's status line.
 - **Resource graph**: always-on charts of system CPU & memory, and CPU
   frequency & temperature, over the last few minutes. Every pane carries a
   colour swatch + label legend below its plot so each series is identified
