@@ -34,6 +34,7 @@ use glib::subclass::prelude::*;
 
 use crate::cell_label;
 use crate::process::{ProcessItem, TaskMgrProcess};
+use crate::signal::Signal;
 use crate::SortColumn;
 use gtk4::gio::prelude::*;
 use gtk4::prelude::*;
@@ -420,6 +421,12 @@ pub struct DetailLabels {
     pub mem: gtk4::Label,
     pub disk_read: gtk4::Label,
     pub disk_write: gtk4::Label,
+    /// `Terminate` button (SIGTERM) — spec D5.
+    pub terminate: gtk4::Button,
+    /// `Kill` button (SIGKILL) — spec D5.
+    pub kill: gtk4::Button,
+    /// One-line feedback row (kill outcome); empty when current.
+    pub status: gtk4::Label,
 }
 
 /// Build the right-hand detail pane: one titled row per displayed field,
@@ -448,6 +455,27 @@ fn build_detail_pane() -> DetailLabels {
         box_v.append(row);
     }
 
+    // Signal actions + feedback row (spec D5). They live inside the pane,
+    // so they are visible exactly while a process is selected (the pane is
+    // hidden otherwise — spec D3). The view only carries the click and the
+    // requested signal; the app performs the `kill(2)` and reports the
+    // outcome through `ProcessView::set_status`.
+    let buttons = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    let terminate = gtk4::Button::with_label("Terminate");
+    terminate.add_css_class("signal-btn");
+    terminate.add_css_class("suggested-action");
+    let kill = gtk4::Button::with_label("Kill");
+    kill.add_css_class("signal-btn");
+    kill.add_css_class("destructive-action");
+    buttons.append(&terminate);
+    buttons.append(&kill);
+    box_v.append(&buttons);
+
+    let status = gtk4::Label::new(Some(""));
+    status.add_css_class("detail-status");
+    status.set_wrap(true);
+    box_v.append(&status);
+
     let pane = gtk4::ScrolledWindow::new();
     pane.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
     pane.set_child(Some(&box_v));
@@ -463,6 +491,9 @@ fn build_detail_pane() -> DetailLabels {
         mem: d_mem,
         disk_read: d_disk_read,
         disk_write: d_disk_write,
+        terminate,
+        kill,
+        status,
     }
 }
 
@@ -482,9 +513,11 @@ fn apply_detail(d: &DetailLabels, item: Option<&ProcessItem>) {
         for l in [&d.pid, &d.name, &d.cpu, &d.mem, &d.disk_read, &d.disk_write] {
             l.set_label("");
         }
+        d.status.set_label("");
         return;
     };
     d.pane.set_visible(true);
+    d.status.set_label("");
     let p: &TaskMgrProcess = &p.value;
     d.pid.set_label(&format!("PID: {}", p.pid));
     d.name.set_label(&format!("Name: {}", p.name));
@@ -506,6 +539,10 @@ fn apply_detail(d: &DetailLabels, item: Option<&ProcessItem>) {
 /// `Rc` so the GTK notify closure and `connect_selection_changed` both reach
 /// the same slot (a plain `RefCell::clone()` would be a copy, not a share).
 type SelectionCallback = Rc<RefCell<Option<Rc<dyn Fn(Option<i32>)>>>>;
+
+/// The detail-pane signal-button callback (spec D5; same last-one-wins shape
+/// as the selection callback).
+type SignalCallback = Rc<RefCell<Option<Rc<dyn Fn(Signal)>>>>;
 
 /// Queue the S8 scroll-to-top so it runs on the *next* main-loop idle.
 /// GTK settles a header click through the ColumnViewSorter `primary-sort-*`
@@ -565,6 +602,10 @@ pub struct ProcessView {
     /// *during* `update` (spec B2: the single-selection notify fires inside
     /// the model-change FFI) — registered closures must be re-entrancy safe.
     callback: SelectionCallback,
+    /// One app callback at a time (last registered wins, like the selection
+    /// callback). Fired when a detail-pane signal button is pressed (spec
+    /// D5), carrying the requested signal.
+    signal_callback: SignalCallback,
 }
 
 impl ProcessView {
@@ -693,6 +734,24 @@ impl ProcessView {
             }
         });
 
+        // Signal buttons -> app callback (spec D5). The view sends no
+        // signal itself: it forwards the button's signal and waits for the
+        // app's outcome via `ProcessView::set_status`.
+        let signal_callback = Rc::new(RefCell::new(None::<Rc<dyn Fn(Signal)>>));
+        let scb = signal_callback.clone();
+        let term = detail.terminate.clone();
+        term.connect_clicked(move |_| {
+            if let Some(f) = scb.borrow().clone() {
+                f(Signal::Sigterm);
+            }
+        });
+        let scb2 = signal_callback.clone();
+        detail.kill.connect_clicked(move |_| {
+            if let Some(f) = scb2.borrow().clone() {
+                f(Signal::Sigkill);
+            }
+        });
+
         Self {
             root,
             column_view,
@@ -705,6 +764,7 @@ impl ProcessView {
             list_scroll,
             detail,
             callback,
+            signal_callback,
         }
     }
 
@@ -739,6 +799,20 @@ impl ProcessView {
     /// Fire on selection change, with the new PID (`None` = deselected).
     pub fn connect_selection_changed(&self, f: impl Fn(Option<i32>) + 'static) {
         *self.callback.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Fire when the detail pane's `Terminate`/`Kill` button is pressed,
+    /// with the requested signal (spec D5). The view performs no `kill(2)`
+    /// itself: the app sends the signal to its selected PID (spec D4) and
+    /// reports the outcome back through [`ProcessView::set_status`].
+    pub fn connect_signal_requested(&self, f: impl Fn(Signal) + 'static) {
+        *self.signal_callback.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Set the detail pane's status line (an empty string clears it). The
+    /// app uses this to report the signal outcome in the pane.
+    pub fn set_status(&self, text: &str) {
+        self.detail.status.set_label(text);
     }
 
     /// Start the first paint at the top of the list (spec R3 initial state).

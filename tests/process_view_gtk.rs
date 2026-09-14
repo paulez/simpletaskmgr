@@ -20,6 +20,7 @@ use std::thread;
 use gtk4::prelude::*;
 use simpletaskmgr::process::{ProcessItem, TaskMgrProcess};
 use simpletaskmgr::process_view::{ProcessView, ViewRow};
+use simpletaskmgr::signal::Signal;
 use simpletaskmgr::SortColumn;
 
 /// A job for the GTK worker: runs and yields the result or the panic payload.
@@ -470,6 +471,59 @@ fn test_sort_change_scrolls_to_top_but_ticks_do_not() {
             pv.scroll_done_count(),
             done,
             "a refresh tick must not run a pending S8 scroll",
+        );
+    });
+}
+
+#[test]
+fn test_signal_buttons_forward_and_status() {
+    // Spec D5: the detail-pane buttons carry the requested signal to the
+    // app's single callback — the view itself sends no `kill(2)` — and
+    // `set_status` writes the pane's feedback line. The buttons ride inside
+    // the pane, which is only visible with a selection (D1/D3) — and a
+    // button inside an invisible hierarchy does not activate — so select a
+    // row first, as a real user would.
+    run_gtk(|| {
+        let pv = ProcessView::new();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let s = seen.clone();
+        pv.connect_signal_requested(move |sig| s.borrow_mut().push(sig));
+
+        pv.update(&[item(100, 10), item(200, 20)]);
+        pv.selection()
+            .set_selected(pv.display_order().iter().position(|p| *p == 100).unwrap() as u32);
+        let d = pv.detail_labels();
+        assert!(d.pane.is_visible(), "a selection shows the pane");
+        assert_eq!(d.terminate.label().as_deref(), Some("Terminate"));
+        assert_eq!(d.kill.label().as_deref(), Some("Kill"));
+
+        // Emits "clicked" — the same signal GTK's release path fires on a
+        // real pointer click. (`Button::activate` only reaches that path on
+        // a *realized* widget — a headless test env never is.)
+        d.terminate
+            .emit_by_name::<()>("clicked", &[] as &[&dyn glib::value::ToValue]);
+        d.kill
+            .emit_by_name::<()>("clicked", &[] as &[&dyn glib::value::ToValue]);
+        assert_eq!(
+            *seen.borrow(),
+            vec![Signal::Sigterm, Signal::Sigkill],
+            "each button forwards exactly its own signal, in order"
+        );
+
+        pv.set_status("SIGTERM failed: Example");
+        assert_eq!(d.status.label(), "SIGTERM failed: Example");
+        pv.set_status("");
+        assert_eq!(d.status.label(), "", "empty string clears the line");
+
+        // Moving the selection re-applies the pane and clears a stale
+        // outcome (the status line resets with the data).
+        pv.set_status("stale outcome");
+        pv.selection()
+            .set_selected(pv.display_order().iter().position(|p| *p == 200).unwrap() as u32);
+        assert_eq!(
+            d.status.label(),
+            "",
+            "selecting a different row clears the stale status"
         );
     });
 }

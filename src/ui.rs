@@ -533,11 +533,40 @@ pub fn build_window(
 
     // ---- Selection -> app state -------------------------------------------------
     // The view owns the detail pane; the app keeps the selected PID (spec D4)
-    // for the kill path. Spec D5: the SIGHUP/SIGKILL buttons are out of scope.
+    // for the signal path.
     {
         let state_s = state.clone();
         view.connect_selection_changed(move |pid| {
             state_s.borrow_mut().selected_pid = pid;
+        });
+    }
+
+    // ---- Signal buttons -> State::kill (spec D5) --------------------------------
+    // The detail pane forwards its button clicks with the requested signal;
+    // the app sends it to `selected_pid` and reports the outcome in the
+    // pane's status line. On success, run one refresh so the doomed process
+    // leaves the list without waiting for the next tick.
+    {
+        let state_s = state.clone();
+        let view_s = view.clone();
+        let view_in = view_s.clone(); // the closure's own handle (receiver borrows view_s)
+        let rebuild_s = rebuild.clone();
+        view_s.connect_signal_requested(move |sig| {
+            let status = state_s.borrow_mut().kill(sig);
+            let pid = state_s.borrow().selected_pid;
+            match (pid, status) {
+                (_, KillStatus::Sent) => {
+                    if let Some(p) = pid {
+                        view_in.set_status(&format!("{} sent to pid {p}", sig.name()));
+                    }
+                    rebuild_s();
+                }
+                // The buttons are visible only while a process is selected;
+                // still handle the impossible case gracefully instead of
+                // assuming.
+                (_, KillStatus::NoSelection) => {}
+                (_, KillStatus::Failed(reason)) => view_in.set_status(&reason),
+            }
         });
     }
 

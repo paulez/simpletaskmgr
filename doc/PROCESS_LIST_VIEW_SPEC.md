@@ -61,7 +61,7 @@ The data layer (`process.rs`, `process_list.rs`, `cpu_tracker.rs`,
 | D2 | Selecting a row shows a detail pane with **PID, Name, CPU %, MEM %, Disk read, Disk write** for that process, formatted as in a row cell (V2) with unknown values shown as `—`. |
 | D3 | Clearing the selection (or the process vanishing) hides the pane and the list takes the full width. |
 | D4 | The selected PID is queryable (`selected_pid()`) and selection changes are observable via a callback — so the app can attach actions (e.g. sending a signal, deferred) without owning the detail pane. |
-| D5 | **Deliberate simplification**: the old SIGHUP/SIGKILL buttons are out of scope for the view; `D4` + the app's `State::kill` keep the capability available for a follow-up. |
+| D5 | **Signal buttons**: the detail pane offers `Terminate` (SIGTERM) and `Kill` (SIGKILL) for the selected process. The view sends no signal itself — it forwards the requested signal to the app (one callback), which performs `D4`'s send via `State::kill` and reports the outcome in the pane's status line. Originally deferred (SIGHUP/SIGKILL were out of scope); implemented for 1.0.0. |
 
 ### B — Robustness
 
@@ -170,8 +170,7 @@ refresh engine.
 
 - Reading `/proc`, CPU/IO tracking, the `ProcessItem`/`TaskMgrProcess` types.
 - The settings popover and usage graph panels (app-level, kept as-is).
-- SIGHUP/SIGKILL buttons (D5) and the `--no-resort-kick` diagnostic (only
-  meaningful with the legacy engine).
+- The `--no-resort-kick` diagnostic (only meaningful with the legacy engine).
 - The old "CPU % descending at start" default (S7).
 
 ## Integration & migration
