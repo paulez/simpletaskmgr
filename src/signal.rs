@@ -6,6 +6,8 @@ use log::debug;
 pub enum Signal {
     /// Hangup (SIGHUP, signal 1)
     Sighup,
+    /// Termination request (SIGTERM, signal 15; graceful by convention)
+    Sigterm,
     /// Forceful termination (SIGKILL, signal 9)
     Sigkill,
 }
@@ -15,6 +17,7 @@ impl Signal {
     pub fn as_c_int(self) -> libc::c_int {
         match self {
             Signal::Sighup => libc::SIGHUP,
+            Signal::Sigterm => libc::SIGTERM,
             Signal::Sigkill => libc::SIGKILL,
         }
     }
@@ -23,6 +26,7 @@ impl Signal {
     pub fn name(self) -> &'static str {
         match self {
             Signal::Sighup => "SIGHUP",
+            Signal::Sigterm => "SIGTERM",
             Signal::Sigkill => "SIGKILL",
         }
     }
@@ -64,17 +68,24 @@ mod tests {
     #[test]
     fn test_signal_names_and_numbers() {
         assert_eq!(Signal::Sighup.as_c_int(), libc::SIGHUP);
+        assert_eq!(Signal::Sigterm.as_c_int(), libc::SIGTERM);
         assert_eq!(Signal::Sigkill.as_c_int(), libc::SIGKILL);
         assert_eq!(Signal::Sighup.name(), "SIGHUP");
+        assert_eq!(Signal::Sigterm.name(), "SIGTERM");
         assert_eq!(Signal::Sigkill.name(), "SIGKILL");
     }
 
-    /// SIGHUP (default disposition: terminate) and SIGKILL must both
-    /// terminate a live process, so the `kill(2)` delivery path is exercised
-    /// without depending on the target's handler.
+    /// SIGHUP (default disposition: terminate), SIGTERM (default
+    /// disposition: terminate), and SIGKILL must all terminate a live
+    /// process, so the `kill(2)` delivery path is exercised without
+    /// depending on the target's handler.
     #[test]
     fn test_signal_delivered_to_process() {
-        for (signal, expected) in [(Signal::Sigkill, 9), (Signal::Sighup, 1)] {
+        for (signal, expected) in [
+            (Signal::Sigkill, 9),
+            (Signal::Sighup, 1),
+            (Signal::Sigterm, 15),
+        ] {
             let mut child = spawn_sleeper();
             let pid = child.id() as i32;
             assert!(
