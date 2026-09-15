@@ -27,7 +27,7 @@ jobs:
           ca-certificates curl git build-essential pkg-config libgtk-4-dev
     - name: Install Rust (stable with clippy + rustfmt)
       run: |
-        curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+        curl -sSf https://sh.rustup.rs | HOME=/root sh -s -- -y --default-toolchain stable
         rustc --version
         cargo --version
         cargo clippy --version
