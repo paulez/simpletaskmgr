@@ -39,7 +39,7 @@ jobs:
       run: cargo fmt --check
     - name: Lint
       run: cargo clippy --all-targets
-    - name: Run tests (GTK needs a display: run under headless Wayland)
+    - name: Run tests under headless Wayland (GTK needs a display)
       run: |
         CAGE_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/cage-XXXXXX")"
         trap 'rm -rf "${CAGE_RUNTIME}"' EXIT
