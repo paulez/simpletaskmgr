@@ -17,6 +17,8 @@ jobs:
     defaults:
       run:
         shell: bash # container jobs default to sh (dash); steps use bash regex
+    env:
+      PATH: $HOME/.cargo/bin:$PATH
     steps:
     - name: Install build dependencies (Debian 13)
       run: |
@@ -29,10 +31,11 @@ jobs:
           bash \
           build-essential \
           pkg-config \
-          rustc \
-          cargo \
           libgtk-4-dev \
           gh
+    - name: Install Rust (stable, gtk-rs requires rustc >= 1.92)
+      run: |
+        curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
         rustc --version
         cargo --version
     - uses: actions/checkout@v4

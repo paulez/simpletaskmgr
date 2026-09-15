@@ -8,6 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  PATH: $HOME/.cargo/bin:$PATH
 
 jobs:
   build:
@@ -23,8 +24,14 @@ jobs:
         export DEBIAN_FRONTEND=noninteractive
         apt-get update
         apt-get install -y --no-install-recommends \
-          ca-certificates curl git build-essential pkg-config \
-          rustc cargo rustfmt clippy libgtk-4-dev
+          ca-certificates curl git build-essential pkg-config libgtk-4-dev
+    - name: Install Rust (stable with clippy + rustfmt)
+      run: |
+        curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+        rustc --version
+        cargo --version
+        cargo clippy --version
+        cargo fmt --version
     - uses: actions/checkout@v4
     - name: Format check
       run: cargo fmt --check
