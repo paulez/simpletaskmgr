@@ -14,11 +14,8 @@ jobs:
     container:
       image: debian:trixie
       options: --user root
-    defaults:
-      run:
-        shell: bash # container jobs default to sh (dash); steps use bash regex
     env:
-      PATH: $HOME/.cargo/bin:$PATH
+      PATH: /root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     steps:
     - name: Install build dependencies (Debian 13)
       run: |
@@ -41,6 +38,7 @@ jobs:
     - uses: actions/checkout@v4
     - name: Verify tag matches Cargo.toml version
       id: version
+      shell: bash # container steps default to sh (dash); regex below is bash
       run: |
         tag="${GITHUB_REF_NAME#v}"
         version="$(grep -m1 '^version[[:space:]]*=' Cargo.toml | cut -d'"' -f2)"
@@ -70,6 +68,7 @@ jobs:
     - name: Create GitHub release
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      shell: bash # arrays and [[ ]] below are bash
       run: |
         V="${{ steps.version.outputs.version }}"
         # `gh release create` attaches the source tarball/zip for the tag
