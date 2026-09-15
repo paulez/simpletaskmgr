@@ -9,6 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   PATH: /root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  RUSTUP_HOME: /root/.rustup
+  CARGO_HOME: /root/.cargo
 
 jobs:
   build:

@@ -16,6 +16,8 @@ jobs:
       options: --user root
     env:
       PATH: /root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      RUSTUP_HOME: /root/.rustup
+      CARGO_HOME: /root/.cargo
     steps:
     - name: Install build dependencies (Debian 13)
       run: |
