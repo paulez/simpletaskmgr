@@ -14,7 +14,9 @@ jobs:
     container:
       image: debian:trixie
       options: --user root
-    shell: bash # container jobs default to sh (dash); steps use bash regex
+    defaults:
+      run:
+        shell: bash # container jobs default to sh (dash); steps use bash regex
     steps:
     - name: Install build dependencies (Debian 13)
       run: |

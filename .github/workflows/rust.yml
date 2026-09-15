@@ -24,7 +24,7 @@ jobs:
         apt-get update
         apt-get install -y --no-install-recommends \
           ca-certificates curl git build-essential pkg-config \
-          rustc cargo libgtk-4-dev
+          rustc cargo rustfmt clippy libgtk-4-dev
     - uses: actions/checkout@v4
     - name: Format check
       run: cargo fmt --check
