@@ -13,13 +13,19 @@ jobs:
   build:
 
     runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+      options: --user root
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Install GTK 4 dev dependencies
+    - name: Install build dependencies (Debian 13, GTK 4.18+)
       run: |
-        sudo apt-get update
-        sudo apt-get install -y libgtk-4-dev pkg-config
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          ca-certificates curl git build-essential pkg-config \
+          rustc cargo libgtk-4-dev
+    - uses: actions/checkout@v4
     - name: Format check
       run: cargo fmt --check
     - name: Lint
