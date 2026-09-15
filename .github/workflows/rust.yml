@@ -26,7 +26,7 @@ jobs:
         export DEBIAN_FRONTEND=noninteractive
         apt-get update
         apt-get install -y --no-install-recommends \
-          ca-certificates curl git build-essential pkg-config libgtk-4-dev
+          ca-certificates curl git build-essential pkg-config cage libgtk-4-dev
     - name: Install Rust (stable with clippy + rustfmt)
       run: |
         curl -sSf https://sh.rustup.rs | HOME=/root sh -s -- -y --default-toolchain stable
@@ -39,7 +39,12 @@ jobs:
       run: cargo fmt --check
     - name: Lint
       run: cargo clippy --all-targets
-    - name: Run tests
-      run: cargo test --verbose
+    - name: Run tests (GTK needs a display: run under headless Wayland)
+      run: |
+        CAGE_RUNTIME="$(mktemp -d "${TMPDIR:-/tmp}/cage-XXXXXX")"
+        trap 'rm -rf "${CAGE_RUNTIME}"' EXIT
+        WLR_BACKENDS=headless WAYLAND_DISPLAY= XDG_RUNTIME_DIR="${CAGE_RUNTIME}" \
+          DBUS_SESSION_BUS_ADDRESS=disabled \
+          cage -- sh -c 'WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR="${CAGE_RUNTIME}" cargo test --verbose'
     - name: Build
       run: cargo build --verbose

@@ -72,6 +72,9 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       shell: bash # arrays and [[ ]] below are bash
       run: |
+        # gh resolves the repo through git; the workspace copy is owned by
+        # another uid than the container user, so allow it explicitly.
+        git config --global --add safe.directory "${GITHUB_WORKSPACE}"
         V="${{ steps.version.outputs.version }}"
         # `gh release create` attaches the source tarball/zip for the tag
         # automatically, plus the binary artifacts listed below.
