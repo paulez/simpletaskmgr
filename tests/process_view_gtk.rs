@@ -627,3 +627,35 @@ fn test_detail_pane_renders_free_tier_fields() {
         assert_eq!(d.uptime.label(), "Uptime: —", "absent start -> no age");
     });
 }
+
+#[test]
+fn test_detail_pane_wraps_long_command_tokens() {
+    // A Slack/Chromium command line carries single tokens hundreds of
+    // characters long (e.g. `--enable-features=…`). Word-boundary wrapping
+    // alone still requests a minimum width as wide as the longest token,
+    // so the detail pane (horizontal policy `Never`) would stretch the
+    // whole window off-screen. The pane's value labels must therefore wrap
+    // with `PANGO_WRAP_WORD_CHAR`: long tokens break mid-word and the
+    // labels' size request stays bounded no matter how long the longest
+    // token is.
+    run_gtk(|| {
+        let pv = ProcessView::new();
+        let d = pv.detail_labels();
+        for l in [&d.name, &d.command] {
+            assert!(l.wraps(), "a detail-pane value label must wrap");
+            assert_eq!(
+                l.wrap_mode(),
+                gtk4::pango::WrapMode::WordChar,
+                "a 400-char single token must be able to break mid-word"
+            );
+        }
+        let long = "q".repeat(400);
+        let l = d.command.clone();
+        l.set_label(&long);
+        let (min, nat, _, _) = l.measure(gtk4::Orientation::Horizontal, 100);
+        assert!(
+            min < 1000 && nat < 1000,
+            "a 400-char token gave a min={min}px / nat={nat}px size request — it must stay bounded"
+        );
+    });
+}

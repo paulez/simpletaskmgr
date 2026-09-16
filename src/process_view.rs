@@ -428,6 +428,22 @@ fn rank_optional(a: Option<f64>, b: Option<f64>, descending: bool) -> std::cmp::
     }
 }
 
+/// Style a detail-pane value label so long content never stretches the pane —
+/// and hence the window — wide.
+///
+/// A command line like Slack/Chromium's carries single *tokens* hundreds of
+/// characters long (e.g. `--enable-features=…`). A label that only wraps at
+/// word boundaries still requests a minimum width as wide as its longest
+/// token, and the detail pane's `ScrolledWindow` (horizontal policy
+/// `Never`) would then stretch the whole toplevel past any screen. With
+/// [`gtk4::pango::WrapMode::WordChar`] the token also breaks mid-word, so
+/// the label's minimum *and* natural width stay bounded no matter how long
+/// the longest token is — the text just wraps across more lines.
+fn style_detail_row(label: &gtk4::Label) {
+    label.set_wrap(true);
+    label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+}
+
 /// `DetailLabels` keeps the detail-pane labels addressable, and the pane
 /// itself can be hidden (spec D3).
 #[derive(Clone)]
@@ -466,10 +482,11 @@ fn build_detail_pane() -> DetailLabels {
         l
     }
     let d_name = mk_row("Name: —");
+    style_detail_row(&d_name);
     // The command line can be arbitrarily long: wrap it and let the user
     // select/copy it (e.g. to paste into a `kill` command manually).
     let d_command = mk_row("Command: —");
-    d_command.set_wrap(true);
+    style_detail_row(&d_command);
     d_command.set_selectable(true);
     let d_state = mk_row("State: —");
     let d_threads = mk_row("Threads: —");
@@ -501,7 +518,7 @@ fn build_detail_pane() -> DetailLabels {
 
     let status = gtk4::Label::new(Some(""));
     status.add_css_class("detail-status");
-    status.set_wrap(true);
+    style_detail_row(&status);
     box_v.append(&status);
 
     let pane = gtk4::ScrolledWindow::new();
