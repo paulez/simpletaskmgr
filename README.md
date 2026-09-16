@@ -29,7 +29,8 @@ time, and lets you inspect individual processes in a live detail pane.
 - **Show all processes**: toggle between every process on the system and only
   the current user's (default).
 - **Detail view**: click a process to see more in a side pane — name,
-  full **command line** (selectable to copy), **state**
+  full **command line** (click the row for the
+  whole command, copyable there), **state**
   (Running/Sleeping/…), **thread count**, **nice value**,
   **absolute resident memory** (RSS in a human unit), and its
   **start time** with a running **uptime**. Values the list row already

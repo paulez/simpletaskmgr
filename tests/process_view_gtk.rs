@@ -555,7 +555,9 @@ fn test_signal_buttons_forward_and_status() {
 fn test_detail_pane_renders_free_tier_fields() {
     // The detail pane renders the free-tier per-process details from the
     // data a selection carries; unknown fields fall back to the `—`
-    // placeholder (spec V4), and the command line row is selectable.
+    // placeholder (spec V4). The Command row stays plain (not selectable):
+    // selecting it would make GtkLabel install an exclusive click gesture
+    // that suppresses the click-to-reveal toggle (spec D6).
     run_gtk(|| {
         let pv = ProcessView::new();
 
@@ -580,10 +582,6 @@ fn test_detail_pane_renders_free_tier_fields() {
         assert!(d.pane.is_visible());
         assert_eq!(d.name.label(), "Name: myapp");
         assert_eq!(d.command.label(), "Command: myapp --flag value");
-        assert!(
-            d.command.is_selectable(),
-            "the command line row is selectable for copy-paste"
-        );
         assert_eq!(d.state.label(), "State: Sleeping");
         assert_eq!(d.threads.label(), "Threads: 4");
         assert_eq!(d.nice.label(), "Nice: +5", "positive nice signs explicitly");
@@ -634,7 +632,11 @@ fn test_command_click_popover_is_the_full_command() {
     // command in a popover, where it can be selected and copied, without
     // widening the pane. Here we test the wiring the click relies on and the
     // content it shows — the actual pop needs a toplevel window (the popover
-    // surface) and is covered by the visual run (test_ui_render).
+    // surface) and is covered by the visual run. The first assertion guards
+    // the root cause of "click does nothing": a *selectable* GtkLabel
+    // installs its own exclusive click gesture that claims every press and
+    // suppresses the toggle gesture, so the row must stay plain (copying
+    // happens on the popover's text instead).
     run_gtk(|| {
         let pv = ProcessView::new();
         let long = format!("slack --type=renderer --sandbox-token={}", "q".repeat(400));
@@ -645,6 +647,10 @@ fn test_command_click_popover_is_the_full_command() {
         pv.selection().set_selected(0);
 
         let d = pv.detail_labels();
+        assert!(
+            !d.command.is_selectable(),
+            "a selectable Command row would suppress the click-to-open gesture (D6)"
+        );
 
         // The popover is anchored to the `Command` line — a click on that
         // row opens it (and no other row does).

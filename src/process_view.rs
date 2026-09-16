@@ -439,9 +439,8 @@ fn rank_optional(a: Option<f64>, b: Option<f64>, descending: bool) -> std::cmp::
 /// Ellipsize truncates the text to the pane's width, and `max_width_chars`
 /// caps the *natural* request so the window's minimum stays reasonable (the
 /// same approach as the process-list cells). The full value stays
-/// reachable: a tooltip carries it, the `Command` row is selectable so it
-/// can be copied, and a single click on the row opens a popover with the
-/// whole command (spec D6).
+/// reachable: a tooltip carries it, and a single click on the row opens a
+/// popover with the whole command (spec D6).
 fn style_detail_value(label: &gtk4::Label) {
     label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     label.set_max_width_chars(48);
@@ -502,7 +501,10 @@ fn build_detail_pane() -> DetailLabels {
     // it (e.g. to paste into a `kill` command manually).
     let d_command = mk_row("Command: —");
     style_detail_value(&d_command);
-    d_command.set_selectable(true);
+    // Deliberately NOT `set_selectable`: a selectable GtkLabel installs its
+    // own *exclusive* click gesture (GTK4 gtklabel.c) that claims every press
+    // and suppresses the click-to-reveal gesture below. Copying the full
+    // command happens in the popover's selectable text (spec D6).
 
     // D6: the full command lives in a popover toggled by a single click on
     // the (ellipsized) `d_command` row — selectable and copyable there,
@@ -925,8 +927,10 @@ impl ProcessView {
 
         // D6: a single click on the (ellipsized) Command row toggles the
         // full-command popover. The gesture fires only when the release
-        // landed on the press spot, so a drag across the row still selects
-        // text for copy/paste (the row is selectable).
+        // landed on the press spot (an actual click, not a drag). The row is
+        // *not* itself selectable — a selectable GtkLabel installs its own
+        // exclusive click gesture that would suppress this one; selection &
+        // copy happen on the popover's text view instead (spec D6).
         let d = detail.clone();
         let sel = selection.clone();
         let gesture = gtk4::GestureClick::new();
