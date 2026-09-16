@@ -29,8 +29,7 @@ time, and lets you inspect individual processes in a live detail pane.
 - **Show all processes**: toggle between every process on the system and only
   the current user's (default).
 - **Detail view**: click a process to see more in a side pane — name,
-  full **command line** (click the row for the
-  whole command, copyable there), **state**
+  full **command line**, **state**
   (Running/Sleeping/…), **thread count**, **nice value**,
   **absolute resident memory** (RSS in a human unit), and its
   **start time** with a running **uptime**. Values the list row already
@@ -41,11 +40,10 @@ time, and lets you inspect individual processes in a live detail pane.
   (SIGKILL, forced) buttons to signal the selected process — the outcome
   ("SIGTERM sent to pid 1234" or the error, e.g. EPERM) is reported in the
   pane's status line.
-  Long values (e.g. a Slack/Chromium command line) show as a single
-  ellipsized line so the pane and window stay compact. The full command is
-  still easy to get: hover the `Command` row for the whole value in a
-  tooltip, or click the row to open a copyable popover showing the entire
-  command on scrollable, selectable text.
+  Long values (e.g. a long process name, a Slack/Chromium command line)
+  show as a single ellipsized line so the pane and window stay compact.
+  Click the `Name:` or `Command:` row to open a popover showing the full
+  value on scrollable, selectable text — select it there and copy it.
 - **Resource graph**: always-on charts of system CPU & memory, and CPU
   frequency & temperature, over the last few minutes. Every pane carries a
   colour swatch + label legend below its plot so each series is identified

@@ -439,8 +439,8 @@ fn rank_optional(a: Option<f64>, b: Option<f64>, descending: bool) -> std::cmp::
 /// Ellipsize truncates the text to the pane's width, and `max_width_chars`
 /// caps the *natural* request so the window's minimum stays reasonable (the
 /// same approach as the process-list cells). The full value stays
-/// reachable: a tooltip carries it, and a single click on the row opens a
-/// popover with the whole command (spec D6).
+/// reachable: a single click on the row opens a popover with the whole
+/// value, selectable & copyable (spec D6).
 fn style_detail_value(label: &gtk4::Label) {
     label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     label.set_max_width_chars(48);
@@ -465,6 +465,17 @@ pub struct DetailLabels {
     pub kill: gtk4::Button,
     /// One-line feedback row (kill outcome); empty when current.
     pub status: gtk4::Label,
+    /// Popover with the selected process' name, anchored to the `name` row;
+    /// a single click on that row toggles it (spec D6).
+    pub name_popover: gtk4::Popover,
+    /// The popover's text (selectable, hence copyable). Repopulated on
+    /// every reveal so it always carries the current selection's name.
+    pub name_full: gtk4::TextView,
+    /// The PID the name popover was revealed for (spec D6): a refresh
+    /// re-applying the *same* selection keeps the popover open, while a
+    /// different one closes it. Shared across `DetailLabels` clones
+    /// via `Rc`.
+    pub name_popover_pid: Rc<Cell<Option<i32>>>,
     /// Popover with the selected process' full command line, anchored to
     /// the `command` row; a single click on that row toggles it (spec D6).
     pub command_popover: gtk4::Popover,
@@ -494,39 +505,18 @@ fn build_detail_pane() -> DetailLabels {
         l.set_xalign(0.0);
         l
     }
+    // `Name` and `Command` can each be arbitrarily long (a Slack sandbox
+    // name, a Chromium command line): ellipsize both to a single bounded
+    // line (see `style_detail_value`).
     let d_name = mk_row("Name: —");
     style_detail_value(&d_name);
-    // The command line can be arbitrarily long: ellipsize it to a single
-    // bounded line (see `style_detail_value`) and let the user select/copy
-    // it (e.g. to paste into a `kill` command manually).
     let d_command = mk_row("Command: —");
     style_detail_value(&d_command);
-    // Deliberately NOT `set_selectable`: a selectable GtkLabel installs its
-    // own *exclusive* click gesture (GTK4 gtklabel.c) that claims every press
-    // and suppresses the click-to-reveal gesture below. Copying the full
-    // command happens in the popover's selectable text (spec D6).
-
-    // D6: the full command lives in a popover toggled by a single click on
-    // the (ellipsized) `d_command` row — selectable and copyable there,
-    // without stretching the pane or the window. The click wiring happens
-    // in `ProcessView::new` (it needs the selection); the toggle lives in
-    // `toggle_command_full` so the gesture and tests share one path.
-    let command_full = gtk4::TextView::new();
-    command_full.set_editable(false);
-    command_full.set_cursor_visible(false);
-    command_full.set_wrap_mode(gtk4::WrapMode::WordChar);
-    command_full.set_left_margin(8);
-    command_full.set_right_margin(8);
-    command_full.set_top_margin(6);
-    command_full.set_bottom_margin(6);
-    let full_scroll = gtk4::ScrolledWindow::new();
-    full_scroll.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Automatic);
-    full_scroll.set_min_content_width(480);
-    full_scroll.set_min_content_height(240);
-    full_scroll.set_child(Some(&command_full));
-    let command_popover = gtk4::Popover::new();
-    command_popover.set_parent(&d_command);
-    command_popover.set_child(Some(&full_scroll));
+    // Deliberately NOT `set_selectable` on either: a selectable GtkLabel
+    // installs its own *exclusive* click gesture (GTK4 gtklabel.c) that
+    // claims every press and suppresses the click-to-reveal gesture below
+    // (spec D6). Copying the full value happens in the popover's selectable
+    // text instead.
     let d_state = mk_row("State: —");
     let d_threads = mk_row("Threads: —");
     let d_nice = mk_row("Nice: —");
@@ -538,6 +528,14 @@ fn build_detail_pane() -> DetailLabels {
     ] {
         box_v.append(row);
     }
+
+    // D6: each elipsize-bound row carries a full-value popover, toggled by
+    // a single click on that row — selectable and copyable there, without
+    // stretching the pane or the window. The click wiring happens in
+    // `ProcessView::new` (it needs the selection); the toggle lives in
+    // `toggle_reveal` so the gesture and tests share one path.
+    let (name_popover, name_full) = build_reveal_popover(&d_name, 320, 100);
+    let (command_popover, command_full) = build_reveal_popover(&d_command, 480, 240);
 
     // Signal actions + feedback row (spec D5). They live inside the pane,
     // so they are visible exactly while a process is selected (the pane is
@@ -584,45 +582,126 @@ fn build_detail_pane() -> DetailLabels {
         terminate,
         kill,
         status,
+        name_popover,
+        name_full,
+        name_popover_pid: Rc::new(Cell::new(None)),
         command_popover,
         command_full,
         command_popover_pid: Rc::new(Cell::new(None)),
     }
 }
 
-/// Resolve the currently-selected process' full command line (empty when
-/// there is no selection, or none is set) — the content the full-command
-/// popover shows. Split out of [`toggle_command_full`] so it can be tested
-/// without displaying the popover (which needs a toplevel window).
-fn selected_full_command(selection: &gtk4::SingleSelection) -> String {
+/// Which elipsize-bound detail row a full-value popover belongs to (spec
+/// D6): the `Name` row (full process name) or the `Command` row (full
+/// command line).
+#[derive(Clone, Copy)]
+enum RevealField {
+    Name,
+    Command,
+}
+
+/// The popover, its text view, and the revealed-PID recorder for `field`
+/// (spec D6) — the three per-row pieces the reveal toggle and the stale-
+/// close share.
+fn reveal_targets(
+    d: &DetailLabels,
+    field: RevealField,
+) -> (&gtk4::Popover, &gtk4::TextView, &Rc<Cell<Option<i32>>>) {
+    match field {
+        RevealField::Name => (&d.name_popover, &d.name_full, &d.name_popover_pid),
+        RevealField::Command => (&d.command_popover, &d.command_full, &d.command_popover_pid),
+    }
+}
+
+/// The currently-selected row (if any): the one source both the popover
+/// content and the revealed-PID tracking read from (spec D6). Owned: the
+/// selection hands out an owned `Object`, so the row is downcast rather
+/// than borrowed.
+fn selected_row(selection: &gtk4::SingleSelection) -> Option<ViewRow> {
     selection
         .selected_item()
-        .as_ref()
-        .and_then(|o| o.downcast_ref::<ViewRow>())
+        .and_then(|o| o.downcast::<ViewRow>().ok())
+}
+
+/// The currently-selected process' full command line (empty when there is
+/// no selection, or none is set) — the content the `Command` row's
+/// popover shows. Tested without displaying the popover, which needs a
+/// toplevel window.
+fn selected_full_command(selection: &gtk4::SingleSelection) -> String {
+    selected_row(selection)
         .map(|r| r.item().value.cmdline_str())
         .unwrap_or_default()
 }
 
-/// Toggle the full-command popover (spec D6): open it — showing the
-/// currently-selected process' full command — when it is down, close it
-/// when it is up. The revealed process' PID is recorded in
-/// [`DetailLabels::command_popover_pid`] so a refresh re-applying the same
-/// row keeps it open, while a different row closes it (see [`apply_detail`]).
-fn toggle_command_full(d: &DetailLabels, selection: &gtk4::SingleSelection) {
-    if d.command_popover.is_visible() {
-        d.command_popover.popdown();
-        d.command_popover_pid.set(None);
+/// The currently-selected process' name — the content the `Name` row's
+/// popover shows (empty when nothing is selected).
+fn selected_name(selection: &gtk4::SingleSelection) -> String {
+    selected_row(selection)
+        .map(|r| r.item().value.name.clone())
+        .unwrap_or_default()
+}
+
+/// Build the full-value popover for a bounded row (spec D6): a bounded
+/// (scrolled) text view with the value, read-only but selectable (hence
+/// copyable), wrapping very long tokens mid-word so nothing can stretch
+/// the window; anchored to `anchor`.
+fn build_reveal_popover(
+    anchor: &gtk4::Label,
+    min_width: i32,
+    min_height: i32,
+) -> (gtk4::Popover, gtk4::TextView) {
+    let full = gtk4::TextView::new();
+    full.set_editable(false);
+    full.set_cursor_visible(false);
+    full.set_wrap_mode(gtk4::WrapMode::WordChar);
+    full.set_left_margin(8);
+    full.set_right_margin(8);
+    full.set_top_margin(6);
+    full.set_bottom_margin(6);
+    let scroll = gtk4::ScrolledWindow::new();
+    scroll.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Automatic);
+    scroll.set_min_content_width(min_width);
+    scroll.set_min_content_height(min_height);
+    scroll.set_child(Some(&full));
+    let popover = gtk4::Popover::new();
+    popover.set_parent(anchor);
+    popover.set_child(Some(&scroll));
+    (popover, full)
+}
+
+/// Toggle `field`'s full-value popover (spec D6): open it — showing the
+/// currently-selected process' full name or command line — when it is
+/// down, close it when it is up. The revealed process' PID is recorded in
+/// the row's recorder, so a refresh re-applying the same row keeps the
+/// popover open while a different one closes it (see [`apply_detail`]).
+fn toggle_reveal(d: &DetailLabels, field: RevealField, selection: &gtk4::SingleSelection) {
+    let (popover, text_view, pid_cell) = reveal_targets(d, field);
+    if popover.is_visible() {
+        popover.popdown();
+        pid_cell.set(None);
         return;
     }
-    let text = selected_full_command(selection);
-    let pid = selection
-        .selected_item()
-        .as_ref()
-        .and_then(|o| o.downcast_ref::<ViewRow>())
-        .map(|r| r.pid());
-    d.command_full.buffer().set_text(&text);
-    d.command_popover_pid.set(pid);
-    d.command_popover.popup();
+    let Some(row) = selected_row(selection) else {
+        return; // nothing selected: nothing to reveal
+    };
+    let text = match field {
+        RevealField::Name => row.item().value.name.clone(),
+        RevealField::Command => row.item().value.cmdline_str(),
+    };
+    text_view.buffer().set_text(&text);
+    pid_cell.set(Some(row.pid()));
+    popover.popup();
+}
+
+/// Close `field`'s popover (spec D6) when the selection has moved away
+/// from the revealed process — a refresh re-applying the *same* row keeps
+/// it open (it still shows the right value).
+fn close_stale_reveal(d: &DetailLabels, field: RevealField, item: Option<&ProcessItem>) {
+    let (popover, _text_view, pid_cell) = reveal_targets(d, field);
+    if popover.is_visible() && pid_cell.get() != item.map(|it| it.pid) {
+        popover.popdown();
+        pid_cell.set(None);
+    }
 }
 
 /// Fill the pane fields from `item`; clear and hide when `None` (spec D2/D3),
@@ -655,17 +734,12 @@ fn now_epoch_secs() -> i64 {
 }
 
 fn apply_detail(d: &DetailLabels, item: Option<&ProcessItem>) {
-    // D6: the full-command popover is pinned to its revealed process. A
+    // D6: each full-value popover is pinned to its revealed process. A
     // refresh re-applies the row while the selection is unchanged, so the
-    // popover stays open (it still shows the right command); it closes only
+    // popover stays open (it still shows the right value); it closes only
     // when the selection moves to a different process or is cleared.
-    if d.command_popover.is_visible() {
-        let revealed = d.command_popover_pid.get().unwrap_or(i32::MIN);
-        let selected = item.map(|it| it.pid).unwrap_or(i32::MIN);
-        if revealed != selected {
-            d.command_popover.popdown();
-            d.command_popover_pid.set(None);
-        }
+    for field in [RevealField::Name, RevealField::Command] {
+        close_stale_reveal(d, field, item);
     }
     if item.is_none() {
         d.pane.set_visible(false);
@@ -673,7 +747,6 @@ fn apply_detail(d: &DetailLabels, item: Option<&ProcessItem>) {
             &d.name, &d.command, &d.state, &d.threads, &d.nice, &d.rss, &d.started, &d.uptime,
         ] {
             l.set_label("");
-            l.set_tooltip_text(None);
         }
         d.status.set_label("");
         return;
@@ -682,18 +755,12 @@ fn apply_detail(d: &DetailLabels, item: Option<&ProcessItem>) {
     d.pane.set_visible(true);
     d.status.set_label("");
     let now = now_epoch_secs();
-    // `Name` and `Command` are ellipsized to a single bounded line (see
-    // `style_detail_value`); surface the *full* value in a tooltip so the
-    // truncated tail is still readable without widening the pane.
+    // `Name` and `Command` are ellipsize-bounded (see `style_detail_value`);
+    // the full value is revealed by clicking the row (spec D6) — no hover
+    // tooltip duplicates it.
     d.name.set_label(&format!("Name: {}", p.name));
-    d.name.set_tooltip_text(Some(p.name.as_str()));
     let command = dash(&p.cmdline_str());
     d.command.set_label(&format!("Command: {}", command));
-    d.command.set_tooltip_text(if command.is_empty() {
-        None
-    } else {
-        Some(command.as_str())
-    });
     d.state.set_label(&format!("State: {}", p.state_str()));
     d.threads.set_label(&format!("Threads: {}", p.threads));
     d.nice.set_label(&format!("Nice: {}", nice_str(p.nice)));
@@ -925,22 +992,30 @@ impl ProcessView {
             }
         });
 
-        // D6: a single click on the (ellipsized) Command row toggles the
-        // full-command popover. The gesture fires only when the release
-        // landed on the press spot (an actual click, not a drag). The row is
-        // *not* itself selectable — a selectable GtkLabel installs its own
-        // exclusive click gesture that would suppress this one; selection &
-        // copy happen on the popover's text view instead (spec D6).
-        let d = detail.clone();
-        let sel = selection.clone();
-        let gesture = gtk4::GestureClick::new();
-        gesture.set_button(1); // GDK_BUTTON1
-        gesture.connect_released(move |_g, n_press, _x, _y| {
-            if n_press == 1 {
-                toggle_command_full(&d, &sel);
-            }
-        });
-        detail.command.add_controller(gesture.clone());
+        // D6: a single click on an elipsize-bound row (`Name:` / `Command:`)
+        // toggles that row's full-value popover. The gesture fires only
+        // when the release landed on the press spot (an actual click, not
+        // a drag). The rows are *not* themselves selectable — a selectable
+        // GtkLabel installs its own exclusive click gesture that would
+        // suppress this one; selection & copy happen on the popover's text
+        // view (spec D6).
+        for field in [RevealField::Name, RevealField::Command] {
+            let label = match field {
+                RevealField::Name => &detail.name,
+                RevealField::Command => &detail.command,
+            };
+            let d = detail.clone();
+            let sel = selection.clone();
+            let gesture = gtk4::GestureClick::new();
+            gesture.set_button(1); // GDK_BUTTON1
+            let f = field;
+            gesture.connect_released(move |_g, n_press, _x, _y| {
+                if n_press == 1 {
+                    toggle_reveal(&d, f, &sel);
+                }
+            });
+            label.add_controller(gesture.clone());
+        }
 
         Self {
             root,
@@ -986,12 +1061,19 @@ impl ProcessView {
             .map(|o| o.downcast_ref::<ViewRow>().expect("a ViewRow").pid())
     }
 
-    /// The currently-selected process' full command line — the whole value the
-    /// detail pane's `Command` row ellipsizes, and the content its click-
-    /// revealed popover (spec D6) shows. Empty when nothing is selected or the
-    /// process has no command line (kernel thread / zombie).
+    /// The currently-selected process' full command line — the whole value
+    /// the detail pane's `Command` row ellipsizes, and the content its
+    /// click-revealed popover (spec D6) shows. Empty when nothing is
+    /// selected or the process has no command line (kernel thread / zombie).
     pub fn selected_command_line(&self) -> String {
         selected_full_command(&self.selection)
+    }
+
+    /// The currently-selected process' name — the whole value the detail
+    /// pane's `Name` row ellipsizes, and the content its click-revealed
+    /// popover (spec D6) shows. Empty when nothing is selected.
+    pub fn selected_name(&self) -> String {
+        selected_name(&self.selection)
     }
 
     /// Fire on selection change, with the new PID (`None` = deselected).
@@ -1013,10 +1095,17 @@ impl ProcessView {
         self.detail.status.set_label(text);
     }
 
+    /// Toggle the selected process' name popover (spec D6) — the same
+    /// action a single click on the ellipsize-bound `Name` row performs.
+    pub fn toggle_full_name(&self) {
+        toggle_reveal(&self.detail, RevealField::Name, &self.selection)
+    }
+
     /// Toggle the selected process' full-command popover (spec D6) — the
-    /// same action a single click on the ellipsized `Command` row performs.
+    /// same action a single click on the ellipsize-bound `Command` row
+    /// performs.
     pub fn toggle_full_command(&self) {
-        toggle_command_full(&self.detail, &self.selection);
+        toggle_reveal(&self.detail, RevealField::Command, &self.selection)
     }
 
     /// Start the first paint at the top of the list (spec R3 initial state).
