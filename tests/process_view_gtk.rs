@@ -629,33 +629,33 @@ fn test_detail_pane_renders_free_tier_fields() {
 }
 
 #[test]
-fn test_detail_pane_wraps_long_command_tokens() {
+fn test_detail_pane_ellipsizes_long_command_tokens() {
     // A Slack/Chromium command line carries single tokens hundreds of
-    // characters long (e.g. `--enable-features=…`). Word-boundary wrapping
-    // alone still requests a minimum width as wide as the longest token,
-    // so the detail pane (horizontal policy `Never`) would stretch the
-    // whole window off-screen. The pane's value labels must therefore wrap
-    // with `PANGO_WRAP_WORD_CHAR`: long tokens break mid-word and the
-    // labels' size request stays bounded no matter how long the longest
-    // token is.
+    // characters long (e.g. `--enable-features=…`). An unstyled label would
+    // request as much width as its longest token, and the detail pane would
+    // stretch the whole window off-screen. The pane's value labels must
+    // therefore ellipsize to a bounded single line (the full value still
+    // reachable via tooltip and selection), not wrap into many lines.
     run_gtk(|| {
         let pv = ProcessView::new();
         let d = pv.detail_labels();
+        let long = "q".repeat(400);
         for l in [&d.name, &d.command] {
-            assert!(l.wraps(), "a detail-pane value label must wrap");
+            l.set_label(&format!("x: {long}"));
             assert_eq!(
-                l.wrap_mode(),
-                gtk4::pango::WrapMode::WordChar,
-                "a 400-char single token must be able to break mid-word"
+                l.ellipsize(),
+                gtk4::pango::EllipsizeMode::End,
+                "a detail-pane value label must ellipsize"
+            );
+            assert!(
+                l.max_width_chars() > 0,
+                "a detail-pane value label must cap its width"
+            );
+            let (min, nat, _, _) = l.measure(gtk4::Orientation::Horizontal, 100);
+            assert!(
+                min < 1000 && nat < 1000,
+                "a 400-char token gave a min={min}px / nat={nat}px size request — it must stay bounded"
             );
         }
-        let long = "q".repeat(400);
-        let l = d.command.clone();
-        l.set_label(&long);
-        let (min, nat, _, _) = l.measure(gtk4::Orientation::Horizontal, 100);
-        assert!(
-            min < 1000 && nat < 1000,
-            "a 400-char token gave a min={min}px / nat={nat}px size request — it must stay bounded"
-        );
     });
 }

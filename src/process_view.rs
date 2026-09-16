@@ -428,20 +428,23 @@ fn rank_optional(a: Option<f64>, b: Option<f64>, descending: bool) -> std::cmp::
     }
 }
 
-/// Style a detail-pane value label so long content never stretches the pane —
-/// and hence the window — wide.
+/// Style a detail-pane value label so a long value (`Name`, `Command`) shows
+/// as a single, bounded line instead of stretching the pane — and hence the
+/// window — wide, or wrapping into many lines.
 ///
 /// A command line like Slack/Chromium's carries single *tokens* hundreds of
-/// characters long (e.g. `--enable-features=…`). A label that only wraps at
-/// word boundaries still requests a minimum width as wide as its longest
-/// token, and the detail pane's `ScrolledWindow` (horizontal policy
-/// `Never`) would then stretch the whole toplevel past any screen. With
-/// [`gtk4::pango::WrapMode::WordChar`] the token also breaks mid-word, so
-/// the label's minimum *and* natural width stay bounded no matter how long
-/// the longest token is — the text just wraps across more lines.
-fn style_detail_row(label: &gtk4::Label) {
-    label.set_wrap(true);
-    label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+/// characters long (e.g. `--enable-features=…`). An unstyled label requests
+/// as much width as its longest such token, and the detail pane's
+/// `ScrolledWindow` would then stretch the whole toplevel past any screen.
+/// Ellipsize truncates the text to the pane's width, and `max_width_chars`
+/// caps the *natural* request so the window's minimum stays reasonable (the
+/// same approach as the process-list cells). The full value stays reachable:
+/// a tooltip carries it, and the `Command` row is selectable so it can be
+/// copied; the pane's `ScrolledWindow` also offers a horizontal scrollbar to
+/// pan to a token's head or tail.
+fn style_detail_value(label: &gtk4::Label) {
+    label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    label.set_max_width_chars(48);
 }
 
 /// `DetailLabels` keeps the detail-pane labels addressable, and the pane
@@ -482,11 +485,12 @@ fn build_detail_pane() -> DetailLabels {
         l
     }
     let d_name = mk_row("Name: —");
-    style_detail_row(&d_name);
-    // The command line can be arbitrarily long: wrap it and let the user
-    // select/copy it (e.g. to paste into a `kill` command manually).
+    style_detail_value(&d_name);
+    // The command line can be arbitrarily long: ellipsize it to a single
+    // bounded line (see `style_detail_value`) and let the user select/copy
+    // it (e.g. to paste into a `kill` command manually).
     let d_command = mk_row("Command: —");
-    style_detail_row(&d_command);
+    style_detail_value(&d_command);
     d_command.set_selectable(true);
     let d_state = mk_row("State: —");
     let d_threads = mk_row("Threads: —");
@@ -518,11 +522,15 @@ fn build_detail_pane() -> DetailLabels {
 
     let status = gtk4::Label::new(Some(""));
     status.add_css_class("detail-status");
-    style_detail_row(&status);
+    status.set_wrap(true);
     box_v.append(&status);
 
+    // Horizontal `Automatic` (instead of `Never`) lets the pane pan a long
+    // single-line value (the ellipsized `Command` row) with a scrollbar
+    // rather than the label stretching the whole window wide; vertical
+    // content (the rows above/below) still scrolls as before.
     let pane = gtk4::ScrolledWindow::new();
-    pane.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
+    pane.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Automatic);
     pane.set_child(Some(&box_v));
     pane.set_hexpand(true);
     pane.set_vexpand(true);
@@ -580,6 +588,7 @@ fn apply_detail(d: &DetailLabels, item: Option<&ProcessItem>) {
             &d.name, &d.command, &d.state, &d.threads, &d.nice, &d.rss, &d.started, &d.uptime,
         ] {
             l.set_label("");
+            l.set_tooltip_text(None);
         }
         d.status.set_label("");
         return;
@@ -588,9 +597,18 @@ fn apply_detail(d: &DetailLabels, item: Option<&ProcessItem>) {
     d.pane.set_visible(true);
     d.status.set_label("");
     let now = now_epoch_secs();
+    // `Name` and `Command` are ellipsized to a single bounded line (see
+    // `style_detail_value`); surface the *full* value in a tooltip so the
+    // truncated tail is still readable without widening the pane.
     d.name.set_label(&format!("Name: {}", p.name));
-    d.command
-        .set_label(&format!("Command: {}", dash(&p.cmdline_str())));
+    d.name.set_tooltip_text(Some(p.name.as_str()));
+    let command = dash(&p.cmdline_str());
+    d.command.set_label(&format!("Command: {}", command));
+    d.command.set_tooltip_text(if command.is_empty() {
+        None
+    } else {
+        Some(command.as_str())
+    });
     d.state.set_label(&format!("State: {}", p.state_str()));
     d.threads.set_label(&format!("Threads: {}", p.threads));
     d.nice.set_label(&format!("Nice: {}", nice_str(p.nice)));
