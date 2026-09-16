@@ -629,6 +629,62 @@ fn test_detail_pane_renders_free_tier_fields() {
 }
 
 #[test]
+fn test_command_click_popover_is_the_full_command() {
+    // D6: a single click on the (ellipsized) `Command` line reveals the full
+    // command in a popover, where it can be selected and copied, without
+    // widening the pane. Here we test the wiring the click relies on and the
+    // content it shows — the actual pop needs a toplevel window (the popover
+    // surface) and is covered by the visual run (test_ui_render).
+    run_gtk(|| {
+        let pv = ProcessView::new();
+        let long = format!("slack --type=renderer --sandbox-token={}", "q".repeat(400));
+        let mut p = TaskMgrProcess::new("slack".to_string(), 4321, 1000, "paul".to_string(), 3.0);
+        p.cmdline = Some(long.clone());
+        let full = ProcessItem::new(&p);
+        pv.update(std::slice::from_ref(&full));
+        pv.selection().set_selected(0);
+
+        let d = pv.detail_labels();
+
+        // The popover is anchored to the `Command` line — a click on that
+        // row opens it (and no other row does).
+        let anchor = d
+            .command_popover
+            .parent()
+            .expect("the popover has an anchor");
+        assert!(
+            std::ptr::eq(
+                anchor.as_ptr() as *const gtk4::Widget,
+                d.command.as_ptr() as *const gtk4::Widget,
+            ),
+            "the full-command popover must anchor on the Command line"
+        );
+
+        // What gets revealed is the selected process' *full* command line
+        // (not the ellipsized preview): the very long token is intact.
+        assert_eq!(pv.selected_command_line(), long);
+
+        // The content lives in a read-only, selectable text view (copyable),
+        // wrapping very long tokens mid-word so it cannot widen the pane.
+        let content = d.command_popover.child().expect("the popover has content");
+        let scroll = content
+            .downcast::<gtk4::ScrolledWindow>()
+            .expect("the content is horizontally scrollable");
+        let tv = scroll
+            .child()
+            .expect("a text view holds the command")
+            .downcast::<gtk4::TextView>()
+            .expect("that view is a text view");
+        assert!(!tv.is_editable(), "the revealed command is read-only");
+        assert_eq!(
+            tv.wrap_mode(),
+            gtk4::WrapMode::WordChar,
+            "a very long token must wrap, not widen the popover"
+        );
+    });
+}
+
+#[test]
 fn test_detail_pane_ellipsizes_long_command_tokens() {
     // A Slack/Chromium command line carries single tokens hundreds of
     // characters long (e.g. `--enable-features=…`). An unstyled label would

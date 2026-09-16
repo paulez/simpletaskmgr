@@ -41,8 +41,10 @@ time, and lets you inspect individual processes in a live detail pane.
   ("SIGTERM sent to pid 1234" or the error, e.g. EPERM) is reported in the
   pane's status line.
   Long values (e.g. a Slack/Chromium command line) show as a single
-  ellipsized line so the pane and window stay compact: hover the row for
-  the full value in a tooltip, or select the Command row to copy it.
+  ellipsized line so the pane and window stay compact. The full command is
+  still easy to get: hover the `Command` row for the whole value in a
+  tooltip, or click the row to open a copyable popover showing the entire
+  command on scrollable, selectable text.
 - **Resource graph**: always-on charts of system CPU & memory, and CPU
   frequency & temperature, over the last few minutes. Every pane carries a
   colour swatch + label legend below its plot so each series is identified

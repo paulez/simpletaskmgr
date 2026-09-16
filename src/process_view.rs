@@ -438,10 +438,10 @@ fn rank_optional(a: Option<f64>, b: Option<f64>, descending: bool) -> std::cmp::
 /// `ScrolledWindow` would then stretch the whole toplevel past any screen.
 /// Ellipsize truncates the text to the pane's width, and `max_width_chars`
 /// caps the *natural* request so the window's minimum stays reasonable (the
-/// same approach as the process-list cells). The full value stays reachable:
-/// a tooltip carries it, and the `Command` row is selectable so it can be
-/// copied; the pane's `ScrolledWindow` also offers a horizontal scrollbar to
-/// pan to a token's head or tail.
+/// same approach as the process-list cells). The full value stays
+/// reachable: a tooltip carries it, the `Command` row is selectable so it
+/// can be copied, and a single click on the row opens a popover with the
+/// whole command (spec D6).
 fn style_detail_value(label: &gtk4::Label) {
     label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     label.set_max_width_chars(48);
@@ -466,6 +466,17 @@ pub struct DetailLabels {
     pub kill: gtk4::Button,
     /// One-line feedback row (kill outcome); empty when current.
     pub status: gtk4::Label,
+    /// Popover with the selected process' full command line, anchored to
+    /// the `command` row; a single click on that row toggles it (spec D6).
+    pub command_popover: gtk4::Popover,
+    /// The popover's text (selectable, hence copyable). Repopulated on
+    /// every reveal so it always carries the current selection's command.
+    pub command_full: gtk4::TextView,
+    /// The PID the full-command popover was revealed for (spec D6): a
+    /// refresh re-applying the *same* selection keeps the popover open,
+    /// while a different one closes it. Shared across `DetailLabels`
+    /// clones via `Rc`.
+    pub command_popover_pid: Rc<Cell<Option<i32>>>,
 }
 
 /// Build the right-hand detail pane: one titled row per displayed field,
@@ -492,6 +503,28 @@ fn build_detail_pane() -> DetailLabels {
     let d_command = mk_row("Command: —");
     style_detail_value(&d_command);
     d_command.set_selectable(true);
+
+    // D6: the full command lives in a popover toggled by a single click on
+    // the (ellipsized) `d_command` row — selectable and copyable there,
+    // without stretching the pane or the window. The click wiring happens
+    // in `ProcessView::new` (it needs the selection); the toggle lives in
+    // `toggle_command_full` so the gesture and tests share one path.
+    let command_full = gtk4::TextView::new();
+    command_full.set_editable(false);
+    command_full.set_cursor_visible(false);
+    command_full.set_wrap_mode(gtk4::WrapMode::WordChar);
+    command_full.set_left_margin(8);
+    command_full.set_right_margin(8);
+    command_full.set_top_margin(6);
+    command_full.set_bottom_margin(6);
+    let full_scroll = gtk4::ScrolledWindow::new();
+    full_scroll.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Automatic);
+    full_scroll.set_min_content_width(480);
+    full_scroll.set_min_content_height(240);
+    full_scroll.set_child(Some(&command_full));
+    let command_popover = gtk4::Popover::new();
+    command_popover.set_parent(&d_command);
+    command_popover.set_child(Some(&full_scroll));
     let d_state = mk_row("State: —");
     let d_threads = mk_row("Threads: —");
     let d_nice = mk_row("Nice: —");
@@ -549,7 +582,45 @@ fn build_detail_pane() -> DetailLabels {
         terminate,
         kill,
         status,
+        command_popover,
+        command_full,
+        command_popover_pid: Rc::new(Cell::new(None)),
     }
+}
+
+/// Resolve the currently-selected process' full command line (empty when
+/// there is no selection, or none is set) — the content the full-command
+/// popover shows. Split out of [`toggle_command_full`] so it can be tested
+/// without displaying the popover (which needs a toplevel window).
+fn selected_full_command(selection: &gtk4::SingleSelection) -> String {
+    selection
+        .selected_item()
+        .as_ref()
+        .and_then(|o| o.downcast_ref::<ViewRow>())
+        .map(|r| r.item().value.cmdline_str())
+        .unwrap_or_default()
+}
+
+/// Toggle the full-command popover (spec D6): open it — showing the
+/// currently-selected process' full command — when it is down, close it
+/// when it is up. The revealed process' PID is recorded in
+/// [`DetailLabels::command_popover_pid`] so a refresh re-applying the same
+/// row keeps it open, while a different row closes it (see [`apply_detail`]).
+fn toggle_command_full(d: &DetailLabels, selection: &gtk4::SingleSelection) {
+    if d.command_popover.is_visible() {
+        d.command_popover.popdown();
+        d.command_popover_pid.set(None);
+        return;
+    }
+    let text = selected_full_command(selection);
+    let pid = selection
+        .selected_item()
+        .as_ref()
+        .and_then(|o| o.downcast_ref::<ViewRow>())
+        .map(|r| r.pid());
+    d.command_full.buffer().set_text(&text);
+    d.command_popover_pid.set(pid);
+    d.command_popover.popup();
 }
 
 /// Fill the pane fields from `item`; clear and hide when `None` (spec D2/D3),
@@ -582,6 +653,18 @@ fn now_epoch_secs() -> i64 {
 }
 
 fn apply_detail(d: &DetailLabels, item: Option<&ProcessItem>) {
+    // D6: the full-command popover is pinned to its revealed process. A
+    // refresh re-applies the row while the selection is unchanged, so the
+    // popover stays open (it still shows the right command); it closes only
+    // when the selection moves to a different process or is cleared.
+    if d.command_popover.is_visible() {
+        let revealed = d.command_popover_pid.get().unwrap_or(i32::MIN);
+        let selected = item.map(|it| it.pid).unwrap_or(i32::MIN);
+        if revealed != selected {
+            d.command_popover.popdown();
+            d.command_popover_pid.set(None);
+        }
+    }
     if item.is_none() {
         d.pane.set_visible(false);
         for l in [
@@ -840,6 +923,21 @@ impl ProcessView {
             }
         });
 
+        // D6: a single click on the (ellipsized) Command row toggles the
+        // full-command popover. The gesture fires only when the release
+        // landed on the press spot, so a drag across the row still selects
+        // text for copy/paste (the row is selectable).
+        let d = detail.clone();
+        let sel = selection.clone();
+        let gesture = gtk4::GestureClick::new();
+        gesture.set_button(1); // GDK_BUTTON1
+        gesture.connect_released(move |_g, n_press, _x, _y| {
+            if n_press == 1 {
+                toggle_command_full(&d, &sel);
+            }
+        });
+        detail.command.add_controller(gesture.clone());
+
         Self {
             root,
             column_view,
@@ -884,6 +982,14 @@ impl ProcessView {
             .map(|o| o.downcast_ref::<ViewRow>().expect("a ViewRow").pid())
     }
 
+    /// The currently-selected process' full command line — the whole value the
+    /// detail pane's `Command` row ellipsizes, and the content its click-
+    /// revealed popover (spec D6) shows. Empty when nothing is selected or the
+    /// process has no command line (kernel thread / zombie).
+    pub fn selected_command_line(&self) -> String {
+        selected_full_command(&self.selection)
+    }
+
     /// Fire on selection change, with the new PID (`None` = deselected).
     pub fn connect_selection_changed(&self, f: impl Fn(Option<i32>) + 'static) {
         *self.callback.borrow_mut() = Some(Rc::new(f));
@@ -901,6 +1007,12 @@ impl ProcessView {
     /// app uses this to report the signal outcome in the pane.
     pub fn set_status(&self, text: &str) {
         self.detail.status.set_label(text);
+    }
+
+    /// Toggle the selected process' full-command popover (spec D6) — the
+    /// same action a single click on the ellipsized `Command` row performs.
+    pub fn toggle_full_command(&self) {
+        toggle_command_full(&self.detail, &self.selection);
     }
 
     /// Start the first paint at the top of the list (spec R3 initial state).
