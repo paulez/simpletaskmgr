@@ -211,6 +211,23 @@ mod imp {
     }
 }
 
+/// Style one cell label so a list cell stays bounded regardless of its text.
+///
+/// A `GtkLabel` requests as much width as its full text, so an unstyled
+/// cell under the expandable Name column (a multi-hundred-character
+/// `argv[0]`, e.g. a Slack sandbox process) stretches the column — and
+/// hence the whole window — to the longest name in the list. Ellipsize
+/// truncates the text to the column's width, and `max-width-chars` caps
+/// the *natural* request so the window's minimum stays reasonable. The
+/// column remains resizable (`GtkColumnViewColumn` drag) and the detail
+/// pane shows the full command line (wrapped, selectable), so the full
+/// name is still reachable by the user.
+#[doc(hidden)]
+pub fn style_cell_label(label: &gtk4::Label) {
+    label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    label.set_max_width_chars(24);
+}
+
 /// Shared `SignalListItemFactory` for one text column: a single `Label` bound
 /// to the row's string property `prop`.
 ///
@@ -226,6 +243,7 @@ fn cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
         let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");
         let label = gtk4::Label::new(None);
         label.set_xalign(0.0);
+        style_cell_label(&label);
         li.set_child(Some(&label));
     });
     f.connect_unbind(move |_f, li| {

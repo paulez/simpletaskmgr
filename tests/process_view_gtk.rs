@@ -130,6 +130,29 @@ fn test_row_properties_mirror_data() {
 }
 
 #[test]
+fn test_cell_label_truncates_long_names() {
+    // A multi-hundred-character `argv[0]` (e.g. a Slack sandbox process)
+    // used to stretch the expandable Name column — and hence the whole
+    // window — to its full text width. The cell label must ellipsize and
+    // cap its natural width request so the view truncates long names
+    // instead of growing to fit them (the column stays resizable, and the
+    // detail pane shows the full command line).
+    run_gtk(|| {
+        let label = gtk4::Label::new(Some(&"x".repeat(600)));
+        simpletaskmgr::process_view::style_cell_label(&label);
+        assert_eq!(
+            label.ellipsize(),
+            gtk4::pango::EllipsizeMode::End,
+            "long names must be truncated in the display"
+        );
+        assert!(
+            label.max_width_chars() > 0,
+            "the natural width request must be capped so the window stays a reasonable size"
+        );
+    });
+}
+
+#[test]
 fn test_row_notify_only_changed() {
     run_gtk(|| {
         let r = ViewRow::from_item(&item(1, 10));
