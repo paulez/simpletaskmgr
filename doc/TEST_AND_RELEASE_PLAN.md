@@ -24,6 +24,10 @@ section for the summary).
   placeholder, never a misleading zero.
 - Signal delivery is covered by unit tests, an integration test, and a
   live test (send SIGTERM to a spawned `sleep` and assert it exits).
+- **crates.io distribution**: the package publishes to crates.io
+  (`description`/`repository` metadata added), so every version in the
+  ladder is installable via `cargo install simpletaskmgr [--version …]`
+  in addition to the GitHub binary tarball.
 
 ## Test gate (run on every change)
 
@@ -142,9 +146,16 @@ the target version changes. Prereleases publish as GitHub **pre-releases**
    - `simpletaskmgr-1.0.0-x86_64-linux.tar.gz` (binary + README + LICENSE)
    - `SHA256SUMS`
    - automatic source tarball/zip
-4. **`rust.yml`** keeps gating every push/PR (format, clippy, tests,
+4. **crates.io**: publish the same version so `cargo install
+   simpletaskmgr [--version <target>]` works — `cargo publish` with a
+   crates.io API token (crates are immutable, so each ladder step is
+   published exactly once). Prereleases are fine to publish; note that
+   `cargo install simpletaskmgr` without `--version` resolves only stable
+   versions, so until `1.0.0` ships, installs need an explicit
+   `--version` (documented in the README's `## Releases` section).
+5. **`rust.yml`** keeps gating every push/PR (format, clippy, tests,
    build); it must stay green while the release is open.
-5. **Post-release sanity**: the VM check in section 5, then close this
+6. **Post-release sanity**: the VM check in section 5, then close this
    checklist / mark the tag as shipped.
 
 ## Out of scope for the GUI (by spec)

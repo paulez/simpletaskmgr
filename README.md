@@ -148,6 +148,19 @@ To cut any of them (e.g. `1.0.0-rc.1`, or the final `1.0.0`):
 
    Prerelease versions are published as GitHub **pre-releases**, so they
    are never offered as "Latest" — the final `1.0.0` is.
+4. Each version is also published to **crates.io** (`cargo publish` with a
+   crates.io API token), so every version can be installed without building
+   from a checkout:
+
+   ```bash
+   cargo install simpletaskmgr          # latest stable release
+   cargo install simpletaskmgr --version 1.0.0-beta.1  # a prerelease
+   ```
+
+   `cargo install` compiles from source, so the build machine needs the
+   [Requirements](#requirements) above (GTK 4.18+ dev headers, Rust 1.75+).
+   The plain command resolves only stable versions — prereleases need an
+   explicit `--version`.
 
 Every push to `main` and pull request also runs the standard gate
 (format, clippy, tests, build) via the `rust` workflow.
