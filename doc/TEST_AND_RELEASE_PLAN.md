@@ -146,12 +146,16 @@ the target version changes. Prereleases publish as GitHub **pre-releases**
    - `simpletaskmgr-1.0.0-x86_64-linux.tar.gz` (binary + README + LICENSE)
    - `SHA256SUMS`
    - automatic source tarball/zip
-4. **crates.io**: publish the same version so `cargo install
-   simpletaskmgr [--version <target>]` works — `cargo publish` with a
-   crates.io API token (crates are immutable, so each ladder step is
-   published exactly once). Prereleases are fine to publish; note that
-   `cargo install simpletaskmgr` without `--version` resolves only stable
-   versions, so until `1.0.0` ships, installs need an explicit
+4. **crates.io**: the `publish-crate` job in `release.yml` runs
+   `cargo publish` with the `CARGO_REGISTRY_TOKEN` repository secret, so
+   `cargo install simpletaskmgr [--version <target>]` works (crates are
+   immutable, so each ladder step publishes exactly once; re-running the
+   workflow for an already-published tag fails the job — republishing a
+   version is not possible by design). Prerequisites: the repo secret is
+   set (a crates.io API token; the crate account needs 2FA), and the job
+   fails loudly if it is missing. Prereleases are fine to publish; note
+   that `cargo install simpletaskmgr` without `--version` resolves only
+   stable versions, so until `1.0.0` ships, installs need an explicit
    `--version` (documented in the README's `## Releases` section).
 5. **`rust.yml`** keeps gating every push/PR (format, clippy, tests,
    build); it must stay green while the release is open.

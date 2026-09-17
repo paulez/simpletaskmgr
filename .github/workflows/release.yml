@@ -85,3 +85,49 @@ jobs:
         gh release create "v${V}" "${ARGS[@]}" \
           "dist/simpletaskmgr-${V}-x86_64-linux.tar.gz" \
           "dist/SHA256SUMS"
+
+  # Publishes the same version to crates.io so that
+  # `cargo install simpletaskmgr [--version <tag>]` works. Runs alongside
+  # `release` (independent, so a hiccup on one side does not block the
+  # other) and publishes exactly once per version — crates are immutable
+  # and `cargo publish` fails loudly if the version was already taken.
+  publish-crate:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+      options: --user root
+    env:
+      PATH: /root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      RUSTUP_HOME: /root/.rustup
+      CARGO_HOME: /root/.cargo
+    steps:
+    - name: Install build dependencies (Debian 13)
+      run: |
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          ca-certificates \
+          curl \
+          git \
+          bash
+    - name: Install Rust (stable)
+      run: |
+        curl -sSf https://sh.rustup.rs | HOME=/root sh -s -- -y --profile minimal --default-toolchain stable
+        rustc --version
+        cargo --version
+    - uses: actions/checkout@v4
+    - name: Check the crates.io publish token is configured
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      shell: bash
+      run: |
+        # Fail loudly instead of letting `cargo publish` fall back to an
+        # interactive login, which would hang inside the container.
+        if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+          echo "::error::Repository secret CARGO_REGISTRY_TOKEN is not set — create a crates.io API token (account 2FA required) and add it as a repository secret named CARGO_REGISTRY_TOKEN"
+          exit 1
+        fi
+    - name: Publish to crates.io
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      run: cargo publish --verbose

@@ -148,9 +148,10 @@ To cut any of them (e.g. `1.0.0-rc.1`, or the final `1.0.0`):
 
    Prerelease versions are published as GitHub **pre-releases**, so they
    are never offered as "Latest" — the final `1.0.0` is.
-4. Each version is also published to **crates.io** (`cargo publish` with a
-   crates.io API token), so every version can be installed without building
-   from a checkout:
+4. Each version is also published to **crates.io** by the `publish-crate`
+   job in the `release` workflow (using the `CARGO_REGISTRY_TOKEN` repository
+   secret), so every version can be installed without building from a
+   checkout:
 
    ```bash
    cargo install simpletaskmgr          # latest stable release
