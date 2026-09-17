@@ -3,6 +3,10 @@ name = "simpletaskmgr"
 version = "1.0.0-beta.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+description = "A simple GTK4 task manager: CPU/Mem/Disk graphs, a process list, and Terminate/Kill (SIGTERM/SIGKILL) from the detail pane"
+repository = "https://github.com/paulez/simpletaskmgr"
+keywords = ["gtk", "task-manager", "system-monitor", "process"]
+categories = ["gui"]
 
 [dependencies]
 gtk4 = { version = "0.11", features = ["v4_18"] }
