@@ -1,6 +1,6 @@
 [package]
 name = "simpletaskmgr"
-version = "1.0.0-beta.1"
+version = "1.0.0-beta.2"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "A simple GTK4 task manager: CPU/Mem/Disk graphs, a process list, and Terminate/Kill (SIGTERM/SIGKILL) from the detail pane"
