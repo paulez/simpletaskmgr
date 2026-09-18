@@ -43,7 +43,9 @@ time, and lets you inspect individual processes in a live detail pane.
   Long values (e.g. a long process name, a Slack/Chromium command line)
   show as a single ellipsized line so the pane and window stay compact.
   Click the `Name:` or `Command:` row to open a popover showing the full
-  value on scrollable, selectable text — select it there and copy it.
+  value on selectable text — select it there and copy it. The popover
+  sizes to the value: short ones fit tightly, long ones stay bounded and
+  scroll instead.
 - **Resource graph**: always-on charts of system CPU & memory, and CPU
   frequency & temperature, over the last few minutes. Every pane carries a
   colour swatch + label legend below its plot so each series is identified

@@ -534,8 +534,8 @@ fn build_detail_pane() -> DetailLabels {
     // stretching the pane or the window. The click wiring happens in
     // `ProcessView::new` (it needs the selection); the toggle lives in
     // `toggle_reveal` so the gesture and tests share one path.
-    let (name_popover, name_full) = build_reveal_popover(&d_name, 320, 100);
-    let (command_popover, command_full) = build_reveal_popover(&d_command, 480, 240);
+    let (name_popover, name_full) = build_reveal_popover(&d_name);
+    let (command_popover, command_full) = build_reveal_popover(&d_command);
 
     // Signal actions + feedback row (spec D5). They live inside the pane,
     // so they are visible exactly while a process is selected (the pane is
@@ -594,8 +594,8 @@ fn build_detail_pane() -> DetailLabels {
 /// Which elipsize-bound detail row a full-value popover belongs to (spec
 /// D6): the `Name` row (full process name) or the `Command` row (full
 /// command line).
-#[derive(Clone, Copy)]
-enum RevealField {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RevealField {
     Name,
     Command,
 }
@@ -611,6 +611,55 @@ fn reveal_targets(
         RevealField::Name => (&d.name_popover, &d.name_full, &d.name_popover_pid),
         RevealField::Command => (&d.command_popover, &d.command_full, &d.command_popover_pid),
     }
+}
+
+/// The popover content's padding (spec D6): the text view's own margins
+/// (8 px left/right, 6 px top/bottom in `build_reveal_popover`).
+const REVEAL_PAD_X: i32 = 16;
+const REVEAL_PAD_Y: i32 = 12;
+
+/// Floor on the popover content size (spec D6) so an extremely short
+/// value cannot collapse the popover to a sliver: the chrome (arrow and
+/// margins) still needs its room.
+const REVEAL_MIN_W: i32 = 100;
+const REVEAL_MIN_H: i32 = 50;
+
+/// The content bounds (width, height) for `field`'s popover (spec D6):
+/// the size short values are fitted against, which long ones hit and then
+/// scroll inside instead of stretching the popover further. Public so the
+/// widget tests can assert the fit/cap contract (`reveal_content_size`).
+pub fn reveal_bounds(field: RevealField) -> (i32, i32) {
+    match field {
+        RevealField::Name => (320, 100),
+        RevealField::Command => (480, 240),
+    }
+}
+
+/// Size the popover content for the revealed `text`, measured in the
+/// popover's own font context (spec D6): the text's exact extent when it
+/// is small — short commands must not get a big popover — capped at
+/// `field`'s bounds when it is large, where the text view scrolls. The
+/// returned (width, height) already includes the text view's margins.
+/// Public so the widget tests can exercise it without displaying the
+/// popover (which needs a toplevel window).
+pub fn reveal_content_size(
+    text: &str,
+    field: RevealField,
+    ctx: &gtk4::pango::Context,
+) -> (i32, i32) {
+    let (max_w, max_h) = reveal_bounds(field);
+    // Wrap at the cap (not at cap − padding): a value that needs exactly
+    // the capped width may then be a hair wider than it is at its fitted
+    // width — it still fits, because the padding stays inside the cap.
+    let layout = gtk4::pango::Layout::new(ctx);
+    layout.set_text(text);
+    layout.set_wrap(gtk4::pango::WrapMode::WordChar);
+    layout.set_width(max_w * gtk4::pango::SCALE);
+    let (w, h) = layout.pixel_size();
+    (
+        (w + REVEAL_PAD_X).min(max_w).max(REVEAL_MIN_W),
+        (h + REVEAL_PAD_Y).min(max_h).max(REVEAL_MIN_H),
+    )
 }
 
 /// The currently-selected row (if any): the one source both the popover
@@ -644,12 +693,9 @@ fn selected_name(selection: &gtk4::SingleSelection) -> String {
 /// Build the full-value popover for a bounded row (spec D6): a bounded
 /// (scrolled) text view with the value, read-only but selectable (hence
 /// copyable), wrapping very long tokens mid-word so nothing can stretch
-/// the window; anchored to `anchor`.
-fn build_reveal_popover(
-    anchor: &gtk4::Label,
-    min_width: i32,
-    min_height: i32,
-) -> (gtk4::Popover, gtk4::TextView) {
+/// the window; anchored to `anchor`. The content size is left unset here;
+/// `toggle_reveal` fits it to the revealed text just before popping up.
+fn build_reveal_popover(anchor: &gtk4::Label) -> (gtk4::Popover, gtk4::TextView) {
     let full = gtk4::TextView::new();
     full.set_editable(false);
     full.set_cursor_visible(false);
@@ -660,8 +706,6 @@ fn build_reveal_popover(
     full.set_bottom_margin(6);
     let scroll = gtk4::ScrolledWindow::new();
     scroll.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Automatic);
-    scroll.set_min_content_width(min_width);
-    scroll.set_min_content_height(min_height);
     scroll.set_child(Some(&full));
     let popover = gtk4::Popover::new();
     popover.set_parent(anchor);
@@ -689,6 +733,16 @@ fn toggle_reveal(d: &DetailLabels, field: RevealField, selection: &gtk4::SingleS
         RevealField::Command => row.item().value.cmdline_str(),
     };
     text_view.buffer().set_text(&text);
+    // Fit the popover to the revealed text: short values get a small
+    // popover, long ones hit `field`'s bounds and scroll (spec D6).
+    let (w, h) = reveal_content_size(&text, field, &popover.pango_context());
+    if let Some(scroll) = text_view
+        .parent()
+        .and_then(|p| p.downcast::<gtk4::ScrolledWindow>().ok())
+    {
+        scroll.set_min_content_width(w);
+        scroll.set_min_content_height(h);
+    }
     pid_cell.set(Some(row.pid()));
     popover.popup();
 }

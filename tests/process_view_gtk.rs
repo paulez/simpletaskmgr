@@ -711,6 +711,43 @@ fn test_click_popovers_carry_full_values() {
 }
 
 #[test]
+fn test_reveal_popover_fits_to_text_and_caps_at_bounds() {
+    // D6: the popover must size to the revealed text when it is small
+    // (a short command must not get a big popover) and cap at the field's
+    // bounds when it is large, where the text view scrolls. `reveal_content_size`
+    // is the (width, height) the popped-up popover's content claims, so
+    // measure it directly — popping up needs a toplevel window.
+    use simpletaskmgr::process_view::{reveal_bounds, reveal_content_size, RevealField};
+    run_gtk(|| {
+        // Any widget's pango context uses the default UI font, like the
+        // popover's does.
+        let ctx = gtk4::Label::new(Some("text")).pango_context();
+
+        let short = "myapp --flag value".to_string();
+        let long = format!("slack --type=renderer --sandbox-token={}", "q".repeat(1200));
+
+        for field in [RevealField::Name, RevealField::Command] {
+            let (max_w, max_h) = reveal_bounds(field);
+            let (sw, sh) = reveal_content_size(&short, field, &ctx);
+            let (lw, lh) = reveal_content_size(&long, field, &ctx);
+            assert!(
+                (100..=max_w).contains(&sw) && (50..=max_h).contains(&sh),
+                "short content {field:?}: {sw}x{sh} must sit between the chrome floor and the bounds"
+            );
+            assert_eq!(
+                (lw, lh),
+                (max_w, max_h),
+                "long content {field:?}: caps at the bounds ({lw}x{lh}), then scrolls"
+            );
+            assert!(
+                sh < lh && sw < lw,
+                "short content {field:?} must get a smaller popover than long content"
+            );
+        }
+    });
+}
+
+#[test]
 fn test_detail_pane_ellipsizes_long_command_tokens() {
     // A Slack/Chromium command line carries single tokens hundreds of
     // characters long (e.g. `--enable-features=…`). An unstyled label would
