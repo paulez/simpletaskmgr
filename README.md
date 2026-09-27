@@ -102,6 +102,30 @@ pass `-v`:
 cargo run --release -- -v
 ```
 
+### Taskbar / dock icon
+
+The window publishes its icon by name (`simpletaskmgr`), and the desktop
+entry `share/org.simpletaskmgr.simpletaskmgr.desktop` (named after the
+application id, which is how Wayland shells attribute a window) declares
+`Icon=simpletaskmgr`. For a taskbar or dock to actually draw it, the icon
+must also be present in the **icon theme** — a per-window pixel icon is not
+portable on Wayland — which is what `tools/local_install_dock_icon.sh`
+sets up for the current user:
+
+```bash
+tools/local_install_dock_icon.sh
+```
+
+That installs
+`~/.local/share/icons/hicolor/<size>/apps/simpletaskmgr.png` (48–256 px,
+rendered from `icons/simpletaskmgr.svg`), the desktop entry into
+`~/.local/share/applications/`, and — because a user-local `hicolor`
+*replaces* the system one for GTK's lookup — a merged
+`~/.local/share/icons/hicolor/index.theme` that keeps every system hicolor
+directory (symlinked) and only adds this app's icon, so no other app loses
+its fallback icons. Re-running the helper refreshes everything; it never
+touches system files.
+
 ## Settings
 
 Settings are stored in `~/.config/simpletaskmgr/settings.toml` (or
