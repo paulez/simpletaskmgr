@@ -13,6 +13,33 @@ use crate::usage_graph::{paint_usage_chart, ChartConfig, ChartPane};
 
 const CSS: &str = include_str!("ui.css");
 
+/// The name the window publishes as its icon (`Gtk::Window::set_icon_name`).
+/// The same name must exist in the user's icon theme (see
+/// `tools/install_dock_icon.sh`) and in the `Icon=` line of the desktop
+/// entry in `share/` — docks and X11 taskbars resolve the running app to
+/// the entry and read its icon from the theme; a drift in any of the three
+/// places means no icon, and tests below pin the two in-repo copies down.
+pub const WINDOW_ICON_NAME: &str = "simpletaskmgr";
+
+/// The canonical rasterized icon, embedded so the tests can verify
+/// decodability without a display or CWD dependence and so an icon-theme
+/// install always ships valid bytes. A 128×128 render of
+/// `icons/simpletaskmgr.svg` (kept next to the PNGs).
+#[cfg(test)]
+const WINDOW_ICON_PNG: &[u8] = include_bytes!("../icons/simpletaskmgr-128.png");
+
+/// Decode the embedded icon without a display: returns the rasterized
+/// width/height, or `None` if the embedded bytes are corrupt.
+#[cfg(test)]
+fn window_icon_dimensions() -> Option<(i32, i32)> {
+    let bytes = gtk4::glib::Bytes::from_static(WINDOW_ICON_PNG);
+    let stream = gtk4::gio::MemoryInputStream::from_bytes(&bytes);
+    let cancellable: Option<gtk4::gio::Cancellable> = None;
+    gtk4::gdk_pixbuf::Pixbuf::from_stream(&stream, cancellable.as_ref())
+        .ok()
+        .map(|icon| (icon.width(), icon.height()))
+}
+
 /// The widgets the `Settings` popover exposes so its change handlers and the
 /// reset path can address them without name lookup.
 struct SettingsWidgets {
@@ -563,6 +590,11 @@ pub fn build_window(
 ) -> gtk4::ApplicationWindow {
     let window = gtk4::ApplicationWindow::new(app);
     window.set_title(Some("Simple Task Manager"));
+    // Publish the icon by *name*: X11 taskbars and Wayland docks resolve it
+    // against the icon theme (a per-window pixel icon is not portable across
+    // the Wayland protocol), so the image must be installed in the theme
+    // under this name — see `tools/install_dock_icon.sh`.
+    window.set_icon_name(Some(WINDOW_ICON_NAME));
     window.set_default_size(940, 600);
     window.add_css_class("app-root");
 
@@ -1020,5 +1052,45 @@ mod tests {
             "reset must persist defaults"
         );
         let _ = std::fs::remove_file(temp_settings_path("reset"));
+    }
+
+    /// The embedded 128×128 render of `icons/simpletaskmgr.svg` must decode
+    /// to the advertised size: it is what the icon-theme install ships, so
+    /// corrupt bytes would mean a broken icon for every user of the script.
+    #[test]
+    fn test_embedded_window_icon_decodes_at_advertised_size() {
+        let (w, h) = window_icon_dimensions().expect("embedded window icon must decode");
+        assert_eq!(
+            (w, h),
+            (128, 128),
+            "the icon-theme install ships this render; it must be 128×128"
+        );
+    }
+
+    /// Docks and taskbars attribute the running window to this entry and
+    /// read its `Icon=` from there, so the entry must present the *exact*
+    /// name the window publishes (`WINDOW_ICON_NAME`) — a drift there means
+    /// a missing taskbar icon that unit tests of the code can't see.
+    #[test]
+    fn test_desktop_entry_presents_the_window_icon_name() {
+        let entry = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/share/org.simpletaskmgr.simpletaskmgr.desktop"
+        ));
+        let text = std::fs::read_to_string(entry).expect("desktop entry must exist");
+        assert!(
+            text.lines().any(|line| line.trim() == "Type=Application"),
+            "the entry must be an application"
+        );
+        // In a desktop file the first `Icon=` of the `[Desktop Entry]` group
+        // wins, so validate the first occurrence.
+        let icon = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("Icon="))
+            .expect("the entry must declare Icon=");
+        assert_eq!(
+            icon, WINDOW_ICON_NAME,
+            "entry's Icon= must match the window's published icon name"
+        );
     }
 }

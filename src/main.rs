@@ -6,6 +6,14 @@ use gtk4::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Application id, used as the `GApplication` id **and** the file name of the
+/// desktop entry in `share/`. Shells attribute the running window to the
+/// entry (Wayland: by exactly this name; X11: via WM_CLASS, which GTK
+/// derives from it) and show its `Icon=`, so the entry file must stay named
+/// `<APP_ID>.desktop`. The tests below pin both properties, and the
+/// `Icon=` ↔ window-icon-name link is pinned in `src/ui.rs`.
+pub const APP_ID: &str = "org.simpletaskmgr.simpletaskmgr";
+
 /// Resolve the log level from the program arguments.
 ///
 /// `-v` (verbose) enables `debug`; otherwise the default is `warn`, so
@@ -34,9 +42,7 @@ fn main() {
 
     let gtk_argv = gtk_args(&args);
 
-    let app = gtk4::Application::builder()
-        .application_id("org.simpletaskmgr.simpletaskmgr")
-        .build();
+    let app = gtk4::Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| {
         let state = Rc::new(RefCell::new(simpletaskmgr::ui::State::new()));
         let win = simpletaskmgr::ui::build_window(app, &state);
@@ -71,5 +77,33 @@ mod tests {
         let out = gtk_args(&args);
         let expected_vec: Vec<String> = expected.split_whitespace().map(String::from).collect();
         assert_eq!(out, expected_vec);
+    }
+
+    /// A `GApplication` id needs two or more dot-separated non-empty
+    /// components (reverse-DNS style). A bad id is rejected by GLib at
+    /// runtime and would break the app on every start, so the well-formedness
+    /// of this constant stays covered by a unit test.
+    #[test]
+    fn test_app_id_is_well_formed() {
+        let components: Vec<&str> = APP_ID.split('.').collect();
+        assert!(
+            components.len() >= 2 && components.iter().all(|c| !c.is_empty()),
+            "GApplication ids need two or more non-empty components; the id is '{}'",
+            APP_ID
+        );
+    }
+
+    /// The desktop entry is named after the application id (`<APP_ID>.desktop`)
+    /// so shells and docks attribute the running window to it. If the id
+    /// ever changes, the entry file must be renamed with it.
+    #[test]
+    fn test_desktop_entry_named_after_app_id() {
+        let entry = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/share/"))
+            .join(format!("{}.desktop", APP_ID));
+        assert!(
+            entry.exists(),
+            "share/{}.desktop must exist for dock attribution; if the app id was renamed, the entry file must move too",
+            APP_ID
+        );
     }
 }

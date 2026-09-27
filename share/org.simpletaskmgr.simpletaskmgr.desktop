@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Simple Task Manager
+GenericName=Process Manager
+Comment=Watch processes on a live system
+Exec=simpletaskmgr
+Terminal=false
+# Must stay equal to `WINDOW_ICON_NAME` in `src/ui.rs` (a test enforces it):
+# docks and taskbars resolve the running app to this entry and read the icon
+# name from here.
+Icon=simpletaskmgr
+Categories=System;Monitor;
+# X11 taskbars additionally match the window's WM_CLASS to this key before
+# they find the entry; GTK derives `WM_CLASS` from the application id, whose
+# last component is `simpletaskmgr`.
+StartupWMClass=simpletaskmgr
