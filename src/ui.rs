@@ -15,7 +15,7 @@ const CSS: &str = include_str!("ui.css");
 
 /// The name the window publishes as its icon (`Gtk::Window::set_icon_name`).
 /// The same name must exist in the user's icon theme (see
-/// `tools/install_dock_icon.sh`) and in the `Icon=` line of the desktop
+/// `tools/local_install_dock_icon.sh`) and in the `Icon=` line of the desktop
 /// entry in `share/` — docks and X11 taskbars resolve the running app to
 /// the entry and read its icon from the theme; a drift in any of the three
 /// places means no icon, and tests below pin the two in-repo copies down.
@@ -593,7 +593,7 @@ pub fn build_window(
     // Publish the icon by *name*: X11 taskbars and Wayland docks resolve it
     // against the icon theme (a per-window pixel icon is not portable across
     // the Wayland protocol), so the image must be installed in the theme
-    // under this name — see `tools/install_dock_icon.sh`.
+    // under this name — see `tools/local_install_dock_icon.sh`.
     window.set_icon_name(Some(WINDOW_ICON_NAME));
     window.set_default_size(940, 600);
     window.add_css_class("app-root");
