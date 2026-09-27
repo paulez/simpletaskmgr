@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3d4d6b"/>
+      <stop offset="1" stop-color="#242e42"/>
+    </linearGradient>
+    <linearGradient id="stroke" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5fe6c4"/>
+      <stop offset="1" stop-color="#5aa9ff"/>
+    </linearGradient>
+    <linearGradient id="area" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5fe6c4" stop-opacity="0.30"/>
+      <stop offset="1" stop-color="#5fe6c4" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <!-- rounded app tile -->
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
+  <!-- soft top highlight -->
+  <rect x="16" y="16" width="96" height="44" rx="18" fill="#ffffff" fill-opacity="0.05"/>
+  <!-- area under the activity curve -->
+  <path d="M 28 88 L 28 76 L 44 76 L 58 46 L 70 68 L 84 36 L 96 58 L 102 66 L 102 88 Z"
+        fill="url(#area)"/>
+  <!-- activity line (CPU-style pulse) -->
+  <path d="M 28 76 L 44 76 L 58 46 L 70 68 L 84 36 L 96 58 L 102 66"
+        fill="none" stroke="url(#stroke)" stroke-width="7"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- live-point dot at the end of the curve -->
+  <circle cx="102" cy="66" r="7" fill="#eef7ff"/>
+</svg>
