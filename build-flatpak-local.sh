@@ -27,6 +27,9 @@
 set -euo pipefail
 
 APPID=org.simpletaskmgr.simpletaskmgr
+SHORT=${APPID##*.}   # last component ("simpletaskmgr"): the name flatpak
+                     # republishes the app icon under on the host, and the
+                     # name the window/taskbar icon uses (WINDOW_ICON_NAME).
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 WORK="${STM_WORK:-$HOME/.cache/stm-work}"   # same fs as the flatpak runtimes -> hardlink copy works
 STMB="${STM_DIR:-/tmp/stmb}"
@@ -148,10 +151,14 @@ cp "$STMB/files/target/release/simpletaskmgr" "$STMB/files/bin/simpletaskmgr"
 # desktop + icons into the app layer
 mkdir -p "$STMB/files/share/applications"
 cp "$ROOT/share/org.simpletaskmgr.simpletaskmgr.desktop" "$STMB/files/share/applications/"
-# flatpak 1.16 only exports icon files whose name matches the app id, and the
-# icon that gets published to the host keeps exactly that name: name the icons
-# <appid>.png and point the bundled desktop entry at them
-sed -i "s/^Icon=.*/Icon=$APPID/" "$STMB/files/share/applications/$APPID.desktop"
+# Icon naming must line up in all three places or GNOME shows no dash icon:
+#   * the bundle icon *files*: flatpak only keeps a file if its name is the
+#     app id, so name them <appid>.png
+#   * on install flatpak republishes the app icon on the host under the id's
+#     SHORT name (simpletaskmgr.png) - that is the name that must resolve
+#   * the desktop Icon= key is passed through unchanged, so set it to the
+#     SHORT name (which is also WINDOW_ICON_NAME in src/ui.rs)
+sed -i "s/^Icon=.*/Icon=$SHORT/" "$STMB/files/share/applications/$APPID.desktop"
 for s in 48 64 128 256 512; do
   mkdir -p "$STMB/files/share/icons/hicolor/$s/apps"
   cp -f "$ROOT/icons/simpletaskmgr-$s.png" "$STMB/files/share/icons/hicolor/$s/apps/$APPID.png"
@@ -166,7 +173,7 @@ flatpak build-bundle /tmp/stm-repo "$ROOT/simpletaskmgr.flatpak" "$APPID"
 echo "BUNDLE: $ROOT/simpletaskmgr.flatpak ($(du -h "$ROOT/simpletaskmgr.flatpak"|awk '{print $1}'))"
 
 if [ "${1:-}" = install ]; then
-  flatpak --user uninstall "$APPID" 2>/dev/null || true
+  flatpak --user uninstall -y "$APPID" 2>/dev/null || true
   flatpak --user install -y "$ROOT/simpletaskmgr.flatpak"
   W=$HOME/.local/share/applications/$APPID.desktop
   cp "$W" "$W.bak" 2>/dev/null || true
@@ -179,9 +186,9 @@ GenericName=Process Manager
 Comment=Watch processes on a live system (flatpak)
 Exec=flatpak run $APPID
 Terminal=false
-Icon=$APPID
+Icon=$SHORT
 Categories=System;Monitor;
 StartupWMClass=simpletaskmgr
 EOF
-  echo "Installed. Launch with:  flatpak run $APPID   (or from the app grid; dash icon name: $APPID)"
+  echo "Installed. Launch with:  flatpak run $APPID   (or from the app grid; icon name: $SHORT)"
 fi
