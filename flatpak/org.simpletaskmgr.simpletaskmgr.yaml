@@ -1,0 +1,88 @@
+# Flatpak manifest — Simple Task Manager.
+#
+# Publish: flathub.org, built from this repository at a v* tag.
+#
+# Release bump rule: point `tag` at the release being cut (v1.0.0-rc.1,
+# then v1.0.0, ...), matching the Cargo.toml version — the same discipline
+# as .github/workflows/release.yml. Flathub builds what `tag` names, so
+# the tag must exist before the manifest is pushed.
+#
+# Local build test *before* a suitable tag exists: run flatpak-builder
+# against a copy of this manifest whose `sources` block names a tarball of
+# the working tree instead (needs --allow-unsafe):
+#   tar -czf /tmp/stm-local.tar.gz --exclude .git -C <repo> .
+#   (copy of this manifest: replace the git source with
+#       - type: file
+#         url: /tmp/stm-local.tar.gz)
+#   flatpak-builder --user --install /tmp/stm-flatpak \
+#     --allow-unsafe /tmp/stm-flatpak/manifest.yaml
+#
+# Runtime choice: org.gnome.Platform (stable) — first-party runtime on
+# flathub and already present on the target machine (vs
+# org.gtk.Gtk-Shell-v4, whose flathub availability is unverified).
+
+app-id: org.simpletaskmgr.simpletaskmgr
+name: simpletaskmgr
+runtime: org.gnome.Platform
+runtime-version: stable
+sdk: org.freedesktop.Platform
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: simpletaskmgr
+
+# Nothing beyond flatpak's defaults: the app is a pure /proc reader — no
+# network, no host files, no secrets. Known functional constraint: the
+# sandbox's private PID namespace (see doc/FLATPAK_PUBLISH_PLAN.md, Gate 0).
+finish-args: []
+
+appstream:
+  name: Simple Task Manager
+  summary: Watch processes on a live system
+  description: |
+    A simple GTK4 task manager: live CPU, memory and disk graphs, a stable
+    flicker-free process list, and a detail pane with Terminate (SIGTERM)
+    and Kill (SIGKILL).
+  categories:
+    - System
+    - Monitor
+  keywords:
+    - processes
+    - task manager
+    - system monitor
+  license: MIT OR Apache-2.0
+  developer_name: Paul Ezvan
+  url: https://github.com/paulez/simpletaskmgr
+
+modules:
+  - name: simpletaskmgr
+    buildsystem: simple
+    builddir: false
+    sources:
+      - type: git
+        url: https://github.com/paulez/simpletaskmgr
+        tag: v1.0.0
+    build-options:
+      env:
+        RUSTUP_HOME: /usr
+        CARGO_HOME: /usr
+        PATH: /usr/lib/sdk/rust-stable/bin:{{ PATH }}
+    build-commands:
+      - cargo build --release --locked
+      - install -Dm755 target/release/simpletaskmgr -t /app/bin
+      - install -Dm644 share/org.simpletaskmgr.simpletaskmgr.desktop
+          -t /app/share/applications
+      # Icon theme: the shell and the dash resolve Icon= through the
+      # exported hicolor theme, so every size we ship is installed under
+      # it (plus the scalable SVG).
+      - install -Dm644 icons/simpletaskmgr.svg
+          /app/share/icons/hicolor/scalable/apps/simpletaskmgr.svg
+      - install -Dm644 icons/simpletaskmgr-48.png
+          /app/share/icons/hicolor/48x48/apps/simpletaskmgr.png
+      - install -Dm644 icons/simpletaskmgr-64.png
+          /app/share/icons/hicolor/64x64/apps/simpletaskmgr.png
+      - install -Dm644 icons/simpletaskmgr-128.png
+          /app/share/icons/hicolor/128x128/apps/simpletaskmgr.png
+      - install -Dm644 icons/simpletaskmgr-256.png
+          /app/share/icons/hicolor/256x256/apps/simpletaskmgr.png
+      - install -Dm644 icons/simpletaskmgr-512.png
+          /app/share/icons/hicolor/512x512/apps/simpletaskmgr.png

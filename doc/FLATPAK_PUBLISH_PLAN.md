@@ -57,8 +57,8 @@ installs runtimes only, no system packages — reversible with
 `flatpak uninstall`):
 
 ```bash
-flatpak install flathub org.gtk.Gtk-Shell-v4
-flatpak run org.gtk.Gtk-Shell-v4 sh -c '
+flatpak install flathub org.gnome.Platform   # if not already installed
+flatpak run org.gnome.Platform sh -c '
   echo "PIDs visible:"; ls /proc | grep -E "^[0-9]+$" | sort -n | tr "\n" " "; echo
   echo "proc/stat present:"; head -1 /proc/stat
   echo "meminfo present:"; grep -m1 MemTotal /proc/meminfo'
@@ -81,11 +81,13 @@ freezing the manifest).
 ## Stage 1 — manifest + build assets (only if Gate 0 passes)
 
 One new file, Flathub layout in-repo: `flatpak/org.simpletaskmgr.simpletaskmgr.yaml`.
-Draft shape (exact runtime versions picked at implementation):
+The manifest is committed at `flatpak/org.simpletaskmgr.simpletaskmgr.yaml`
+(the draft below is kept for the record — its runtime and license lines
+were superseded as noted under the decisions):
 
 ```yaml
 app-id: org.simpletaskmgr.simpletaskmgr
-runtime: org.gtk.Gtk-Shell-v4
+runtime: org.gnome.Platform
 runtime-version: stable
 sdk: org.freedesktop.Platform
 sdk-extensions:
@@ -124,12 +126,19 @@ modules:
     # flathub lint), supports: wayland+x11
 ```
 
-Decisions to make at implementation:
+Decisions made at implementation (2026-09-28):
 
+- **Runtime: `org.gnome.Platform` (stable)** — chosen over
+  `org.gtk.Gtk-Shell-v4`: first-party runtime on flathub (guaranteed
+  present) and already installed on the target machine, so the local
+  build test downloads only the `rust-stable` SDK extension. Gtk-Shell-v4
+  flathub availability was unverified at planning time.
+- **Tag policy:** the manifest's `tag:` names the release being published
+  (v1.0.0-rc.1 → v1.0.0); it must match `Cargo.toml` and exist before the
+  manifest is pushed — same discipline as `release.yml`.
 - **Icon size set:** Flathub prefers scalable SVG (we have it) + 512 class
-  PNG for the app grid; the repo currently tops out at 256 → add a
-  `icons/simpletaskmgr-512.png` render (same SVG, same pipeline as the
-  existing 48/64/128/256).
+  PNG for the app grid. ✅ done — `icons/simpletaskmgr-512.png`, rendered
+  from the SVG with the same pipeline as the 48/64/128/256 renders.
 - **License field:** Cargo.toml is dual-licensed; state it honestly in
   appstream and confirm flathub lint accepts the expression.
 - **No code changes are expected** (no portal needs, no network, `dirs`-based
@@ -139,11 +148,19 @@ Decisions to make at implementation:
 ## Stage 2 — local build & verification protocol
 
 ```bash
-flatpak install flathub org.gtk.Gtk-Shell-v4 org.freedesktop.Platform \
-  org.freedesktop.Sdk.Extension.rust-stable
-flatpak-builder --user --install builddir flatpak/org.simpletaskmgr.simpletaskmgr.yaml
-flatpak run --branch=stable org.simpletaskmgr.simpletaskmgr   # in the live session
+# Runtimes: org.gnome.Platform (present on this machine system-wide; the
+# --user build pulls its user-scope copy) + rust-stable extension:
+flatpak-builder --user --install builddir \
+  flatpak/org.simpletaskmgr.simpletaskmgr.yaml
+flatpak run org.simpletaskmgr.simpletaskmgr   # in the live session
 ```
+
+**Before any suitable tag exists** (today), the manifest's git source
+points at `v1.0.0`, so the local test uses a copy of the manifest whose
+`sources` block names a tarball of the working tree (both blocks and the
+exact commands are in the manifest's header comment): build the tarball,
+`flatpak-builder --user --install --allow-unsafe ...`. The git+tag source
+mechanism then gets exercised at the real publish.
 
 Checklist (run once, with the app from the *flatpak* channel only):
 
