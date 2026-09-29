@@ -579,6 +579,58 @@ fn build_settings_popover() -> SettingsWidgets {
     }
 }
 
+/// The app's main-window registry, shared between every `activate` call.
+///
+/// SimpleTaskMgr runs as a single-instance `GApplication` (default flags),
+/// so a second launch from the terminal is not a new process: the toolkit
+/// forwards it to the running one and fires the `activate` handler again.
+/// Without a guard, that rebuild produces a second state with its own
+/// refresh timer, `rocm-smi` spawns and settings writes — and a second
+/// window. This registry remembers the one main window so a duplicate
+/// `activate` just presents it.
+#[derive(Clone)]
+pub struct WindowRef {
+    window: Rc<RefCell<Option<gtk4::ApplicationWindow>>>,
+}
+
+impl Default for WindowRef {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WindowRef {
+    pub fn new() -> Self {
+        Self {
+            window: Rc::new(RefCell::new(None)),
+        }
+    }
+
+    /// The `activate` handler: on the first launch it creates the state and
+    /// main window and shows it; on a duplicate launch it presents the
+    /// existing window instead of building a second state.
+    ///
+    /// Returns `true` when a state + window were created, `false` when an
+    /// existing window was presented.
+    pub fn activate(&self, app: &gtk4::Application) -> bool {
+        if let Some(window) = self.window.borrow().clone() {
+            log::info!("Second launch: presenting the existing window");
+            window.present();
+            return false;
+        }
+        let state = Rc::new(RefCell::new(State::new()));
+        let window = build_window(app, &state);
+        self.window.borrow_mut().replace(window.clone());
+        window.set_visible(true);
+        true
+    }
+
+    /// The main window, once created (main loop thread only).
+    pub fn window(&self) -> Option<gtk4::ApplicationWindow> {
+        self.window.borrow().clone()
+    }
+}
+
 /// Builds the main window and wires the refresh timer around `state`.
 /// Call from the `activate` handler (main loop thread only). The `state`
 /// parameter is the app's single source of truth (created in `main`) so

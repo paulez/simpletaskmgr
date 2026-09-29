@@ -3,8 +3,6 @@ use log::{info, LevelFilter};
 use simplelog::*;
 
 use gtk4::prelude::*;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Application id, used as the `GApplication` id **and** the file name of the
 /// desktop entry in `share/`. Shells attribute the running window to the
@@ -43,10 +41,14 @@ fn main() {
     let gtk_argv = gtk_args(&args);
 
     let app = gtk4::Application::builder().application_id(APP_ID).build();
-    app.connect_activate(move |app| {
-        let state = Rc::new(RefCell::new(simpletaskmgr::ui::State::new()));
-        let win = simpletaskmgr::ui::build_window(app, &state);
-        win.set_visible(true);
+    // Every `activate` call (initial launch *and* a second launch, which is
+    // forwarded to this single-instance app) shares this one window registry:
+    // a duplicate launch presents the existing window instead of building a
+    // second state.
+    let window_ref = simpletaskmgr::ui::WindowRef::new();
+    let wr = window_ref.clone();
+    app.connect_activate(move |a| {
+        wr.activate(a);
     });
     let _ = app.run_with_args(&gtk_argv);
 }

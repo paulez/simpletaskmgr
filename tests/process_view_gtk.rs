@@ -778,3 +778,31 @@ fn test_detail_pane_ellipsizes_long_command_tokens() {
         }
     });
 }
+
+/// A1 (duplicate activation): SimpleTaskMgr is a single-instance
+/// `GApplication`, so a second launch from the CLI is forwarded to the
+/// running process and fires `WindowRef::activate` again. That must not
+/// build a second state (a second refresh timer, second `rocm-smi` spawns
+/// and a second settings writer) — the existing window stays in place.
+#[test]
+fn test_activate_duplicate_launch_presents_existing_window() {
+    let (first, second, same_window) = run_gtk(|| {
+        let app = gtk4::Application::builder().build();
+        let ref_ = simpletaskmgr::ui::WindowRef::new();
+        let first = ref_.activate(&app);
+        let after_first = ref_.window().expect("the first launch creates a window");
+        let second = ref_.activate(&app);
+        let after_second = ref_.window().expect("a duplicate launch keeps the window");
+        let same_window = std::ptr::eq(after_first.as_ptr(), after_second.as_ptr());
+        (first, second, same_window)
+    });
+    assert!(first, "the first launch must create a state + window");
+    assert!(
+        !second,
+        "a duplicate launch must not build a second state/window",
+    );
+    assert!(
+        same_window,
+        "a duplicate launch must present the existing window"
+    );
+}
