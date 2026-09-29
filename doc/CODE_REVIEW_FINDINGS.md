@@ -187,9 +187,9 @@ All items are fixed, in the planned order:
 | B1 | `5f82124` | one tail `splice` per refresh instead of `append` per row; `HashSet` membership; `test_update_inserts_new_rows_in_one_commit` counts the commits |
 | B2 | `60b36b9` | comparator compares through `ViewRow::item_ref()` (no per-comparison deep clone); `test_sorter_reads_live_row_values` |
 | C1 | `04a7ab1` | `TaskMgrProcess.start_time_ticks` + `process::live_start_time_ticks`; `State::kill` returns the new `KillStatus::Reused` on a token mismatch and the UI refuses with a purpose-built pop-up; two sub-cases in `test_state_lifecycle` |
-| C2+C5 | `4a005a8` | divergence documented in both tracker module docs; the redundant second `Binding::unbind` dropped |
+| C2+C5 | `4a005a8` | divergence documented in both tracker module docs; the redundant second `Binding::unbind` dropped. The C2 fallback is test-pinned since `72de682` (`zero_window`/`backward_window` join the existing IO `zero_elapsed`/`negative_elapsed` cases) |
 
-Every commit ran the full gate; the test suite ended at **327 tests
+Every commit ran the full gate; the test suite ended at **329 tests
 (all passing)**, `clippy --all-targets` clean at zero warnings, `cargo fmt --check` clean, and a
 headless `test_ui_render.sh` capture confirms the live UI still renders
 and sorts correctly.
