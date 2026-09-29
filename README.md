@@ -39,7 +39,10 @@ time, and lets you inspect individual processes in a live detail pane.
   The pane also carries **Terminate** (SIGTERM, graceful) and **Kill**
   (SIGKILL, forced) buttons to signal the selected process — the outcome
   ("SIGTERM sent to pid 1234" or the error, e.g. EPERM) is reported in the
-  pane's status line.
+  pane's status line. If the selected process has since exited and its
+  PID was already reused, the signal is deliberately **not** sent to the
+  new occupant — the button refuses with an explanatory pop-up rather
+  than harming someone else's process.
   Long values (e.g. a long process name, a Slack/Chromium command line)
   show as a single ellipsized line so the pane and window stay compact.
   Click the `Name:` or `Command:` row to open a popover showing the full

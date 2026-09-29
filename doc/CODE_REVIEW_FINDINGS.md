@@ -170,6 +170,26 @@ Investigated during the review and confirmed correct:
 
 ## Fix plan (priority order)
 
-A1 → A2 → B4 → A3 → B1 → B2 → C1 → C2+C5. Each lands as its own commit with
-a regression test, then `cargo test && clippy --all-targets &&
+A1 → A2 → B4 → A3 → B1 → B2 → C1 → C2+C5. Each lands as its own commit
+with a regression test, then `cargo test && clippy --all-targets &&
 cargo fmt --check` (per `AGENTS.md`).
+
+## Resolution
+
+All items are fixed, in the planned order:
+
+| Item | Commit | Notes |
+|------|--------|-------|
+| A1 | `c0879cd` | `WindowRef` registry: a second `activate` presents the existing window (`test_activate_duplicate_launch_presents_existing_window`) |
+| A2 | `2050ccc` | root cause was a `RefCell` re-entrant borrow across a GTK signal (abort risk), plus a double rebuild — `sync_settings_widgets` drops the borrow before flipping and reports when it already rebuilt (`test_reset_with_show_all_on_rebuilds_exactly_once`) |
+| B4 | `ccb5f0c` | `gpu_status::run_with_timeout` (reader thread + `try_wait` poll, 2 s deadline, kill without blocking `wait`); `read_gpu_card` degrades to a skipped sample on timeout |
+| A3 | `211b040` | `ProcessList::update_process_list` keeps the last snapshot on `Err` (the merge is an injectable `apply_refresh`); `test_failed_refresh_keeps_last_snapshot_and_recovers` |
+| B1 | `5f82124` | one tail `splice` per refresh instead of `append` per row; `HashSet` membership; `test_update_inserts_new_rows_in_one_commit` counts the commits |
+| B2 | `60b36b9` | comparator compares through `ViewRow::item_ref()` (no per-comparison deep clone); `test_sorter_reads_live_row_values` |
+| C1 | `04a7ab1` | `TaskMgrProcess.start_time_ticks` + `process::live_start_time_ticks`; `State::kill` returns the new `KillStatus::Reused` on a token mismatch and the UI refuses with a purpose-built pop-up; two sub-cases in `test_state_lifecycle` |
+| C2+C5 | `4a005a8` | divergence documented in both tracker module docs; the redundant second `Binding::unbind` dropped |
+
+Every commit ran the full gate; the test suite ended at **327 tests
+(all passing)**, `clippy --all-targets` clean at zero warnings, `cargo fmt --check` clean, and a
+headless `test_ui_render.sh` capture confirms the live UI still renders
+and sorts correctly.
