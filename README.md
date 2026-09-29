@@ -126,6 +126,35 @@ directory (symlinked) and only adds this app's icon, so no other app loses
 its fallback icons. Re-running the helper refreshes everything; it never
 touches system files.
 
+## Installing a release build
+
+Pick whichever artifact fits (from the
+[releases](https://github.com/paulez/simpletaskmgr/releases)). All of them run
+in the host PID namespace, so the full process list is always visible — unlike
+a sandboxed Flatpak build.
+
+- **AppImage (easiest, portable)** — `simpletaskmgr-<version>-x86_64.AppImage`
+  bundles the GTK 4 runtime, so it runs with **no libraries to install** (only
+  the base C library is required):
+
+  ```bash
+  chmod +x simpletaskmgr-<version>-x86_64.AppImage
+  ./simpletaskmgr-<version>-x86_64.AppImage
+  # on a system without FUSE, run it this way instead:
+  ./simpletaskmgr-<version>-x86_64.AppImage --appimage-extract-and-run
+  ```
+
+- **Native tarball** — `simpletaskmgr-<version>-x86_64-linux.tar.gz`, for a
+  host that already has the [Requirements](#requirements) (GTK 4.18+):
+
+  ```bash
+  tar -xzf simpletaskmgr-<version>-x86_64-linux.tar.gz
+  ./simpletaskmgr-<version>-x86_64-linux/simpletaskmgr
+  ```
+
+- **From crates.io** — compile from source with `cargo install simpletaskmgr`
+  (needs the build dependencies above).
+
 ## Settings
 
 Settings are stored in `~/.config/simpletaskmgr/settings.toml` (or
@@ -168,7 +197,12 @@ To cut any of them (e.g. `1.0.0-rc.1`, or the final `1.0.0`):
 3. The `release` workflow runs on `Debian 13` (x86_64), verifies the tag
    matches the `Cargo.toml` version (and fails if they don't), and
    publishes a GitHub release containing:
-   - `simpletaskmgr-<version>-x86_64-linux.tar.gz` (binary, README, LICENSE)
+   - `simpletaskmgr-<version>-x86_64.AppImage` — **portable, self-contained**:
+     it bundles the GTK 4 runtime, so it runs with no libraries to install
+     (only the base C library is required). `chmod +x` and run it; on a system
+     without FUSE, launch it once with `./…AppImage --appimage-extract-and-run`.
+   - `simpletaskmgr-<version>-x86_64-linux.tar.gz` — the bare binary + README +
+     LICENSE, for a host that already has [GTK 4.18+](#requirements).
    - `SHA256SUMS`
    - the automatic source tarball/zip for the tag
 
@@ -188,6 +222,11 @@ To cut any of them (e.g. `1.0.0-rc.1`, or the final `1.0.0`):
    [Requirements](#requirements) above (GTK 4.18+ dev headers, Rust 1.75+).
    The plain command resolves only stable versions — prereleases need an
    explicit `--version`.
+
+   You can publish to crates.io yourself rather than via that job; the manual
+   steps (creating a token, `cargo publish --dry-run`, and the exact
+   `cargo publish` invocation CI uses) are in
+   [doc/CRATES_IO_PUBLISH.md](doc/CRATES_IO_PUBLISH.md).
 
 Every push to `main` and pull request also runs the standard gate
 (format, clippy, tests, build) via the `rust` workflow.
