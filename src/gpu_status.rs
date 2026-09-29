@@ -72,28 +72,117 @@ fn read_number(obj: &serde_json::Value, key: &str) -> Option<f64> {
     }
 }
 
+/// Bounded wait for a `rocm-smi` answer. The spawn runs on the GTK main
+/// loop every sampling tick, so a wedged `rocm-smi` (driver faults happen;
+/// the process can block in the kernel) must not be able to freeze the UI.
+const ROCSMI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The failure modes of [`run_with_timeout`].
+pub enum GpuRunError {
+    /// `rocm-smi` could not be spawned (usually: not on `PATH`).
+    Spawn(std::io::Error),
+    /// `rocm-smi` exited non-zero, with this code.
+    ExitCode(i32),
+    /// `rocm-smi` did not finish within the deadline (it was killed).
+    TimedOut(std::time::Duration),
+}
+
+impl std::fmt::Debug for GpuRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GpuRunError::Spawn(e) => f.debug_tuple("Spawn").field(e).finish(),
+            GpuRunError::ExitCode(c) => f.debug_tuple("ExitCode").field(c).finish(),
+            GpuRunError::TimedOut(d) => f.debug_tuple("TimedOut").field(d).finish(),
+        }
+    }
+}
+
+/// Runs a subprocess and returns its stdout, bounded by a wall-clock deadline.
+///
+/// The child's standard output is drained by a small reader thread (so a
+/// chatty child cannot fill the pipe buffer and hang), and the caller polls
+/// `try_wait()` until `timeout` elapses. If the child does not finish in time
+/// it is killed and the call returns [`GpuRunError::TimedOut`]. The caller is
+/// on the GTK main loop, so nothing in this path may block indefinitely: on
+/// timeout we deliberately do not `wait()` (against a D-state child a kill
+/// may not take — and `wait()` would hang — which is exactly the bug this
+/// exists to prevent) and we do not join the reader thread (its read ends
+/// with EOF when the child's pipe finally closes, after which the thread
+/// exits on its own).
+///
+/// Standard error is discarded (the tool's diagnostics are warnings; the JSON
+/// we need comes on stdout).
+pub fn run_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> Result<Vec<u8>, GpuRunError> {
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(GpuRunError::Spawn)?;
+    let mut pipe = child
+        .stdout
+        .take()
+        .expect("stdout was set to Stdio::piped() above");
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut pipe, &mut buf);
+        buf
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    // Deliberately no `wait()` and no `reader.join()`: see
+                    // the function docs. `child` is dropped here (the zombie
+                    // is reaped by init once the kill takes), and the reader
+                    // thread detaches, exiting on EOF.
+                    return Err(GpuRunError::TimedOut(timeout));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(GpuRunError::Spawn(e)),
+        }
+    };
+
+    let stdout = reader.join().unwrap_or_default();
+    if !status.success() {
+        return Err(GpuRunError::ExitCode(status.code().unwrap_or(-1)));
+    }
+    Ok(stdout)
+}
+
 /// Reads the first card (`card0`) from the live `rocm-smi`. Returns `None`
 /// (and logs at debug) when `rocm-smi` is missing, exits non-zero, or reports
 /// a document we cannot parse — a normal, expected condition on hosts without
-/// an AMD GPU. Used both by the per-sample `push_sample` and by the
+/// an AMD GPU. A `rocm-smi` that wedges past `ROCSMI_TIMEOUT` is killed and
+/// skipped the same way. Used both by the per-sample `push_sample` and by the
 /// startup probe (`gpu_available`).
 pub fn read_gpu_card() -> Option<GpuSample> {
-    let output = std::process::Command::new("rocm-smi")
-        .args(["--showuse", "--showmemuse", "--showtemp", "--json"])
-        .output();
-    let output = match output {
-        Ok(o) if o.status.success() => o,
-        Ok(o) => {
-            debug!("rocm-smi exited {}: {:?}", o.status, o.status);
-            return None;
-        }
-        Err(e) => {
+    let mut rocm = std::process::Command::new("rocm-smi");
+    rocm.args(["--showuse", "--showmemuse", "--showtemp", "--json"]);
+    let stdout = match run_with_timeout(&mut rocm, ROCSMI_TIMEOUT) {
+        Ok(stdout) => stdout,
+        Err(GpuRunError::Spawn(e)) => {
             // rocm-smi not on PATH is the common case on non-AMD hosts.
             debug!("Can't run rocm-smi: {e:?}");
             return None;
         }
+        Err(GpuRunError::ExitCode(code)) => {
+            debug!("rocm-smi exited with code {code}");
+            return None;
+        }
+        Err(GpuRunError::TimedOut(timeout)) => {
+            warn!("rocm-smi did not finish within {timeout:?} — killed it; skipping this sample");
+            return None;
+        }
     };
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&stdout);
     match parse_gpu_json(&stdout, CARD_KEY) {
         Some(s) => {
             debug!(
@@ -124,6 +213,52 @@ pub fn gpu_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    // ---- Bounded subprocess --------------------------------------------------
+
+    /// A child that finishes in time passes its stdout through unchanged.
+    #[test]
+    fn test_run_with_timeout_success() {
+        let mut echo = std::process::Command::new("echo");
+        echo.arg("hello-world");
+        let out = run_with_timeout(&mut echo, Duration::from_secs(2))
+            .expect("echo must finish within the deadline");
+        assert_eq!(String::from_utf8_lossy(&out), "hello-world\n");
+    }
+
+    /// A non-zero exit is reported with its code (stdout is discarded).
+    #[test]
+    fn test_run_with_timeout_nonzero_exit() {
+        let mut false_cmd = std::process::Command::new("false");
+        let err = run_with_timeout(&mut false_cmd, Duration::from_secs(2))
+            .expect_err("`false` must be reported as a failure, not a hang");
+        assert!(
+            matches!(err, GpuRunError::ExitCode(1)),
+            "expected ExitCode(1), got {err:?}"
+        );
+    }
+
+    /// A child that cannot finish in time is killed and reported — and the
+    /// call returns promptly, which is the whole point (the caller is the
+    /// GTK main loop).
+    #[test]
+    fn test_run_with_timeout_times_out_bounded() {
+        let started = Instant::now();
+        let mut sleep_cmd = std::process::Command::new("sleep");
+        sleep_cmd.arg("30");
+        let err = run_with_timeout(&mut sleep_cmd, Duration::from_millis(300))
+            .expect_err("`sleep 30` must not finish in 300 ms");
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(err, GpuRunError::TimedOut(_)),
+            "expected TimedOut, got {err:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "the timed-out call returned after {elapsed:?}"
+        );
+    }
 
     // ---- Pure parser --------------------------------------------------
 

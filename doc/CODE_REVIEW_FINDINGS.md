@@ -99,11 +99,12 @@ driver faults exist; it can block in the kernel) freezes the whole UI.
 
 **Fix:** a generic `run_with_timeout(cmd, timeout)` helper: spawn with
 piped stdout drained by a reader thread, poll `try_wait` until a 2 s
-deadline, then `kill` the child and give up (`kill_on_drop`, no blocking
-`wait`, so even an unkillable D-state child cannot hang the loop).
-`read_gpu_card` reports `None` on timeout (GPU columns blank for that
-sample — same as a read failure today). Tests: success, non-zero exit, and
-a real 10 s `sleep` killed well before its runtime.
+deadline, then `kill` the child, drop it **without** `wait()` and return
+`TimedOut` (a blocking wait could hang on a child that a `SIGKILL` cannot
+reap — a D-state kernel block). `read_gpu_card` reports `None` on timeout
+(GPU columns blank for that sample — same as a read failure today).
+Tests: success, non-zero exit, and a real 30 s `sleep` killed well before
+its runtime (the call returns in well under a second).
 
 ### C1 — Kill can hit a *reused* PID (TOCTOU) (`src/ui.rs`, `src/signal.rs`)
 `State::kill` signals whatever process currently owns `selected_pid`, not
