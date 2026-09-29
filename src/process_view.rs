@@ -66,6 +66,15 @@ impl ViewRow {
         self.imp().data.borrow().clone()
     }
 
+    /// The row's current data snapshot **by reference** — used by the sort
+    /// comparator so it compares live values without a deep clone of the
+    /// row's `name`/`cmdline` `String`s on every comparison (B2). The caller
+    /// must keep the returned guard alive for as long as it uses the
+    /// referenced value.
+    pub fn item_ref(&self) -> std::cell::Ref<'_, ProcessItem> {
+        self.imp().data.borrow()
+    }
+
     /// The row's stable identity (PID).
     pub fn pid(&self) -> i32 {
         self.imp().data.borrow().pid
@@ -314,8 +323,12 @@ fn column_sorter(
     gtk4::CustomSorter::new(move |a: &glib::Object, b: &glib::Object| {
         let ra = a.downcast_ref::<ViewRow>().expect("a ViewRow");
         let rb = b.downcast_ref::<ViewRow>().expect("a ViewRow");
-        let ia = ra.item();
-        let ib = rb.item();
+        // Borrow, don't clone (B2): a deep copy of both rows' `name` and
+        // `cmdline` `String`s used to be taken for *every* comparison in
+        // every refresh's re-sort; the guards keep the data readable while
+        // the comparison runs.
+        let ia = ra.item_ref();
+        let ib = rb.item_ref();
         // `true` only when this very column is the active, descending primary
         // sort; `false` otherwise — so the optional-value columns keep a
         // missing value pinned to the list bottom in either direction
@@ -328,8 +341,7 @@ fn column_sorter(
             })
             .map(|cs| cs.primary_sort_order() == gtk4::SortType::Descending)
             .unwrap_or(false);
-        let ord = compare_values(&ia, &ib, sort_col, descending);
-        ord.into()
+        compare_values(&ia, &ib, sort_col, descending).into()
     })
 }
 

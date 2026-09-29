@@ -228,6 +228,61 @@ fn test_blank_disk_rows_last_both_directions() {
     });
 }
 
+/// The header sorter must compare rows' *live* data (it used to deep-clone
+/// each row on every comparison; the borrowed version must stay correct in
+/// both directions and re-read a value after an in-place refresh — B2).
+#[test]
+fn test_sorter_reads_live_row_values() {
+    run_gtk(|| {
+        let pv = ProcessView::new();
+        let zed = {
+            let mut it = item(1, 0);
+            it.value.name = "zed".to_string();
+            it
+        };
+        let apple = {
+            let mut it = item(2, 0);
+            it.value.name = "apple".to_string();
+            it
+        };
+        pv.update(&[zed, apple]);
+
+        pv.sort_like_click(SortColumn::Name, gtk4::SortType::Ascending);
+        assert_eq!(
+            pv.display_order(),
+            vec![2, 1],
+            "name ascending: apple before zed"
+        );
+        pv.sort_like_click(SortColumn::Name, gtk4::SortType::Descending);
+        assert_eq!(
+            pv.display_order(),
+            vec![1, 2],
+            "name descending: zed before apple"
+        );
+
+        // In-place refresh: rename row 2 to "mid" — it must slot between
+        // "apple" and "zed", proving the comparator re-reads live data.
+        let mut rows: Vec<ProcessItem> = (0..pv.store().n_items())
+            .filter_map(|i| {
+                pv.store()
+                    .item(i)?
+                    .downcast::<ViewRow>()
+                    .ok()
+                    .map(|r| r.item())
+            })
+            .collect();
+        let r2 = rows.iter_mut().find(|r| r.pid == 2).expect("row 2");
+        r2.value.name = "mid".to_string();
+        pv.update(&rows);
+        pv.sort_like_click(SortColumn::Name, gtk4::SortType::Ascending);
+        assert_eq!(
+            pv.display_order(),
+            vec![2, 1],
+            "after renaming, 'mid' still sorts by its current name"
+        );
+    });
+}
+
 /// A whole batch of new rows must reach the store as ONE commit (splice),
 /// not one `append` commit per row: when the "Show all processes" option is
 /// flipped on, a whole system list of rows arrives in a single refresh.
