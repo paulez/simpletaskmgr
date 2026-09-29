@@ -179,8 +179,12 @@ mod tests {
 
     /// `calculate_cpu_sample` over two cores, tps = 100. Covers the normal
     /// busy/idle math, a shorter history, PID reuse (counter decrease) and a
-    /// u64 overflow, plus sub-second intervals. Each `Some` case expects the
-    /// raw tick delta (the sort key) alongside the percent.
+    /// u64 overflow, sub-second intervals, and a non-elapsed window
+    /// (`now == last` / `now < last` → the zero group, deliberately
+    /// *not* `None` — the CPU% column is a non-`Option` sort key, unlike the
+    /// I/O columns' blank; see the module docs and `doc/CODE_REVIEW_FINDINGS.md`
+    /// C2). Each `Some` case expects the raw tick delta (the sort key)
+    /// alongside the percent.
     #[rstest]
     #[case::full(200, 200, 100, 100, 1001.0, 1000.0, Some((200, 200.0)))]
     #[case::idle(100, 100, 100, 100, 1001.0, 1000.0, Some((0, 0.0)))]
@@ -190,6 +194,8 @@ mod tests {
     #[case::pid_reuse(5, 5, 100, 100, 1001.0, 1000.0, None)]
     #[case::ticks_overflow(u64::MAX, 1, 1, 1, 1001.0, 1000.0, None)]
     #[case::subsecond(150, 150, 100, 100, 1000.5, 1000.0, Some((100, 200.0)))]
+    #[case::zero_window(200, 200, 100, 100, 1000.0, 1000.0, Some((200, 0.0)))]
+    #[case::backward_window(200, 200, 100, 100, 999.0, 1000.0, Some((200, 0.0)))]
     fn test_cpu_sample(
         #[case] utime: u64,
         #[case] stime: u64,
