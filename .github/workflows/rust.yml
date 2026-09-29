@@ -48,3 +48,49 @@ jobs:
           cage -- sh -c 'WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR="${CAGE_RUNTIME}" cargo test --verbose'
     - name: Build
       run: cargo build --verbose
+
+  # AppImage packaging smoke test: proves the portable, process-listing artifact
+  # can be built on every push/PR, so a broken packaging step is caught before we
+  # ever tag a release. Verify-only (no artifact upload); release.yml attaches the
+  # AppImage to the GitHub release.
+  appimage:
+
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+      options: --user root
+
+    steps:
+    - name: Install build dependencies (GTK4 + squashfs-tools + file)
+      run: |
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          ca-certificates curl git build-essential pkg-config file libgtk-4-dev squashfs-tools
+    - name: Install Rust (stable)
+      run: |
+        curl -sSf https://sh.rustup.rs | HOME=/root sh -s -- -y --default-toolchain stable
+        cargo --version
+    - uses: actions/checkout@v4
+    - name: Build release binary
+      run: cargo build --release
+    - name: Package AppImage (must succeed)
+      run: bash scripts/package-appimage.sh
+    - name: Verify AppImage payload is self-contained
+      run: |
+        set -euo pipefail
+        V="$(grep -m1 '^version[[:space:]]*=' Cargo.toml | cut -d'"' -f2)"
+        OUT="dist/simpletaskmgr-${V}-x86_64.AppImage"
+        [ -f "$OUT" ] || { echo "AppImage not produced: $OUT"; exit 1; }
+        file "$OUT" | grep -E 'ELF|executable' || { echo "not an executable image"; exit 1; }
+        VDIR="$(mktemp -d)"; ( cd "$VDIR" && "$OLDPWD/$OUT" --appimage-extract >/dev/null )
+        [ -x "$VDIR/squashfs-root/AppRun" ] || { echo "missing AppRun"; exit 1; }
+        [ -x "$VDIR/squashfs-root/usr/bin/simpletaskmgr" ] || { echo "missing binary"; exit 1; }
+        [ -f "$VDIR/squashfs-root/usr/share/applications/simpletaskmgr.desktop" ] || { echo "missing desktop"; exit 1; }
+        ls "$VDIR/squashfs-root/usr/lib/x86_64-linux-gnu" | grep -E 'libgtk-4|libglib-2|libcairo' >/dev/null \
+          || { echo "expected GTK/glib/cairo libs to be bundled"; exit 1; }
+        missing="$( LD_LIBRARY_PATH="$VDIR/squashfs-root/usr/lib/x86_64-linux-gnu" ldd \
+          "$VDIR/squashfs-root/usr/bin/simpletaskmgr" 2>/dev/null | awk '/not found/{print $1}' )"
+        [ -z "$missing" ] || { echo "unresolved shared objects: $missing"; exit 1; }
+        echo "AppImage payload verified OK: $(du -h "$OUT" | cut -f1)"
+        rm -rf "$VDIR"

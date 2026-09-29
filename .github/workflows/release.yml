@@ -31,7 +31,12 @@ jobs:
           build-essential \
           pkg-config \
           libgtk-4-dev \
-          gh
+          gh \
+          squashfs-tools \
+          file \
+          cage \
+          grim \
+          procps
     - name: Install Rust (stable, gtk-rs requires rustc >= 1.92)
       run: |
         curl -sSf https://sh.rustup.rs | HOME=/root sh -s -- -y --profile minimal --default-toolchain stable
@@ -58,15 +63,51 @@ jobs:
         echo "version=$version" >> "$GITHUB_OUTPUT"
     - name: Build release binary
       run: cargo build --release --locked
-    - name: Package artifacts
+    - name: Package artifacts (native tarball + portable AppImage)
+      shell: bash
       run: |
         V="${{ steps.version.outputs.version }}"
+        # --- native tarball (needs host GTK4) ---
         PKG="simpletaskmgr-${V}-x86_64-linux"
         mkdir -p "dist/${PKG}"
         cp target/release/simpletaskmgr "dist/${PKG}/"
         cp README.md LICENSE "dist/${PKG}/"
         tar -czf "dist/${PKG}.tar.gz" -C dist "${PKG}"
-        ( cd dist && sha256sum "${PKG}.tar.gz" > SHA256SUMS && cat SHA256SUMS )
+        # --- self-contained AppImage (bundled GTK closure, no host deps) ---
+        bash scripts/package-appimage.sh
+        # --- checksums for both artifacts ---
+        ( cd dist && sha256sum "${PKG}.tar.gz" "simpletaskmgr-${V}-x86_64.AppImage" > SHA256SUMS && cat SHA256SUMS )
+    - name: Smoke test the AppImage under headless Wayland
+      shell: bash
+      run: |
+        set -euo pipefail
+        V="${{ steps.version.outputs.version }}"
+        OUT="dist/simpletaskmgr-${V}-x86_64.AppImage"
+        [ -f "$OUT" ] || { echo "AppImage missing: $OUT"; exit 1; }
+        CR="$(mktemp -d "${TMPDIR:-/tmp}/cage-XXXXXX")"
+        cleanup(){ kill "${CAGE_PID:-}" 2>/dev/null; pkill -x simpletaskmgr 2>/dev/null; rm -rf "$CR"; }
+        trap cleanup EXIT
+        # cage runs the app on a headless Wayland compositor. APPIMAGE_EXTRACT_AND_RUN
+        # is the FUSE-free launch path (GitHub runners have no /dev/fuse). An AppImage
+        # does NOT sandbox the PID namespace, so the app must start and be enumerable
+        # in the surrounding PID namespace — the "it can see real processes" proof.
+        APPIMAGE_EXTRACT_AND_RUN=1 WLR_BACKENDS=headless WAYLAND_DISPLAY= XDG_RUNTIME_DIR="$CR" \
+          DBUS_SESSION_BUS_ADDRESS=disabled \
+          cage -- "./${OUT}" > /tmp/cage.log 2>&1 &
+        CAGE_PID=$!
+        ok=0; for _ in $(seq 1 60); do [ -S "$CR/wayland-0" ] && { ok=1; break; }; sleep 0.2; done
+        [ "$ok" = 1 ] || { echo "cage did not come up:"; cat /tmp/cage.log; exit 1; }
+        apppid=""; for _ in $(seq 1 90); do apppid="$(pgrep -x simpletaskmgr || true)"; [ -n "$apppid" ] && break; sleep 0.25; done
+        [ -n "$apppid" ] || { echo "APP FAILED TO LAUNCH:"; cat /tmp/cage.log; exit 1; }
+        sleep 3   # give GTK time to map a window
+        echo "APP LIVE: pid=${apppid} comm=$(cat /proc/${apppid}/comm 2>/dev/null)"
+        n=$(ls /proc | grep -cE '^[0-9]+$')
+        echo "app-enumerable PIDs: ${n}  (pid1=$(cat /proc/1/comm 2>/dev/null))"
+        if command -v grim >/dev/null && [ -S "$CR/wayland-0" ]; then
+          WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR="$CR" grim "$CR/appimage_render.png"
+          [ -s "$CR/appimage_render.png" ] && echo "screenshot: $(du -h "$CR/appimage_render.png" | cut -f1)"
+        fi
+        echo "smoke test passed: AppImage launches and draws a window"
     - name: Create GitHub release
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -84,6 +125,7 @@ jobs:
         [[ "$V" == *-* ]] && ARGS+=(--prerelease)
         gh release create "v${V}" "${ARGS[@]}" \
           "dist/simpletaskmgr-${V}-x86_64-linux.tar.gz" \
+          "dist/simpletaskmgr-${V}-x86_64.AppImage" \
           "dist/SHA256SUMS"
 
   # Publishes the same version to crates.io so that
