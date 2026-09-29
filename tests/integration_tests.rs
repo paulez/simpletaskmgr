@@ -67,8 +67,8 @@ mod tests {
 
     /// A live `State` — `ProcessList::init()` walks `/proc/[pid]`. This is
     /// the constructor the original *unit* tests used when they were live;
-    /// they moved here to keep the lib test pool hermetic (no `/proc` walk),
-    /// per `doc/TEST_FD_LIMIT_FIX_PLAN.md`.
+    /// they live in this integration binary to keep the lib test pool
+    /// hermetic (no `/proc` walk at all).
     fn live_state(tag: &str) -> State {
         let path = temp_settings_path(tag);
         let _ = std::fs::remove_file(&path);
