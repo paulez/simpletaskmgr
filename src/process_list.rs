@@ -59,7 +59,17 @@ impl ProcessList {
     /// Reads `/proc` again, updates the per-process CPU% and the current
     /// user's visible rows (`self.processes`).
     pub fn update_process_list(&mut self) {
-        match self.refresh_process_list() {
+        let result = self.refresh_process_list();
+        self.apply_refresh(result);
+    }
+
+    /// Merges a refresh result into `self.processes`: a success replaces the
+    /// list; a failure logs and **keeps the last known snapshot** — a
+    /// transient `/proc` walk failure must not blank the visible list (empty
+    /// table, one bogus "total" row, blank detail pane) for the frame or so
+    /// until the next tick self-heals. See `doc/CODE_REVIEW_FINDINGS.md` (A3).
+    fn apply_refresh(&mut self, processes: Result<Vec<TaskMgrProcess>, anyhow::Error>) {
+        match processes {
             Ok(processes) => {
                 // `refresh_process_list` returns owned values — move them into the
                 // row instead of cloning each (a `ProcessItem::new(&p)` copies
@@ -73,8 +83,10 @@ impl ProcessList {
                     .collect();
             }
             Err(e) => {
-                log::error!("Failed to update process list: {}", e);
-                self.processes.clear();
+                log::error!(
+                    "Failed to update process list: {} — keeping the last snapshot",
+                    e
+                );
             }
         }
     }
@@ -458,5 +470,34 @@ mod tests {
         assert!(built.threads >= 1);
         assert_eq!(built.ppid, me.ppid, "PPID copied straight from stat");
         assert_eq!(built.nice, me.nice, "nice copied straight from stat");
+    }
+
+    /// A failed refresh must keep the last known snapshot instead of blanking
+    /// the list (A3), and the next successful refresh must replace it.
+    #[test]
+    fn test_failed_refresh_keeps_last_snapshot_and_recovers() {
+        let mut list = ProcessList::new();
+        list.processes = vec![crate::testutil::test_item(42)];
+
+        let err: anyhow::Error = anyhow::anyhow!("simulated /proc walk failure");
+        list.apply_refresh(Err(err));
+        assert_eq!(
+            list.processes.len(),
+            1,
+            "a failed refresh must keep the last snapshot, not clear the list"
+        );
+        assert_eq!(list.processes[0].pid, 42);
+
+        let fresh = vec![proc(42, 1000), proc(43, 1000)];
+        list.apply_refresh(Ok(fresh));
+        assert_eq!(
+            list.processes.len(),
+            2,
+            "the next success replaces the list"
+        );
+        assert_eq!(
+            list.processes.iter().map(|p| p.pid).collect::<Vec<_>>(),
+            vec![42, 43]
+        );
     }
 }
