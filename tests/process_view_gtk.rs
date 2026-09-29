@@ -228,6 +228,67 @@ fn test_blank_disk_rows_last_both_directions() {
     });
 }
 
+/// A whole batch of new rows must reach the store as ONE commit (splice),
+/// not one `append` commit per row: when the "Show all processes" option is
+/// flipped on, a whole system list of rows arrives in a single refresh.
+/// Regression test for the append-per-row pattern (B1).
+#[test]
+fn test_update_inserts_new_rows_in_one_commit() {
+    run_gtk(|| {
+        let pv = ProcessView::new();
+        let commits = Rc::new(RefCell::new(0u32));
+        let added = Rc::new(RefCell::new(0u32));
+        {
+            let commits_c = commits.clone();
+            let added_c = added.clone();
+            pv.store()
+                .clone()
+                .connect_items_changed(move |_model, _pos, _removed, adds| {
+                    *commits_c.borrow_mut() += 1;
+                    *added_c.borrow_mut() += adds;
+                });
+        }
+
+        // First refresh: 3 new rows → exactly ONE commit carrying all 3.
+        pv.update(&[item(1, 0), item(2, 0), item(3, 0)]);
+        assert_eq!(
+            *commits.borrow(),
+            1,
+            "all rows born in one refresh must land in a single commit"
+        );
+        assert_eq!(*added.borrow(), 3, "that commit carries every new row");
+        assert_eq!(pv.store().n_items(), 3);
+
+        // Second refresh: all three old rows die as one contiguous run (ONE
+        // removal commit, not three) and one new row arrives (ONE insert
+        // commit).
+        let (c0, a0) = (*commits.borrow(), *added.borrow());
+        pv.update(&[item(9, 0)]);
+        assert_eq!(
+            *commits.borrow(),
+            c0 + 2,
+            "the departure run and the arrival are each exactly one commit"
+        );
+        assert_eq!(
+            *added.borrow(),
+            a0 + 1,
+            "the single arriving row adds one item"
+        );
+        assert_eq!(pv.store().n_items(), 1);
+        let pids: Vec<i32> = (0..pv.store().n_items())
+            .map(|i| {
+                pv.store()
+                    .item(i)
+                    .expect("row")
+                    .downcast::<ViewRow>()
+                    .expect("ViewRow")
+                    .pid()
+            })
+            .collect();
+        assert_eq!(pids, vec![9]);
+    });
+}
+
 /// Full lifecycle of the GTK-side algorithm (spec D1, S7, V, R4, D2):
 /// default CPU% descending, header re-click is a no-op commit, in-place
 /// value refresh (visually free, row objects stable), reorder refresh (one

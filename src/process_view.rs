@@ -1245,11 +1245,19 @@ impl ProcessView {
             self.store.splice(*pos, *len, &[] as &[ViewRow]);
         }
         order.retain(|p| want.contains(p));
-        for item in procs {
-            if !order.contains(&item.pid) {
-                self.store.append(&ViewRow::from_item(item));
-                order.push(item.pid);
-            }
+        // New rows go in at the tail in snapshot order — as ONE splice commit,
+        // not one `append` per row: after the `Show all processes` toggle a
+        // full system list of rows arrives at once, and a commit per row is
+        // a signal storm (and the `Vec::contains` membership test below used
+        // to re-scan the order per candidate).
+        let known: std::collections::HashSet<i32> = order.iter().copied().collect();
+        let new_rows: Vec<ViewRow> = procs
+            .iter()
+            .filter(|item| !known.contains(&item.pid))
+            .map(ViewRow::from_item)
+            .collect();
+        if !new_rows.is_empty() {
+            self.store.splice(order.len() as u32, 0, &new_rows);
         }
 
         // 3) Order: kick the re-sort. GTK commits nothing if the visible
