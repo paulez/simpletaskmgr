@@ -1,3 +1,22 @@
+//! Tracks per-process CPU usage so that each refresh can report the CPU%
+//! since the last sample.
+//!
+//! A process's CPU% is the tick delta since the last sample, divided by the
+//! elapsed window: `delta_ticks / ticks_per_sec / window * 100`. The
+//! *integer* tick delta is also the CPU% column's **sort key** (a coarse
+//! total order, tie-broken by `pid` — see `TaskMgrProcess::cpu_ticks`),
+//! and that is why a sample with no measurable *window* still reports a
+//! real value — `0.0`, the zero group — rather than a blank (`None`):
+//! a blank could not participate in a `u64`-based total order.
+//!
+//! **Intentional divergence from `IoTracker`:** the IO columns report a
+//! non-elapsed sample as a *blank* cell (`None`) — see that file's docs.
+//! The two choices are each the honest one for their column: CPU ticks
+//! always yield a meaningful delta (`0` is a legitimate measurement, so
+//! `0.0%` is), while a disk rate *is* `bytes / window` and has no truth
+//! without a window, so blanking it is. See `doc/CODE_REVIEW_FINDINGS.md`
+//! (C2) for the analysis and the decision to keep both behaviours.
+
 use log::debug;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;

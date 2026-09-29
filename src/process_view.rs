@@ -263,11 +263,11 @@ fn cell_factory(prop_name: &'static str) -> gtk4::SignalListItemFactory {
         let Ok(label) = child.downcast::<gtk4::Label>() else {
             return;
         };
-        // Happy path: retire the parking (and its last reference) so the
-        // recycled label holds no live binding to its previous row.
-        if let Some(b) = cell_label::take_and_unbind(label.as_ptr() as usize) {
-            b.unbind();
-        }
+        // Happy path: retire the parking so the recycled label holds no live
+        // binding to its previous row. `take_and_unbind` already calls
+        // `Binding::unbind` (cell_label.rs) — a second `unbind` here would
+        // not add anything but fire the binding's `unbind` notification again.
+        let _ = cell_label::take_and_unbind(label.as_ptr() as usize);
     });
     f.connect_bind(move |_f, li| {
         let li = li.downcast_ref::<gtk4::ListItem>().expect("a list item");

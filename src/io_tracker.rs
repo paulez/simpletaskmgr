@@ -12,6 +12,14 @@ use crate::process::TaskMgrProcess;
 /// per process, so a speed is `delta_bytes / delta_time`. A decrease of a
 /// counter means the PID was reused by a new process: the stale baseline is
 /// discarded and the unknown speed is reported.
+///
+/// **Intentional divergence from `CpuTracker`:** when the sample window is
+/// non-elapsed this column reports a *blank* (`None`) — an honest
+/// "no rate measured" — whereas CPU% reports `0.0` (the zero group),
+/// because a tick delta is always a valid measurement and the CPU% column
+/// must sort by one (see that file's docs and `TaskMgrProcess::cpu_ticks`).
+/// See `doc/CODE_REVIEW_FINDINGS.md` (C2) for the analysis and the decision
+/// to keep both behaviours.
 #[derive(Clone)]
 pub struct IoTracker {
     baselines: HashMap<i32, IoBaseline>,

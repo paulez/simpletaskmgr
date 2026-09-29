@@ -135,7 +135,8 @@ an intentional part of the "first-sight zero group" design
 non-`Option` `f64` while the IO speeds are `Option`. Changing one to match
 the other would be a user-visible UI/API change disproportionate to the
 benefit. **Decision: keep both behaviors; document the divergence in
-`cpu_tracker.rs`** so it is not mistaken for a bug.
+both `cpu_tracker.rs` and `io_tracker.rs`** so it is not mistaken for
+a bug (module docs, cross-referencing each other and this section).
 
 ### C5 — Redundant second `unbind()` in the cell factory teardown (`src/process_view.rs`)
 `cell_label::take_and_unbind` already unbinds the `glib::Binding`; the
