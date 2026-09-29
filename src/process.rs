@@ -63,6 +63,13 @@ pub struct TaskMgrProcess {
     /// be derived (no `/proc/uptime`, or a counter regression). Shown as a
     /// wall-clock timestamp plus the process's age ("uptime").
     pub start_epoch: Option<i64>,
+    /// The process's `starttime` — ticks since boot, `/proc/[pid]/stat`
+    /// field 22 — captured when the row was built. It is the identity token
+    /// the kill guards on: a PID is *not* a process, so signalling `pid`
+    /// is only safe while the live `starttime` still matches this one
+    /// (otherwise the PID was reused and belongs to a different, newer
+    /// process). `0` in test fixtures and for rows not built from `stat`.
+    pub start_time_ticks: u64,
 }
 
 impl TaskMgrProcess {
@@ -84,6 +91,7 @@ impl TaskMgrProcess {
             ppid: 0,
             rss_kb: None,
             start_epoch: None,
+            start_time_ticks: 0,
         }
     }
 
@@ -363,7 +371,41 @@ pub(crate) fn build_task_mgr_process(
         ppid: stat.ppid,
         rss_kb: None,
         start_epoch: None,
+        start_time_ticks: stat.starttime,
     }
+}
+
+/// The live `starttime` (ticks since boot, `stat` field 22) of the process
+/// currently occupying `pid` — its identity token. The process a row was
+/// built from *is* the process with this token; a different token means the
+/// PID has been reused (TOCTOU), and signalling it would hit a stranger.
+pub fn live_start_time_ticks(pid: i32) -> std::io::Result<u64> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    // `comm` (field 2) is unquoted and may contain spaces and parens, so
+    // split on the LAST closing paren: everything after it is fields 3..
+    // `starttime` is field 22, i.e. index 19 of that remainder.
+    let remainder = text.rsplit(')').next().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "no closing paren in /proc stat comm",
+        )
+    })?;
+    let fields: Vec<&str> = remainder.split_whitespace().collect();
+    fields
+        .get(19)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("/proc/{pid}/stat has fewer than 22 fields"),
+            )
+        })?
+        .parse()
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("/proc/{pid}/stat starttime is not an integer: {e}"),
+            )
+        })
 }
 
 /// Resolves a process's display name to a value that is not capped by the
@@ -670,5 +712,15 @@ mod tests {
         assert_eq!(format_time_at(secs, now_next, 0), "2024-01-03 08:10");
         // A +2h offset keeps both points on local day 01-03 (10:10 / 17:10).
         assert_eq!(format_time_at(secs, now_same, 7_200), "10:10:00");
+    }
+
+    /// `live_start_time_ticks` is the process's live identity token: present
+    /// for a live PID, an error for one that does not exist.
+    #[test]
+    fn test_live_start_time_ticks_live_and_dead() {
+        let me = std::process::id() as i32;
+        let ticks = live_start_time_ticks(me).expect("the test process is alive");
+        assert!(ticks > 0, "ticks since boot must be non-zero: {ticks}");
+        assert!(live_start_time_ticks(-1).is_err(), "a missing pid errors");
     }
 }

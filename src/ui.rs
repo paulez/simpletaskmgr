@@ -86,6 +86,15 @@ pub enum KillStatus {
     Sent,
     /// No process was selected.
     NoSelection,
+    /// The signal was **refused before delivery**: between the last refresh
+    /// and the click the process left and its PID was already reused, so
+    /// delivering would have hit a different (younger) process (TOCTOU).
+    Reused {
+        /// The signal that was requested.
+        signal: Signal,
+        /// The pid the signal was about to be aimed at.
+        pid: i32,
+    },
     /// `kill(2)` refused the delivery.
     Failed {
         /// The signal that was requested.
@@ -257,27 +266,66 @@ impl State {
     /// branch (no live I/O).
     pub fn kill(&mut self, sig: Signal) -> KillStatus {
         match self.selected_pid {
-            Some(pid) => match crate::signal::send_signal(pid, sig) {
-                Ok(()) => KillStatus::Sent,
-                Err(e) => KillStatus::Failed {
-                    signal: sig,
-                    pid,
-                    // `send_signal` wraps the `kill(2)` OS error in an
-                    // anyhow context; recover the root cause so the UI can
-                    // distinguish EPERM / ESRCH / anything else.
-                    cause: e
-                        .root_cause()
-                        .downcast_ref::<std::io::Error>()
-                        .map(|io| match io.raw_os_error() {
-                            Some(code) => std::io::Error::from_raw_os_error(code),
-                            None => std::io::Error::other(io.to_string()),
-                        })
-                        .unwrap_or_else(|| std::io::Error::other(e.root_cause().to_string())),
-                },
-            },
             None => KillStatus::NoSelection,
+            Some(pid) => {
+                // TOCTOU guard (C1): the row holds the `starttime` token of
+                // the process the user *saw*. If the live occupant of that
+                // PID carries a different token, the original has left and
+                // this PID belongs to a stranger — refuse to signal it.
+                // A missing row (unknown) or an unreadable live stat falls
+                // through: `kill(2)` will then produce the real answer
+                // (typically ESRCH for a dead PID, EPERM for a foreign one),
+                // which is strictly more information than guessing here.
+                if let (Some(snapshot), Some(live)) = (
+                    self.process_list
+                        .processes
+                        .iter()
+                        .find(|p| p.pid == pid)
+                        .map(|p| p.value.start_time_ticks)
+                        .filter(|t| *t > 0),
+                    crate::process::live_start_time_ticks(pid).ok(),
+                ) {
+                    if live != snapshot {
+                        log::warn!("pid {pid} now holds a different process (starttime {live} != {snapshot}) — refusing to send {sig:?}");
+                        return KillStatus::Reused { signal: sig, pid };
+                    }
+                }
+                match crate::signal::send_signal(pid, sig) {
+                    Ok(()) => KillStatus::Sent,
+                    Err(e) => KillStatus::Failed {
+                        signal: sig,
+                        pid,
+                        // `send_signal` wraps the `kill(2)` OS error in an
+                        // anyhow context; recover the root cause so the UI can
+                        // distinguish EPERM / ESRCH / anything else.
+                        cause: e
+                            .root_cause()
+                            .downcast_ref::<std::io::Error>()
+                            .map(|io| match io.raw_os_error() {
+                                Some(code) => std::io::Error::from_raw_os_error(code),
+                                None => std::io::Error::other(io.to_string()),
+                            })
+                            .unwrap_or_else(|| std::io::Error::other(e.root_cause().to_string())),
+                    },
+                }
+            }
         }
     }
+}
+
+/// The error pop-up's title and detail for a kill that was refused because
+/// the PID was reused (TOCTOU): the selected process is simply gone, and no
+/// signal was sent — the wording must say that rather than implying a
+/// delivery failure.
+pub fn describe_reused(sig: Signal, pid: i32) -> (String, String) {
+    let name = sig.name();
+    (
+        format!("{name} was not sent"),
+        format!(
+            "The process you selected has exited: PID {pid} already belongs to \
+             a different process, so {name} was deliberately not sent."
+        ),
+    )
 }
 
 /// The error pop-up's title and detail for a failed signal delivery.
@@ -744,6 +792,16 @@ pub fn build_window(
                 // still handle the impossible case gracefully instead of
                 // assuming.
                 (_, KillStatus::NoSelection) => {}
+                // The PID was reused: the selected process left and a new
+                // occupant took the PID — the signal was intentionally NOT
+                // sent. Report it as such (the target of the user's click is
+                // simply gone).
+                (_, KillStatus::Reused { signal, pid }) => {
+                    view_in
+                        .set_status(&format!("{} not sent: pid {pid} was reused", signal.name()));
+                    let (title, detail) = describe_reused(signal, pid);
+                    show_failure_popup(&window_in, &title, &detail);
+                }
                 // Delivery failed (EPERM on another user's process, ESRCH
                 // when the process left in the meantime, …): report it in the
                 // pane's status line *and* surface an error pop-up.
@@ -971,6 +1029,19 @@ mod tests {
         let (t3, d3) = describe_failure(Signal::Sigkill, 999, &other);
         assert!(t3.contains("SIGKILL") && t3.contains("pid 999"), "{t3}");
         assert_eq!(d3, "boom");
+    }
+
+    /// The reused-PID refusal (TOCTOU guard) is reported as a deliberate
+    /// non-sending, naming the signal and the pid the user clicked.
+    #[test]
+    fn test_describe_reused_message() {
+        let (title, detail) = describe_reused(Signal::Sigterm, 999);
+        assert!(
+            title.contains("SIGTERM") && title.contains("not sent"),
+            "{title}"
+        );
+        assert!(detail.contains("PID 999"), "{detail}");
+        assert!(detail.contains("not sent"), "{detail}");
     }
 
     /// The pop-up is a self-contained modal window parented to the main

@@ -114,12 +114,16 @@ PID before the button press, the *new* process receives the signal
 UI hints at this.
 
 **Fix:** each row records the raw `stat.starttime` ticks (`TaskMgrProcess`
-gains `start_time_ticks`); at send time `State::kill` re-reads
-`/proc/<pid>/stat` and refuses (new `KillStatus::Failed` with a clear
-"PID was reused" cause) when the live start-time differs from the row's.
-A `None` row (pid already gone) still proceeds and surfaces the usual
-ESRCH path. Tests spawn a `sleep` child for both the accept and the refuse
-cases — the test process is never signalled.
+gains `start_time_ticks`, set in `build_task_mgr_process`); `kill()` re-reads
+the live `starttime` of the PID's current occupant (via
+`process::live_start_time_ticks`) and refuses with a new
+`KillStatus::Reused` variant — dedicated status line and pop-up ("was
+deliberately not sent") — when the tokens disagree. A missing row or an
+unreadable live `stat` falls through so `kill(2)` can still produce the real
+ESRCH/EPERM. Tests add two sub-cases to `integration_tests::
+test_state_lifecycle` (stale token refused while the new PID owner survives;
+live token lets the kill land) plus unit tests for the token reader and the
+refusal message.
 
 ### C2 — `CpuTracker` / `IoTracker` disagree on a non-elapsed sample (`src/cpu_tracker.rs`, `src/io_tracker.rs`)
 `calculate_cpu_sample` returns `Some((delta, 0.0))` when

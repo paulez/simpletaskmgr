@@ -4,12 +4,13 @@ use simpletaskmgr::{
     disk_status::{is_physical_disk, DiskStatus},
     gpu_status::{gpu_available, read_gpu_card, GpuSample},
     metrics::SystemMetrics,
-    process::{ProcessItem, TaskMgrProcess},
+    process::{live_start_time_ticks, ProcessItem, TaskMgrProcess},
     process_list::ProcessList,
     settings::UserSettings,
     signal::Signal,
     ui::{KillStatus, State},
 };
+use std::os::unix::process::ExitStatusExt;
 
 #[cfg(test)]
 mod tests {
@@ -54,6 +55,14 @@ mod tests {
     fn item(pid: i32) -> ProcessItem {
         let p = TaskMgrProcess::new(format!("name{pid}"), pid, 1000, "paul".to_string(), 1.0);
         ProcessItem::new(&p)
+    }
+
+    /// A row whose process carries a specific `start_time_ticks` identity
+    /// token (the kill TOCTOU guard compares it with the live one).
+    fn item_with_start_ticks(pid: i32, ticks: u64) -> ProcessItem {
+        let mut it = item(pid);
+        it.value.start_time_ticks = ticks;
+        it
     }
 
     /// A live `State` — `ProcessList::init()` walks `/proc/[pid]`. This is
@@ -367,6 +376,66 @@ mod tests {
                 assert!(!p.username.is_empty());
                 assert!(pids.insert(p.pid), "Duplicate PID found: {}", p.pid);
             }
+        }
+
+        // (h) Kill TOCTOU guard (C1): the row's `start_time_ticks` token does
+        // not match the live occupant of its PID → the signal must be
+        // REFUSED, and the new PID owner must not be harmed.
+        {
+            let mut s = live_state("kill_reused_refused");
+            let mut child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn sleep");
+            let pid = child.id() as i32;
+            let stale = 1_234_567;
+            assert_ne!(
+                live_start_time_ticks(pid).ok(),
+                Some(stale),
+                "the fixture token must differ from the live one"
+            );
+            s.process_list
+                .processes
+                .push(item_with_start_ticks(pid, stale));
+            s.selected_pid = Some(pid);
+            match s.kill(Signal::Sighup) {
+                KillStatus::Reused { signal, pid: p } => {
+                    assert_eq!(p, pid);
+                    assert_eq!(signal, Signal::Sighup);
+                }
+                other => panic!("expected Reused, got {other:?}"),
+            }
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "a refused kill must not signal the PID's new owner"
+            );
+            let _ = child.kill(); // cleanup
+            let _ = child.wait();
+        }
+
+        // (i) The same guard passes through when the token IS live: the kill
+        // proceeds and lands on the right process.
+        {
+            let mut s = live_state("kill_live_token_proceeds");
+            let mut child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn sleep");
+            let pid = child.id() as i32;
+            let live_ticks = live_start_time_ticks(pid).expect("child is alive");
+            s.process_list
+                .processes
+                .push(item_with_start_ticks(pid, live_ticks));
+            s.selected_pid = Some(pid);
+            assert!(
+                matches!(s.kill(Signal::Sigkill), KillStatus::Sent),
+                "a live token must let the kill through"
+            );
+            let status = child.wait().expect("wait");
+            assert!(
+                status.signal().is_some_and(|sig| sig == 9),
+                "child should have died by SIGKILL: {status:?}"
+            );
         }
     }
 
