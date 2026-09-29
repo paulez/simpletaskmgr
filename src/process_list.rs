@@ -67,7 +67,7 @@ impl ProcessList {
     /// list; a failure logs and **keeps the last known snapshot** — a
     /// transient `/proc` walk failure must not blank the visible list (empty
     /// table, one bogus "total" row, blank detail pane) for the frame or so
-    /// until the next tick self-heals. See `doc/CODE_REVIEW_FINDINGS.md` (A3).
+    /// until the next tick self-heals.
     fn apply_refresh(&mut self, processes: Result<Vec<TaskMgrProcess>, anyhow::Error>) {
         match processes {
             Ok(processes) => {
