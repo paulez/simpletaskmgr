@@ -31,21 +31,26 @@ otherwise creates the state + window as before. `main.rs` wires that function
 directly. Regression test: a second `activate` on an app that already has a
 window must return `false` and leave the same window in place.
 
-### A2 — `Reset to defaults` rebuilds twice; one of the passes is stale (`src/ui.rs`)
-The reset button handler (`build_window`, handler block at line ~750) calls
-`sync_settings_widgets` *before* its own final `rebuild()`. When
-`Show all processes` is currently on, `sync_settings_widgets` flips the
-`CheckButton`, which fires `toggled` → `set_show_all(false)` → `rebuild_t()`:
+### A2 — `Reset to defaults` with "show all" on: `toggled` re-enters the state, panics, or rebuilds twice (`src/ui.rs`)
+The reset handler called `sync_settings_widgets` (which was holding the shared
+`state.borrow()`) before its own final `rebuild()`. Flipping the check with
+`set_active` fires `toggled` *synchronously*, and the handler takes
+`state.borrow_mut()`. Two failures depending on the situation:
 
-- pass 1 runs against the old (show-all) process list — a full
-  `view.update()` over every process on the system is built and discarded,
-- pass 2 (`rebuild_r()`) only sees the *own* rows because `refresh()` in
-  pass 1 already applied the new setting and populated `process_list`.
+- **panic/abort** — `RefCell` double-borrow inside a GTK signal
+  (`borrow_mut` while sync's immutable borrow is live): unwinding through
+  the GTK C boundary aborts the process. This is the crash path of "Reset to
+  defaults" with "Show all processes" on.
+- **stale second rebuild** — if the flip's handler runs at all, rebuilds the
+  view; the reset handler then rebuilt again against a list that the first
+  pass had already refilled (a full `view.update()` over the whole system
+  list, built and thrown away).
 
-**Fix:** the reset path performs at most one rebuild — if the settings sync
-flips the check (which rebuilds itself), the trailing rebuild is skipped.
-Regression test: toggling "show all" and then pressing Reset must each cost
-exactly one additional `State::refresh`.
+**Fix:** `sync_settings_widgets` drops the state borrow before flipping,
+reports when its flip already rebuilt, and the reset handler skips its
+trailing rebuild in that case — exactly one rebuild per user action, no
+re-entrant borrow. Regression test: reset with "show all" on applies the
+change and costs exactly one refresh.
 
 ### A3 — A transient `/proc` read error blanks the entire process list (`src/process_list.rs`)
 `update_process_list` clears `self.processes` on `Err` of

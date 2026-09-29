@@ -40,14 +40,15 @@ fn window_icon_dimensions() -> Option<(i32, i32)> {
         .map(|icon| (icon.width(), icon.height()))
 }
 
-/// The widgets the `Settings` popover exposes so its change handlers and the
-/// reset path can address them without name lookup.
-struct SettingsWidgets {
-    button: gtk4::MenuButton,
-    check: gtk4::CheckButton,
-    list: gtk4::ListBox,
-    rows: Vec<gtk4::ListBoxRow>,
-    reset: gtk4::Button,
+/// The widgets the `Settings` popover exposes so its change handlers and
+/// the reset path can address them without name lookup. Returned by
+/// [`build_window`] so tests and automation can drive the popover directly.
+pub struct SettingsWidgets {
+    pub button: gtk4::MenuButton,
+    pub check: gtk4::CheckButton,
+    pub list: gtk4::ListBox,
+    pub rows: Vec<gtk4::ListBoxRow>,
+    pub reset: gtk4::Button,
 }
 
 pub struct State {
@@ -619,7 +620,7 @@ impl WindowRef {
             return false;
         }
         let state = Rc::new(RefCell::new(State::new()));
-        let window = build_window(app, &state);
+        let (window, _settings) = build_window(app, &state);
         self.window.borrow_mut().replace(window.clone());
         window.set_visible(true);
         true
@@ -635,11 +636,12 @@ impl WindowRef {
 /// Call from the `activate` handler (main loop thread only). The `state`
 /// parameter is the app's single source of truth (created in `main`) so
 /// tests can inspect it — e.g. assert the one-refresh-per-tick cadence via
-/// [`State::refresh_count`].
+/// [`State::refresh_count`]. Also returns the settings-popover widgets
+/// ([`SettingsWidgets`]) so tests can drive them.
 pub fn build_window(
     app: &gtk4::Application,
     state: &Rc<RefCell<State>>,
-) -> gtk4::ApplicationWindow {
+) -> (gtk4::ApplicationWindow, SettingsWidgets) {
     let window = gtk4::ApplicationWindow::new(app);
     window.set_title(Some("Simple Task Manager"));
     // Publish the icon by *name*: X11 taskbars and Wayland docks resolve it
@@ -806,8 +808,13 @@ pub fn build_window(
             if changed {
                 restart_timer(&state_r, &rebuild_r, &graphs_r);
             }
-            sync_settings_widgets(&state_r, &check_w, &list_w, &rows_w);
-            rebuild_r();
+            let rebuilt_by_sync = sync_settings_widgets(&state_r, &check_w, &list_w, &rows_w);
+            // Exactly one rebuild per user action: when the sync flipped the
+            // check, its `toggled` handler already rebuilt — skip the second,
+            // stale pass.
+            if !rebuilt_by_sync {
+                rebuild_r();
+            }
         });
     }
 
@@ -832,27 +839,47 @@ pub fn build_window(
     // ---- Refresh timer ------------------------------------------------------------
     restart_timer(state, &rebuild, &graph_areas);
 
-    window
+    (window, settings)
 }
 
+/// Syncs the settings-popover widgets to the state's current settings
+/// (check state, selected refresh interval).
+///
+/// Returns `true` when the "show all" check had to be flipped: then the
+/// flip fired the check's `toggled` handler, which applied the change and
+/// already rebuilt the view — the caller must **not** rebuild again (a
+/// second pass would be stale: it would run against the list the first
+/// pass already rebuilt).
+///
+/// The shared `state` borrow is dropped before flipping the check, because
+/// the `toggled` handler takes `state.borrow_mut()` and GTK emits `toggled`
+/// synchronously from `set_active` — a borrow held across the flip would
+/// panic inside the signal.
 fn sync_settings_widgets(
     state: &Rc<RefCell<State>>,
     check: &gtk4::CheckButton,
     list: &gtk4::ListBox,
     rows: &[gtk4::ListBoxRow],
-) {
+) -> bool {
     let s = state.borrow();
-    if check.is_active() != s.settings.show_all {
-        check.set_active(s.settings.show_all);
-    }
+    let want_active = s.settings.show_all;
     let idx = RefreshInterval::ALL
         .iter()
         .position(|i| *i == s.settings.refresh)
         .unwrap_or(1);
+    drop(s);
+
+    let flipped = check.is_active() != want_active;
+    if flipped {
+        // Fires `toggled` (apply + rebuild) — see the function docs.
+        check.set_active(want_active);
+    }
+
     let already = list.selected_row().is_some_and(|r| r == rows[idx]);
     if !already {
         list.select_row(Some(&rows[idx]));
     }
+    flipped
 }
 
 fn load_css() {

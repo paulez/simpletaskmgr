@@ -393,7 +393,7 @@ fn test_refresh_cadence_one_per_tick() {
         let state = Rc::new(RefCell::new(simpletaskmgr::ui::State::with_settings_path(
             path.clone(),
         )));
-        let window = simpletaskmgr::ui::build_window(&app, &state);
+        let (window, _settings) = simpletaskmgr::ui::build_window(&app, &state);
         assert_eq!(
             state.borrow().refresh_count,
             1,
@@ -805,4 +805,48 @@ fn test_activate_duplicate_launch_presents_existing_window() {
         same_window,
         "a duplicate launch must present the existing window"
     );
+}
+
+/// A2 (reset double rebuild): with "show all processes" on, `Reset to
+/// defaults` must flip the check and rebuild the view **exactly once** —
+/// not once per flipped widget and once for the reset action itself, and
+/// not with the state double-borrowed (a `RefCell` panic inside the
+/// `toggled` signal) while syncing the check.
+#[test]
+fn test_reset_with_show_all_on_rebuilds_exactly_once() {
+    run_gtk(|| {
+        let app = gtk4::Application::builder().build();
+        let path = std::env::temp_dir().join(format!("stgm_reset_{}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let state = Rc::new(RefCell::new(simpletaskmgr::ui::State::with_settings_path(
+            path.clone(),
+        )));
+        let (window, settings) = simpletaskmgr::ui::build_window(&app, &state);
+
+        // User turns "show all" on: exactly one rebuild applies it.
+        settings.check.set_active(true);
+        assert!(
+            state.borrow().settings.show_all,
+            "toggling the check applies show_all",
+        );
+        let after_toggle = state.borrow().refresh_count;
+
+        // Reset from that state: flips the check back and rebuilds — and
+        // no more than that.
+        let _ = settings.reset.emit_by_name_with_values("clicked", &[]);
+        let after_reset = state.borrow().refresh_count;
+        assert!(
+            !state.borrow().settings.show_all,
+            "reset restores the default (off)",
+        );
+        assert!(!settings.check.is_active(), "reset syncs the check widget",);
+        assert_eq!(
+            after_reset,
+            after_toggle + 1,
+            "a reset performs exactly one rebuild, not one per widget plus one",
+        );
+
+        drop(window);
+        let _ = std::fs::remove_file(&path);
+    });
 }
