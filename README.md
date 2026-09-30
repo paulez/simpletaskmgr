@@ -32,8 +32,8 @@ time, and lets you inspect individual processes in a live detail pane.
   full **command line**, **state**
   (Running/Sleeping/…), **thread count**, **nice value**,
   **absolute resident memory** (RSS in a human unit), and its
-  **start time** with a running **uptime**. Click the same row again to
-  deselect it and hide the pane. Values the list row already
+  **start time** with a running **uptime**. Press `Escape` to deselect the process and
+  hide the pane. Values the list row already
   shows (PID, CPU%, MEM%, disk speed) stay in the list, keeping the pane
   compact enough to fit the default window. Unknown values (e.g. a kernel
   thread's command line) show a placeholder rather than a misleading zero.

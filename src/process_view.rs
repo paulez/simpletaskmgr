@@ -702,53 +702,37 @@ fn selected_name(selection: &gtk4::SingleSelection) -> String {
         .unwrap_or_default()
 }
 
-/// The re-click toggle (spec D7): record the current selection on press;
-/// after a real click (a `GestureClick` `released` is only a genuine
-/// press-then-release — a drag or scroll never counts) compare it with
-/// the selection *once the interaction has settled*. A click on *another*
-/// row changes the selection, so any post-click mismatch is GTK's own
-/// behaviour left alone; a post-click match means the click landed on
-/// the already selected row, which we then clear — the selection-notify
-/// path hides the detail pane and fires the app callback with `None`.
-/// The comparison runs on idle, so it happens after the single-selection
-/// gesture has finished processing the same click, whatever the ordering
-/// of the two handlers.
-fn install_reclick_toggle(column_view: &gtk4::ColumnView, selection: &gtk4::SingleSelection) {
-    let gesture = gtk4::GestureClick::new();
-    gesture.set_button(1); // GDK_BUTTON1
-    let prev = Rc::new(Cell::new(None::<i32>));
-
-    let prev_press = prev.clone();
-    let sel_press = selection.clone();
-    gesture.connect_pressed(move |_g, _n_press, _x, _y| {
-        prev_press.set(
-            sel_press
-                .selected_item()
-                .as_ref()
-                .and_then(|o| o.downcast_ref::<ViewRow>())
-                .map(|r| r.pid()),
-        );
-    });
-
-    let (prev_rel, sel_rel) = (prev.clone(), selection.clone());
-    gesture.connect_released(move |_g, _n_press, _x, _y| {
-        if let Some(p) = prev_rel.get() {
-            let sel = sel_rel.clone();
-            glib::idle_add_local(move || {
-                let cur = sel
-                    .selected_item()
-                    .as_ref()
-                    .and_then(|o| o.downcast_ref::<ViewRow>())
-                    .map(|r| r.pid());
-                if cur == Some(p) {
-                    sel.set_selected(u32::MAX); // clear (=NO_SELECTION)
-                }
-                glib::ControlFlow::Break
-            });
+/// Deselect on `Escape` (spec D7): clears the single selection — the
+/// selection-notify path then hides the detail pane and fires the app
+/// callback with `None`. The controller sits in the BUBBLE phase and
+/// bails while a full-value popover is open, so a popover (or a dialog)
+/// that closes on `Escape` gets the key first and we stay out of the
+/// way. (A re-click toggling the selection is unreachable from the
+/// view: GTK4's single-selection claims the row's click state inside
+/// the `ListBase`, so an outer list gesture for the same click never
+/// activates at all — the key is the deterministic route.)
+fn install_escape_deselect(
+    root: &gtk4::Box,
+    selection: &gtk4::SingleSelection,
+    detail: &DetailLabels,
+) {
+    let sel = selection.clone();
+    let d = detail.clone();
+    let ctrl = gtk4::EventControllerKey::new();
+    ctrl.set_propagation_phase(gtk4::PropagationPhase::Bubble);
+    ctrl.connect_key_pressed(move |_c, _hw_key, keyval, _state| {
+        if keyval == 65_307 /* GDK_KEY_Escape */
+            && !d.name_popover.is_visible()
+            && !d.command_popover.is_visible()
+            && sel.selected_item().is_some()
+        {
+            sel.set_selected(u32::MAX); // clear (=NO_SELECTION)
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
         }
     });
-
-    column_view.add_controller(gesture);
+    root.add_controller(ctrl);
 }
 
 /// Build the full-value popover for a bounded row (spec D6): a bounded
@@ -1132,10 +1116,8 @@ impl ProcessView {
             label.add_controller(gesture.clone());
         }
 
-        // D7: a second click on the already-selected row clears the
-        // selection and hides the detail pane (GTK keeps the single
-        // selection on a re-click, so the toggle is ours).
-        install_reclick_toggle(&column_view, &selection);
+        // D7: `Escape` clears the selection and hides the detail pane.
+        install_escape_deselect(&root, &selection, &detail);
 
         Self {
             root,
@@ -1228,14 +1210,13 @@ impl ProcessView {
         toggle_reveal(&self.detail, RevealField::Command, &self.selection)
     }
 
-    /// The re-click toggle (spec D7) for a known row: when `pid` is the
-    /// currently-selected process, clear the selection — which hides the
-    /// detail pane and fires the selection callback with `None`. A no-op
-    /// otherwise (test hook in the shape of the `toggle_full_*` methods;
-    /// the real click goes through [`install_reclick_toggle`]).
+    /// Clear the selection (spec D7) — hides the detail pane and fires
+    /// the selection callback with `None`. A no-op when nothing is
+    /// selected (test hook for the same action `Escape` performs; the
+    /// key itself cannot be driven headlessly).
     #[doc(hidden)]
-    pub fn toggle_row(&self, pid: i32) {
-        if self.selected_pid() == Some(pid) {
+    pub fn deselect(&self) {
+        if self.selection.selected_item().is_some() {
             self.selection.set_selected(u32::MAX); // clear (=NO_SELECTION)
         }
     }
