@@ -767,6 +767,26 @@ pub fn build_window(
         });
     }
 
+    // ---- TEMP DEBUG (deselect-trace): capture-phase key trace on the window ----
+    // REMOVE AFTER DIAGNOSIS. Logs every key the window's controller chain
+    // sees, plus the keyboard-focus target, in two visible places (stderr
+    // via `log`, and the detail pane's status line).
+    {
+        let win_dbg = window.clone();
+        let view_dbg = view.clone();
+        let dbg_ctl = gtk4::EventControllerKey::new();
+        dbg_ctl.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        dbg_ctl.connect_key_pressed(move |_c, _hw_key, keyval, state| {
+            let focus = gtk4::prelude::GtkWindowExt::focus(&win_dbg)
+                .map(|w| w.type_().to_string())
+                .unwrap_or_else(|| "<none>".to_string());
+            log::info!("DBG key=capture phase 0x{keyval:x} state=0x{state:x} focus={focus}");
+            view_dbg.set_status(&format!("DBG capture: key=0x{keyval:x} focus={focus}"));
+            glib::Propagation::Proceed
+        });
+        window.add_controller(dbg_ctl);
+    }
+
     // ---- Escape deselects (spec D7) --------------------------------------------
     // Attached to the *window*, not a subtree: the list rows are not
     // keyboard-focusable, so in the normal no-focus state the keyboard
@@ -778,14 +798,18 @@ pub fn build_window(
         let esc = gtk4::EventControllerKey::new();
         esc.set_propagation_phase(gtk4::PropagationPhase::Bubble);
         esc.connect_key_pressed(move |_c, _hw_key, keyval, _state| {
-            if keyval == 65_307
-            /* GDK_KEY_Escape */
-            {
+            if keyval == 65_307 {
                 let d = view_e.detail_labels();
-                if !d.name_popover.is_visible()
-                    && !d.command_popover.is_visible()
-                    && view_e.selected_pid().is_some()
-                {
+                let popover_open = d.name_popover.is_visible() || d.command_popover.is_visible();
+                let has_selection = view_e.selected_pid().is_some();
+                // TEMP DEBUG (deselect-trace): why did the guard pass/fail?
+                log::info!(
+                    "DBG key=bubble escape popover_open={popover_open} selected={has_selection}"
+                );
+                view_e.set_status(&format!(
+                    "DBG bubble: escape popover_open={popover_open} selected={has_selection}"
+                ));
+                if !popover_open && has_selection {
                     view_e.deselect();
                     return glib::Propagation::Stop;
                 }
