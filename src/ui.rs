@@ -807,7 +807,9 @@ pub fn build_window(
                 let popover_open = d.name_popover.is_visible() || d.command_popover.is_visible();
                 let has_selection = view_e.selected_pid().is_some();
                 // TEMP DEBUG (deselect-trace): why did the guard pass/fail?
-                log::error!("DBG key=bubble escape popover_open={popover_open} selected={has_selection}");
+                log::error!(
+                    "DBG key=bubble escape popover_open={popover_open} selected={has_selection}"
+                );
                 let dbg_bub = format!(
                     "DBG bubble: escape popover_open={popover_open} selected={has_selection}"
                 );
