@@ -776,14 +776,14 @@ pub fn build_window(
         let view_dbg = view.clone();
         let dbg_ctl = gtk4::EventControllerKey::new();
         dbg_ctl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        dbg_ctl.connect_key_pressed(move |_c, _hw_key, keyval, state| {
+        dbg_ctl.connect_key_pressed(move |_c, keyval, _keycode, state| {
+            use glib::translate::IntoGlib;
+            let kv = keyval.into_glib();
             let focus = gtk4::prelude::GtkWindowExt::focus(&win_dbg)
                 .map(|w| w.type_().to_string())
                 .unwrap_or_else(|| "<none>".to_string());
-            // `error!` so it prints at the default Warn level too, AND in the
-            // window title so it cannot be missed in any UI/log configuration.
-            log::error!("DBG key=capture 0x{keyval:x} state=0x{state:x} focus={focus}");
-            let dbg_title = format!("DBG key 0x{keyval:x} state=0x{state:x} focus={focus}");
+            log::error!("DBG key=capture keyval=0x{kv:x} state=0x{state:x} focus={focus}");
+            let dbg_title = format!("DBG key=0x{kv:x} state=0x{state:x} focus={focus}");
             win_dbg.set_title(Some(&dbg_title));
             view_dbg.set_status(&dbg_title);
             glib::Propagation::Proceed
@@ -801,8 +801,9 @@ pub fn build_window(
         let view_e = view.clone();
         let esc = gtk4::EventControllerKey::new();
         esc.set_propagation_phase(gtk4::PropagationPhase::Bubble);
-        esc.connect_key_pressed(move |_c, _hw_key, keyval, _state| {
-            if keyval == 65_307 {
+        esc.connect_key_pressed(move |_c, keyval, _keycode, _state| {
+            use glib::translate::IntoGlib;
+            if keyval.into_glib() == 65_307 {
                 let d = view_e.detail_labels();
                 let popover_open = d.name_popover.is_visible() || d.command_popover.is_visible();
                 let has_selection = view_e.selected_pid().is_some();
