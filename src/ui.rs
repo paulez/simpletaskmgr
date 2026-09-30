@@ -767,37 +767,13 @@ pub fn build_window(
         });
     }
 
-    // ---- TEMP DEBUG (deselect-trace): capture-phase key trace on the window ----
-    // REMOVE AFTER DIAGNOSIS. Logs every key the window's controller chain
-    // sees, plus the keyboard-focus target, in two visible places (stderr
-    // via `log`, and the detail pane's status line).
-    {
-        let win_dbg = window.clone();
-        let view_dbg = view.clone();
-        let dbg_ctl = gtk4::EventControllerKey::new();
-        dbg_ctl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        dbg_ctl.connect_key_pressed(move |_c, keyval, _keycode, state| {
-            use glib::translate::IntoGlib;
-            let kv = keyval.into_glib();
-            let focus = gtk4::prelude::GtkWindowExt::focus(&win_dbg)
-                .map(|w| w.type_().to_string())
-                .unwrap_or_else(|| "<none>".to_string());
-            log::error!("DBG key=capture keyval=0x{kv:x} state=0x{state:x} focus={focus}");
-            let dbg_title = format!("DBG key=0x{kv:x} state=0x{state:x} focus={focus}");
-            win_dbg.set_title(Some(&dbg_title));
-            view_dbg.set_status(&dbg_title);
-            glib::Propagation::Proceed
-        });
-        window.add_controller(dbg_ctl);
-    }
-
     // ---- Escape deselects (spec D7) --------------------------------------------
     // Attached to the *window* in the CAPTURE phase. (Not BUBBLE: a measured
-    // run with focus on the header button showed the window's capture
-    // controller fires while its bubble controller never does — the
-    // toplevel's own bubble controllers are not visited when the event
-    // target is a descendant.) BUBBLE phase plus the popover guard would
-    // keep an open full-value popover on `Escape`'s business first.
+    // live run with focus on the header button showed the window's capture
+    // controller fires while its bubble controller never does — the toplevel's
+    // own bubble controllers are not visited when the event target is a
+    // descendant.) An open full-value popover claims `Escape` (GTK closes it
+    // first), so the popover guard proceeds for GTK's default handling.
     {
         let view_e = view.clone();
         let esc = gtk4::EventControllerKey::new();
@@ -807,16 +783,7 @@ pub fn build_window(
             if keyval.into_glib() == 65_307 {
                 let d = view_e.detail_labels();
                 let popover_open = d.name_popover.is_visible() || d.command_popover.is_visible();
-                let has_selection = view_e.selected_pid().is_some();
-                // TEMP DEBUG (deselect-trace): why did the guard pass/fail?
-                log::error!(
-                    "DBG key=bubble escape popover_open={popover_open} selected={has_selection}"
-                );
-                let dbg_bub = format!(
-                    "DBG bubble: escape popover_open={popover_open} selected={has_selection}"
-                );
-                view_e.set_status(&dbg_bub);
-                if !popover_open && has_selection {
+                if !popover_open && view_e.selected_pid().is_some() {
                     view_e.deselect();
                     return glib::Propagation::Stop;
                 }
