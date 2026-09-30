@@ -63,7 +63,13 @@ The data layer (`process.rs`, `process_list.rs`, `cpu_tracker.rs`,
 | D4 | The selected PID is queryable (`selected_pid()`) and selection changes are observable via a callback — so the app can attach actions (e.g. sending a signal, deferred) without owning the detail pane. |
 | D5 | **Signal buttons**: the detail pane offers `Terminate` (SIGTERM) and `Kill` (SIGKILL) for the selected process. The view sends no signal itself — it forwards the requested signal to the app (one callback), which performs `D4`'s send via `State::kill` and reports the outcome in the pane's status line. Originally deferred (SIGHUP/SIGKILL were out of scope); implemented for 1.0.0. |
 | D6 | **Full-value popovers**: the `Name` and `Command` rows show long values as a single bounded (ellipsized) line; a single click on one of them toggles a popover anchored to that row revealing the selected process' full name — respectively, full command line — in a read-only, copyable, scrollable text view that wraps very long tokens mid-word. The popover is **the** way to see the full value: the rows have no hover tooltip (a popover makes it redundant) and are *not* selectable — a selectable `GtkLabel` installs its own exclusive click gesture that would suppress the toggle; copy happens on the popover's text. A popover stays open while refreshes re-apply the same selected process (it tracks its revealed PID) and closes when the selection moves to a different process or is cleared. |
-| D7 | **Deselect**: press `Escape` with a process selected — the selection is cleared, the detail pane hides (D3), and the (D4) callback fires with `None`. A re-click of the selected row was the original ask, but it is unreachable from the view: GTK4's single-selection claims the row's click state inside the `ListBase`, so the view's own click gesture for the same click is never activated — the key is the deterministic route. The handler is a BUBBLE-phase key controller, so a full-value popover (or a dialog) that closes on `Escape` gets the key first; with a popover open the key stays with the popover. |
+| D7 | **Deselect**: press `Escape` with a process selected — the selection is cleared, the detail pane hides (D3), and the (D4) callback fires with `None`. A re-click of the selected row was the original ask, but it is unreachable from the view: GTK4's single-selection claims the row's click state inside the `ListBase`, so the view's own click gesture for the same click is never activated — the key is the deterministic route. The view exposes `deselect()`; the
+app installs the handler as a BUBBLE-phase key controller **on the
+window** — the list rows are not keyboard-focusable, so in the
+no-focus state the keyboard event targets the window itself, and a
+subtree controller would never see it. With a full-value popover open
+the key stays with the popover (it closes first); the guard re-checks
+popover visibility regardless. |
 
 ### B — Robustness
 

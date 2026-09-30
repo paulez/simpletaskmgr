@@ -767,6 +767,34 @@ pub fn build_window(
         });
     }
 
+    // ---- Escape deselects (spec D7) --------------------------------------------
+    // Attached to the *window*, not a subtree: the list rows are not
+    // keyboard-focusable, so in the normal no-focus state the keyboard
+    // event targets the window itself, and bubble-phase controllers only
+    // visit the target's *ancestors*. BUBBLE phase plus the popover guard
+    // keep an open full-value popover on `Escape`'s business first.
+    {
+        let view_e = view.clone();
+        let esc = gtk4::EventControllerKey::new();
+        esc.set_propagation_phase(gtk4::PropagationPhase::Bubble);
+        esc.connect_key_pressed(move |_c, _hw_key, keyval, _state| {
+            if keyval == 65_307
+            /* GDK_KEY_Escape */
+            {
+                let d = view_e.detail_labels();
+                if !d.name_popover.is_visible()
+                    && !d.command_popover.is_visible()
+                    && view_e.selected_pid().is_some()
+                {
+                    view_e.deselect();
+                    return glib::Propagation::Stop;
+                }
+            }
+            glib::Propagation::Proceed
+        });
+        window.add_controller(esc);
+    }
+
     // ---- Signal buttons -> State::kill (spec D5) --------------------------------
     // The detail pane forwards its button clicks with the requested signal;
     // the app sends it to `selected_pid` and reports the outcome in the

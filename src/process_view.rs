@@ -702,39 +702,6 @@ fn selected_name(selection: &gtk4::SingleSelection) -> String {
         .unwrap_or_default()
 }
 
-/// Deselect on `Escape` (spec D7): clears the single selection — the
-/// selection-notify path then hides the detail pane and fires the app
-/// callback with `None`. The controller sits in the BUBBLE phase and
-/// bails while a full-value popover is open, so a popover (or a dialog)
-/// that closes on `Escape` gets the key first and we stay out of the
-/// way. (A re-click toggling the selection is unreachable from the
-/// view: GTK4's single-selection claims the row's click state inside
-/// the `ListBase`, so an outer list gesture for the same click never
-/// activates at all — the key is the deterministic route.)
-fn install_escape_deselect(
-    root: &gtk4::Box,
-    selection: &gtk4::SingleSelection,
-    detail: &DetailLabels,
-) {
-    let sel = selection.clone();
-    let d = detail.clone();
-    let ctrl = gtk4::EventControllerKey::new();
-    ctrl.set_propagation_phase(gtk4::PropagationPhase::Bubble);
-    ctrl.connect_key_pressed(move |_c, _hw_key, keyval, _state| {
-        if keyval == 65_307 /* GDK_KEY_Escape */
-            && !d.name_popover.is_visible()
-            && !d.command_popover.is_visible()
-            && sel.selected_item().is_some()
-        {
-            sel.set_selected(u32::MAX); // clear (=NO_SELECTION)
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
-        }
-    });
-    root.add_controller(ctrl);
-}
-
 /// Build the full-value popover for a bounded row (spec D6): a bounded
 /// (scrolled) text view with the value, read-only but selectable (hence
 /// copyable), wrapping very long tokens mid-word so nothing can stretch
@@ -1116,9 +1083,9 @@ impl ProcessView {
             label.add_controller(gesture.clone());
         }
 
-        // D7: `Escape` clears the selection and hides the detail pane.
-        install_escape_deselect(&root, &selection, &detail);
-
+        // D7: `Escape` deselects — wired on the *window* (see `ui.rs`),
+        // since the rows are not keyboard-focusable and key events target
+        // the window in the no-focus state.
         Self {
             root,
             column_view,
