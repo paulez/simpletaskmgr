@@ -792,15 +792,16 @@ pub fn build_window(
     }
 
     // ---- Escape deselects (spec D7) --------------------------------------------
-    // Attached to the *window*, not a subtree: the list rows are not
-    // keyboard-focusable, so in the normal no-focus state the keyboard
-    // event targets the window itself, and bubble-phase controllers only
-    // visit the target's *ancestors*. BUBBLE phase plus the popover guard
+    // Attached to the *window* in the CAPTURE phase. (Not BUBBLE: a measured
+    // run with focus on the header button showed the window's capture
+    // controller fires while its bubble controller never does — the
+    // toplevel's own bubble controllers are not visited when the event
+    // target is a descendant.) BUBBLE phase plus the popover guard would
     // keep an open full-value popover on `Escape`'s business first.
     {
         let view_e = view.clone();
         let esc = gtk4::EventControllerKey::new();
-        esc.set_propagation_phase(gtk4::PropagationPhase::Bubble);
+        esc.set_propagation_phase(gtk4::PropagationPhase::Capture);
         esc.connect_key_pressed(move |_c, keyval, _keycode, _state| {
             use glib::translate::IntoGlib;
             if keyval.into_glib() == 65_307 {
