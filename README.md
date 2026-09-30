@@ -156,8 +156,20 @@ a sandboxed Flatpak build.
   ./simpletaskmgr-<version>-x86_64-linux/simpletaskmgr
   ```
 
-- **From crates.io** — compile from source with `cargo install simpletaskmgr`
-  (needs the build dependencies above).
+- **From crates.io** — compile from source (needs the build dependencies
+  above). Once a stable version is published:
+
+  ```bash
+  cargo install simpletaskmgr
+  ```
+
+  While only beta versions exist, a plain `cargo install` finds no version
+  (its default `*` requirement skips prereleases), so pass the version
+  explicitly, e.g.:
+
+  ```bash
+  cargo install simpletaskmgr --version 1.0.0-beta.3
+  ```
 
 ## Settings
 
