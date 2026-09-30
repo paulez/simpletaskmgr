@@ -157,7 +157,14 @@ impl ProcessList {
                 let stat = match proc.stat() {
                     Ok(s) => s,
                     Err(e) => {
-                        warn!("Can't read stat for pid {}: {e:?}", proc.pid());
+                        // Normal race: the process left /proc between the
+                        // `all_processes` listing and this `stat` read (short
+                        // lived helpers, kernel threads churning, …). Log it
+                        // at `debug!` the way the other benign per-pid races
+                        // here are; a flood of these is surfaced by the single
+                        // `failed` counter above only when enumeration itself
+                        // degrades.
+                        debug!("Can't read stat for pid {}: {e:?}", proc.pid());
                         return None;
                     }
                 };
