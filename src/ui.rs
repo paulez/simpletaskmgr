@@ -780,8 +780,12 @@ pub fn build_window(
             let focus = gtk4::prelude::GtkWindowExt::focus(&win_dbg)
                 .map(|w| w.type_().to_string())
                 .unwrap_or_else(|| "<none>".to_string());
-            log::info!("DBG key=capture phase 0x{keyval:x} state=0x{state:x} focus={focus}");
-            view_dbg.set_status(&format!("DBG capture: key=0x{keyval:x} focus={focus}"));
+            // `error!` so it prints at the default Warn level too, AND in the
+            // window title so it cannot be missed in any UI/log configuration.
+            log::error!("DBG key=capture 0x{keyval:x} state=0x{state:x} focus={focus}");
+            let dbg_title = format!("DBG key 0x{keyval:x} state=0x{state:x} focus={focus}");
+            win_dbg.set_title(Some(&dbg_title));
+            view_dbg.set_status(&dbg_title);
             glib::Propagation::Proceed
         });
         window.add_controller(dbg_ctl);
@@ -803,12 +807,11 @@ pub fn build_window(
                 let popover_open = d.name_popover.is_visible() || d.command_popover.is_visible();
                 let has_selection = view_e.selected_pid().is_some();
                 // TEMP DEBUG (deselect-trace): why did the guard pass/fail?
-                log::info!(
-                    "DBG key=bubble escape popover_open={popover_open} selected={has_selection}"
-                );
-                view_e.set_status(&format!(
+                log::error!("DBG key=bubble escape popover_open={popover_open} selected={has_selection}");
+                let dbg_bub = format!(
                     "DBG bubble: escape popover_open={popover_open} selected={has_selection}"
-                ));
+                );
+                view_e.set_status(&dbg_bub);
                 if !popover_open && has_selection {
                     view_e.deselect();
                     return glib::Propagation::Stop;
