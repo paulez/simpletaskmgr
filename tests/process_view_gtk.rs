@@ -492,6 +492,63 @@ fn test_process_view_refresh_selection_detail() {
     });
 }
 
+/// Re-click toggle (spec D7): a second click on the already-selected row
+/// deselects it, hides the detail pane, and fires the callback with
+/// `None`; clicking a *different* (unselected) row is GTK's own
+/// selection behaviour and must leave the existing selection alone; the
+/// toggle works repeatedly.
+#[test]
+fn test_reclick_selected_row_deselects() {
+    run_gtk(|| {
+        let pv = ProcessView::new();
+        let events = Rc::new(RefCell::new(Vec::<Option<i32>>::new()));
+        let ev = events.clone();
+        pv.connect_selection_changed(move |sel| {
+            ev.borrow_mut().push(sel);
+        });
+        let a = item(100, 60);
+        let b = item(200, 30);
+        pv.update(&[a.clone(), b.clone()]);
+        assert_eq!(pv.display_order(), vec![100, 200]);
+
+        // First click selects pid 100; the pane is up.
+        pv.selection().set_selected(0);
+        assert_eq!(pv.selected_pid(), Some(100));
+        assert!(pv.detail_labels().pane.is_visible());
+        events.borrow_mut().clear();
+
+        // Re-click the selected row: deselect, hide the pane, fire `None`.
+        pv.toggle_row(100);
+        assert!(pv.selected_pid().is_none(), "re-click deselects (D7)");
+        assert!(
+            !pv.detail_labels().pane.is_visible(),
+            "deselect hides the detail pane"
+        );
+        assert!(
+            events.borrow().last() == Some(&None),
+            "re-click fires the callback with None"
+        );
+
+        // A click on the *other* (unselected) row is a plain selection:
+        // the existing selection is left for GTK to change.
+        pv.selection().set_selected(0); // pid 100 again
+        events.borrow_mut().clear();
+        pv.toggle_row(200);
+        assert_eq!(
+            pv.selected_pid(),
+            Some(100),
+            "clicking a different row leaves the selection alone"
+        );
+        assert!(pv.detail_labels().pane.is_visible());
+
+        // The toggle works every time.
+        pv.toggle_row(100);
+        assert!(pv.selected_pid().is_none(), "re-click deselects again");
+        assert!(!pv.detail_labels().pane.is_visible());
+        assert!(events.borrow().last() == Some(&None));
+    });
+}
+
 /// Refresh cadence (guards a past double-refresh regression): with the real
 /// production wiring — `ui::build_window`, including the app's own 1.5 s
 /// `glib::timeout` — the initial build performs exactly one

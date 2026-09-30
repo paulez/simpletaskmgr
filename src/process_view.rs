@@ -702,6 +702,55 @@ fn selected_name(selection: &gtk4::SingleSelection) -> String {
         .unwrap_or_default()
 }
 
+/// The re-click toggle (spec D7): record the current selection on press;
+/// after a real click (a `GestureClick` `released` is only a genuine
+/// press-then-release — a drag or scroll never counts) compare it with
+/// the selection *once the interaction has settled*. A click on *another*
+/// row changes the selection, so any post-click mismatch is GTK's own
+/// behaviour left alone; a post-click match means the click landed on
+/// the already selected row, which we then clear — the selection-notify
+/// path hides the detail pane and fires the app callback with `None`.
+/// The comparison runs on idle, so it happens after the single-selection
+/// gesture has finished processing the same click, whatever the ordering
+/// of the two handlers.
+fn install_reclick_toggle(column_view: &gtk4::ColumnView, selection: &gtk4::SingleSelection) {
+    let gesture = gtk4::GestureClick::new();
+    gesture.set_button(1); // GDK_BUTTON1
+    let prev = Rc::new(Cell::new(None::<i32>));
+
+    let prev_press = prev.clone();
+    let sel_press = selection.clone();
+    gesture.connect_pressed(move |_g, _n_press, _x, _y| {
+        prev_press.set(
+            sel_press
+                .selected_item()
+                .as_ref()
+                .and_then(|o| o.downcast_ref::<ViewRow>())
+                .map(|r| r.pid()),
+        );
+    });
+
+    let (prev_rel, sel_rel) = (prev.clone(), selection.clone());
+    gesture.connect_released(move |_g, _n_press, _x, _y| {
+        if let Some(p) = prev_rel.get() {
+            let sel = sel_rel.clone();
+            glib::idle_add_local(move || {
+                let cur = sel
+                    .selected_item()
+                    .as_ref()
+                    .and_then(|o| o.downcast_ref::<ViewRow>())
+                    .map(|r| r.pid());
+                if cur == Some(p) {
+                    sel.set_selected(u32::MAX); // clear (=NO_SELECTION)
+                }
+                glib::ControlFlow::Break
+            });
+        }
+    });
+
+    column_view.add_controller(gesture);
+}
+
 /// Build the full-value popover for a bounded row (spec D6): a bounded
 /// (scrolled) text view with the value, read-only but selectable (hence
 /// copyable), wrapping very long tokens mid-word so nothing can stretch
@@ -1083,6 +1132,11 @@ impl ProcessView {
             label.add_controller(gesture.clone());
         }
 
+        // D7: a second click on the already-selected row clears the
+        // selection and hides the detail pane (GTK keeps the single
+        // selection on a re-click, so the toggle is ours).
+        install_reclick_toggle(&column_view, &selection);
+
         Self {
             root,
             column_view,
@@ -1172,6 +1226,18 @@ impl ProcessView {
     /// performs.
     pub fn toggle_full_command(&self) {
         toggle_reveal(&self.detail, RevealField::Command, &self.selection)
+    }
+
+    /// The re-click toggle (spec D7) for a known row: when `pid` is the
+    /// currently-selected process, clear the selection — which hides the
+    /// detail pane and fires the selection callback with `None`. A no-op
+    /// otherwise (test hook in the shape of the `toggle_full_*` methods;
+    /// the real click goes through [`install_reclick_toggle`]).
+    #[doc(hidden)]
+    pub fn toggle_row(&self, pid: i32) {
+        if self.selected_pid() == Some(pid) {
+            self.selection.set_selected(u32::MAX); // clear (=NO_SELECTION)
+        }
     }
 
     /// Start the first paint at the top of the list (spec R3 initial state).
