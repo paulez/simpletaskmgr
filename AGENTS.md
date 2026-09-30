@@ -97,6 +97,7 @@ leaves the tree uncommitted, which the user cannot pull or test.
 - Validate logic with tests (do not run the app to confirm behavior); use the
   **Graphical Verification** section only to eyeball layout/UI changes
 - Always update README.md when adding/modifying features
+- Never kill a cargo build mid-flight (`timeout`, `pkill`, Ctrl-C during a compile): a half-written `target/` can make the next build falsely "Fresh" and run a stale binary.
 
 ## GUI Visual Validation (GTK / Wayland)
 
