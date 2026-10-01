@@ -59,14 +59,16 @@ time, and lets you inspect individual processes in a live detail pane.
   `/proc/diskstats` — no `iostat`/`sysstat` dependency. Partitions and virtual
   devices are filtered out, and on a host with no physical disk the tab simply
   reads empty rather than erroring.
-- **GPU tab**: when an AMD GPU is present and readable via `rocm-smi`,
-  a tab switch above the charts shows GPU utilization, VRAM allocation,
-  and edge temperature alongside the CPU readings (the tab is hidden
-  entirely when no GPU is detected).
+- **GPU tab**: when an AMD GPU is present and readable through the
+  `amdgpu` sysfs interface (with `rocm-smi` as a fallback), a tab switch
+  above the charts shows GPU utilization, VRAM allocation, and edge
+  temperature alongside the CPU readings (the tab is hidden entirely when
+  no GPU is detected).
 - **Persistent settings**: filter and refresh interval survive restarts
   (Settings popover).
 - **Native & light**: GTK 4 UI; CPU, memory, and disk I/O are read directly
-  from `/proc` — only the optional GPU tab needs `rocm-smi`.
+  from `/proc`, and the GPU tab reads the `amdgpu` sysfs interface — no
+  external metrics tool is required.
 
 ## Requirements
 
@@ -74,9 +76,10 @@ time, and lets you inspect individual processes in a live detail pane.
 - Linux operating system (uses `/proc`)
 - GTK 4.18 or later (development headers required: `libgtk-4-dev`,
   `libglib2.0-dev`, `libpango1.0-dev`, `libcairo2-dev` on Debian/Ubuntu)
-- *(optional, for the GPU tab)* `rocm-smi` on `PATH` and an AMD GPU.
-  Without it the GPU tab simply doesn't appear; the rest of the app
-  works unchanged.
+- *(optional, for the GPU tab)* an AMD GPU exposed through the `amdgpu`
+  driver. `rocm-smi` on `PATH` works as a fallback if the sysfs
+  attributes are unavailable. Without an AMD GPU the tab simply doesn't
+  appear; the rest of the app works unchanged.
 
 ## Building
 

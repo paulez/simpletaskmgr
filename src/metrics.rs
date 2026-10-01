@@ -28,13 +28,14 @@ pub struct Sample {
     /// CPU temperature in °C read from the CPU's `hwmon` sensor, or `None`
     /// when no CPU sensor is available.
     pub temp: Option<f64>,
-    /// GPU utilization percent (0–100) read from `rocm-smi` `card0`, or
-    /// `None` when no GPU is available.
+    /// GPU utilization percent (0–100) read from the representative `card0`
+    /// (amdgpu sysfs, or `rocm-smi` as fallback), or `None` when no GPU is
+    /// available.
     pub gpu_use: Option<f64>,
-    /// GPU VRAM allocation percent (0–100) read from `rocm-smi` `card0`, or
+    /// GPU VRAM allocation percent (0–100) read from the same source, or
     /// `None` when no GPU is available.
     pub gpu_vram: Option<f64>,
-    /// GPU edge temperature in °C read from `rocm-smi` `card0`, or `None`
+    /// GPU edge temperature in °C read from the same source, or `None`
     /// when no GPU is available.
     pub gpu_temp: Option<f64>,
     /// Per-physical-disk read/write throughput and utilization for this
@@ -274,7 +275,7 @@ impl SystemMetrics {
     /// zero spuriously. The three GPU fields are likewise carried forward from
     /// the previous sample when `gpu` is `None` — for the first call the value
     /// is `None`, and the caller on a host with no GPU can keep skipping the
-    /// `rocm-smi` spawn by passing `None` every tick (see
+    /// per-tick GPU read by passing `None` every tick (see
     /// [`crate::gpu_status::gpu_available`]).
     ///
     /// The per-disk reading (read/write bytes-per-second and utilization) is
@@ -303,8 +304,8 @@ impl SystemMetrics {
             None => prev.as_ref().and_then(|s| s.temp),
         };
         // GPU: same carry-over rule as freq/temp. On a host with no GPU the
-        // caller keeps passing `None` (and never spawns rocm-smi), so the
-        // fields stay `None` for the lifetime of the session.
+        // caller keeps passing `None` (and never performs a per-tick GPU read),
+        // so the fields stay `None` for the lifetime of the session.
         let (gpu_use, gpu_vram, gpu_temp) = match gpu {
             Some(g) => (Some(g.use_pct), Some(g.vram_pct), Some(g.temp_c)),
             None => (

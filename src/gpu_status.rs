@@ -10,10 +10,11 @@
 //! - the `amdgpu` sysfs interface (`/sys/class/drm/cardN/device`) — plain
 //!   stat files and a hwmon temperature probe, no subprocess at all.
 //!
-//! [`read_gpu_card`] tries the `rocm-smi` backend first and falls back to
-//! sysfs when it fails. Every read degrades gracefully to `None` on a host
-//! without a readable AMD GPU, so the UI can hide its tab and the sampler
-//! can carry the previous reading forward.
+//! [`read_gpu_card`] prefers the sysfs backend (instant, no subprocess) and
+//! falls back to `rocm-smi` (bounded spawn, JSON parse) when the `amdgpu`
+//! sysfs attributes are unavailable. Every read degrades gracefully to
+//! `None` on a host without a readable AMD GPU, so the UI can hide its tab
+//! and the sampler can carry the previous reading forward.
 
 use std::path::{Path, PathBuf};
 
@@ -296,17 +297,17 @@ fn read_temp_input(hwmon: &Path) -> Option<f64> {
         .find_map(|e| read_sysfs_value(hwmon, e.file_name().to_str().unwrap()).map(to_c))
 }
 
-/// Reads the representative GPU sample, trying the `rocm-smi` backend first
-/// and falling back to `amdgpu` sysfs (which needs no external binary) when
-/// it fails. Returns `None` on hosts without a readable AMD GPU — a normal,
-/// expected condition. A `rocm-smi` that wedges past `ROCSMI_TIMEOUT` is
-/// killed and falls through to sysfs the same way as any other failure.
+/// Reads the representative GPU sample from the `amdgpu` `sysfs` interface
+/// by default — instant, no subprocess. If those attributes are
+/// unavailable (driver without them, attributes masked, …), falls back to
+/// the `rocm-smi` backend (utilization, VRAM, and edge temperature). Returns
+/// `None` on hosts without a readable AMD GPU — a normal, expected condition.
 /// Used both by the per-sample `push_sample` and by the startup probe
 /// (`gpu_available`).
 pub fn read_gpu_card() -> Option<GpuSample> {
-    match read_rocm_smi() {
+    match read_gpu_sysfs() {
         Some(s) => Some(s),
-        None => read_gpu_sysfs(),
+        None => read_rocm_smi(),
     }
 }
 
@@ -349,7 +350,7 @@ fn read_rocm_smi() -> Option<GpuSample> {
 }
 
 /// Whether a GPU is available *for us to sample* — i.e. at least one backend
-/// (`rocm-smi` or the `amdgpu` sysfs interface) reports a readable card.
+/// (`amdgpu` sysfs by default, `rocm-smi` as fallback) reports a readable card.
 /// Called exactly once at startup by the UI: when `false` the UI hides the
 /// GPU tab and the sampler skips the per-tick reads entirely.
 ///

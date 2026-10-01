@@ -73,10 +73,11 @@ pub struct State {
     /// launch from `/proc/meminfo` `MemTotal`. The fallback (16 GB) covers
     /// hosts where `/proc/meminfo` is unavailable.
     pub mem_max_mb: f64,
-    /// `true` when a GPU is present and readable via `rocm-smi` (probed once
-    /// at startup). When `false`, the UI hides its tab entirely and the
-    /// per-tick sampler skips the `rocm-smi` spawn, and `push_sample`
-    /// receives `None` to carry over the (never-set) GPU fields.
+    /// `true` when a GPU is present and readable through the GPU backends
+    /// (amdgpu sysfs, with `rocm-smi` as fallback; probed once at startup).
+    /// When `false`, the UI hides its tab entirely and the per-tick sampler
+    /// skips the GPU read, and `push_sample` receives `None` to carry over
+    /// the (never-set) GPU fields.
     pub gpu_available: bool,
 }
 
@@ -126,10 +127,11 @@ impl State {
     /// tests point this at a temporary path so they never touch the real
     /// configuration file.
     ///
-    /// On a GPU host this probes `rocm-smi` once and samples it; on a
-    /// non-GPU host the probe degrades to no spawn. The probe is the only
-    /// unit-test cost of `State` that involves an external binary, and the
-    /// `/proc/[pid]` walk in `ProcessList::init()` is the one expensive live
+    /// On a GPU host this probes the GPU backends once and samples them;
+    /// on a non-GPU host the probe degrades cleanly (the sysfs path is
+    /// unit-testable; only the `rocm-smi` fallback spawns an external
+    /// binary). The `/proc/[pid]` walk in `ProcessList::init()` is the
+    /// other expensive live
     /// I/O call — both are exercised by integration tests, not unit tests
     /// (see `tests/integration_tests.rs`).
     pub fn with_settings_path(path: std::path::PathBuf) -> Self {
@@ -160,7 +162,7 @@ impl State {
     }
 
     /// Test-safe constructor: builds a `State` around a **fixed** process
-    /// list (fixture data) so **no** `rocm-smi` spawn occurs **and no live
+    /// list (fixture data) so **no** GPU backend read occurs **and no live
     /// `/proc/[pid]` walk** happens at construction time — `processes` is
     /// populated directly from `items`, not from the live filesystem.
     ///
@@ -209,12 +211,12 @@ impl State {
     pub fn refresh(&mut self) {
         self.refresh_count += 1;
         self.process_list.update_process_list();
-        // Per-tick GPU read. On non-GPU hosts (rocm-smi absent or no card0)
-        // the startup probe already determined `gpu_available == false`, so
-        // we skip the spawn entirely rather than burning a fork/exec we know
-        // will fail. On GPU hosts we spawn and pass the result; `push_sample`
-        // carries the previous reading forward when the spawn fails, so a
-        // momentary `rocm-smi` hiccup doesn't blank the series (same rule as
+        // Per-tick GPU read. On non-GPU hosts (no readable card) the
+        // startup probe already determined `gpu_available == false`, so we
+        // skip the read entirely rather than burning work we know will fail.
+        // On GPU hosts we read and pass the result; `push_sample` carries
+        // the previous reading forward when the read fails, so a momentary
+        // backend hiccup doesn't blank the series (same rule as
         // `freq`/`temp`).
         let gpu = self
             .gpu_available
@@ -527,9 +529,7 @@ fn build_cpu_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::Draw
 }
 
 /// Builds the GPU usage-graph row, following the same two-pane layout as
-/// [`build_cpu_graph_row`] but for `rocm-smi` readings. The left pane draws
-/// GPU utilization + VRAM (two percent series); the right pane draws the
-/// GPU's edge temperature (single auto-scaled °C series). Both read the same
+/// [`build_cpu_graph_row`] but for the GPU readings.
 /// rolling history as the CPU tab and are redrawn in the same tick so the
 /// data is always fresh when the user switches between the two tabs.
 fn build_gpu_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::DrawingArea>) {
@@ -634,7 +634,7 @@ fn build_settings_popover() -> SettingsWidgets {
 /// so a second launch from the terminal is not a new process: the toolkit
 /// forwards it to the running one and fires the `activate` handler again.
 /// Without a guard, that rebuild produces a second state with its own
-/// refresh timer, `rocm-smi` spawns and settings writes — and a second
+/// refresh timer, GPU backend reads and settings writes — and a second
 /// window. This registry remembers the one main window so a duplicate
 /// `activate` just presents it.
 #[derive(Clone)]

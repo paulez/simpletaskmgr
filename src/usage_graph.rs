@@ -700,8 +700,8 @@ pub fn cpu_mem_readout(cpu: f64, mem: f64, mem_max_mb: f64) -> String {
 
 /// The live readout for the GPU Use & VRAM pane header: `Use 12% · Vram 97%`.
 /// `use_pct`/`vram_pct` are percents (0–100) as stored in [`Sample`]; both
-/// are percents (not scaled to a byte axis) so the header is the literal
-/// `rocm-smi` values the user is looking at. `None` values (no GPU) read as
+/// both are percents (not scaled to a byte axis) so the header is the literal
+/// GPU values the user is looking at. `None` values (no GPU) read as
 /// `"-"` so a missing reading never reads as `0`.
 pub fn gpu_use_vram_readout(use_pct: Option<f64>, vram_pct: Option<f64>) -> String {
     let use_lbl = use_pct
@@ -1165,7 +1165,7 @@ pub fn paint_usage_chart(
         }
         // GpuUseVram: left = GPU Use (front, % axis 0–100); right = GPU VRAM
         // (back, % axis 0–100). Both are 0-anchored percents, exactly the
-        // `rocm-smi` numbers the user is looking at.
+        // GPU numbers the user is looking at.
         ChartPane::GpuUseVram => {
             let use_vals: Vec<Option<f64>> = samples.iter().map(|s| s.gpu_use).collect();
             let vram_vals: Vec<Option<f64>> = samples.iter().map(|s| s.gpu_vram).collect();
