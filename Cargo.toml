@@ -34,3 +34,4 @@ path = "src/main.rs"
 
 [dev-dependencies]
 rstest = "0.26.1"
+tempfile = "3.27.0"

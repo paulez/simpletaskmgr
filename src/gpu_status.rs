@@ -1,24 +1,38 @@
-//! GPU status readouts via `rocm-smi`: utilization, VRAM, and temperature.
+//! GPU status readouts: utilization, VRAM, and temperature.
 //!
-//! Data is collected by spawning `rocm-smi --showuse --showmemuse --showtemp
-//! --json` and parsing the JSON it writes to stdout (diagnostic warnings are
-//! sent to stderr and intentionally ignored). The first listed card (`card0`)
-//! is the representative GPU, matching the way core 0 is used as the
-//! representative CPU. Every read degrades gracefully to `None` when
-//! `rocm-smi` is absent or reports no card, so the UI can hide its tab and
-//! the sampler can carry the previous reading forward.
+//! Two interchangeable backends provide the same three metrics for the
+//! representative (lowest-numbered AMD) card, consistent with core 0 being
+//! the representative CPU:
+//!
+//! - `rocm-smi --showuse --showmemuse --showtemp --json` — spawned with a
+//!   bounded wait and parsed from its JSON stdout (diagnostic warnings are
+//!   sent to stderr and intentionally ignored).
+//! - the `amdgpu` sysfs interface (`/sys/class/drm/cardN/device`) — plain
+//!   stat files and a hwmon temperature probe, no subprocess at all.
+//!
+//! [`read_gpu_card`] tries the `rocm-smi` backend first and falls back to
+//! sysfs when it fails. Every read degrades gracefully to `None` on a host
+//! without a readable AMD GPU, so the UI can hide its tab and the sampler
+//! can carry the previous reading forward.
+
+use std::path::{Path, PathBuf};
 
 use log::{debug, warn};
 
 /// A single GPU card's status reading. `use_pct` and `vram_pct` are 0–100
 /// percentages; `temp_c` is the edge-sensor temperature in °C.
+///
+/// Fields map one-to-one across backends: `use_pct` ↔ `rocm-smi`
+/// "GPU use (%)" / sysfs `gpu_busy_percent`; `vram_pct` ↔ "GPU Memory
+/// Allocated (VRAM%)" / `mem_info_vram_used` ÷ `mem_info_vram_total`;
+/// `temp_c` ↔ "Temperature (Sensor edge) (C)" / hwmon `temp1_input`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GpuSample {
-    /// GPU utilization percent (0–100), from `rocm-smi` "GPU use (%)".
+    /// GPU utilization percent (0–100).
     pub use_pct: f64,
-    /// VRAM allocation percent (0–100), from `rocm-smi` "GPU Memory Allocated (VRAM%)".
+    /// VRAM allocation percent (0–100).
     pub vram_pct: f64,
-    /// GPU edge temperature in °C, from `rocm-smi` "Temperature (Sensor edge) (C)".
+    /// GPU edge temperature in °C.
     pub temp_c: f64,
 }
 
@@ -157,17 +171,153 @@ pub fn run_with_timeout(
     Ok(stdout)
 }
 
-/// Reads the first card (`card0`) from the live `rocm-smi`. Returns `None`
-/// (and logs at debug) when `rocm-smi` is missing, exits non-zero, or reports
-/// a document we cannot parse — a normal, expected condition on hosts without
-/// an AMD GPU. A `rocm-smi` that wedges past `ROCSMI_TIMEOUT` is killed and
-/// skipped the same way. Used both by the per-sample `push_sample` and by the
-/// startup probe (`gpu_available`).
+/// Reads GPU status from the `amdgpu` `sysfs` interface (no subprocess):
+/// `gpu_busy_percent` for utilization, the `mem_info_vram_used/total` pair
+/// for VRAM, and a hwmon `temp*_input` probe for the edge temperature.
+///
+/// Unlike a single-card probe, this walks `/sys/class/drm` in card-number
+/// order and reports the *first* card with a complete `amdgpu` reading — so
+/// on a hybrid system where the iGPU is `card0`, the discrete AMD card
+/// (`card1`/`card2`/…) is found and reported. Returns `None` when the `drm`
+/// class is unavailable or no card reads completely (see
+/// [`read_sysfs_card`] for the all-or-nothing policy).
+pub fn read_gpu_sysfs() -> Option<GpuSample> {
+    read_sysfs_drm(Path::new("/sys/class/drm"))
+}
+
+/// Scans a `drm` class directory (normally `/sys/class/drm`) in card-number
+/// order for the first `cardN` with a complete reading. Non-card entries
+/// (`card0-DP-1`, `renderD128`, …) and cards that do not expose the `amdgpu`
+/// reading files (e.g. an Intel iGPU without `gpu_busy_percent`) are skipped.
+fn read_sysfs_drm(drm_root: &Path) -> Option<GpuSample> {
+    let mut cards: Vec<(u32, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(drm_root).ok()?.filter_map(Result::ok) {
+        let file_name = entry.file_name();
+        let name = match file_name.to_str() {
+            Some(n) => n,
+            None => continue,
+        };
+        let num = match name
+            .strip_prefix("card")
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            Some(n) => n,
+            None => continue,
+        };
+        cards.push((num, entry.path().join("device")));
+    }
+    cards.sort_by_key(|(n, _)| *n);
+    for (_, device) in cards {
+        if let Some(sample) = read_sysfs_card(&device) {
+            return Some(sample);
+        }
+    }
+    None
+}
+
+/// Reads one complete sample from a single `cardN/device` directory.
+///
+/// All three metrics are required: a failed read must not be confused with
+/// a real `0%` reading (the same policy as the `rocm-smi` parser), so a card
+/// missing any one of the values yields `None` rather than a partial sample.
+fn read_sysfs_card(device: &Path) -> Option<GpuSample> {
+    let use_pct = read_sysfs_value(device, "gpu_busy_percent")?;
+    let vram_used = read_sysfs_value(device, "mem_info_vram_used")?;
+    let vram_total = read_sysfs_value(device, "mem_info_vram_total")?;
+    if vram_total <= 0.0 {
+        // A zero/absent total would make the ratio meaningless (or a div-by-0).
+        return None;
+    }
+    let temp_c = read_card_temp(device)?;
+    Some(GpuSample {
+        use_pct,
+        vram_pct: (vram_used / vram_total) * 100.0,
+        temp_c,
+    })
+}
+
+/// Reads one decimal value file from a directory (a typical sysfs attribute).
+fn read_sysfs_value(dir: &Path, file: &str) -> Option<f64> {
+    std::fs::read_to_string(dir.join(file))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// The `amdgpu` edge sensor is exposed via a hwmon attribute under the
+/// device directory: `device/hwmon/hwmonN/` on recent kernels and
+/// `device/hwmonN/` on older ones. Tries each hwmon directory in order and
+/// returns the first one with a usable temperature.
+fn read_card_temp(device: &Path) -> Option<f64> {
+    let nested = device.join("hwmon");
+    let roots = if nested.is_dir() {
+        hwmon_subdirs(&nested)
+    } else {
+        hwmon_subdirs(device)
+    };
+    roots.into_iter().find_map(|dir| read_temp_input(&dir))
+}
+
+/// The direct subdirectories of `dir` whose names start with `hwmon`.
+fn hwmon_subdirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    rd.filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|s| s.starts_with("hwmon"))
+        })
+        .map(|e| e.path())
+        .collect()
+}
+
+/// Reads the first usable temperature from a hwmon directory: prefers
+/// `temp1_input` (for `amdgpu`, sensor `temp1` is the GPU edge) and falls
+/// back to the first `temp*_input` it finds. Values are millidegrees; the
+/// result is degrees Celsius.
+fn read_temp_input(hwmon: &Path) -> Option<f64> {
+    let to_c = |milli: f64| milli / 1000.0;
+    if let Some(milli) = read_sysfs_value(hwmon, "temp1_input") {
+        return Some(to_c(milli));
+    }
+    let Ok(rd) = std::fs::read_dir(hwmon) else {
+        return None;
+    };
+    rd.filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|s| s.starts_with("temp") && s.ends_with("_input"))
+        })
+        .find_map(|e| read_sysfs_value(hwmon, e.file_name().to_str().unwrap()).map(to_c))
+}
+
+/// Reads the representative GPU sample, trying the `rocm-smi` backend first
+/// and falling back to `amdgpu` sysfs (which needs no external binary) when
+/// it fails. Returns `None` on hosts without a readable AMD GPU — a normal,
+/// expected condition. A `rocm-smi` that wedges past `ROCSMI_TIMEOUT` is
+/// killed and falls through to sysfs the same way as any other failure.
+/// Used both by the per-sample `push_sample` and by the startup probe
+/// (`gpu_available`).
 pub fn read_gpu_card() -> Option<GpuSample> {
+    match read_rocm_smi() {
+        Some(s) => Some(s),
+        None => read_gpu_sysfs(),
+    }
+}
+
+/// The `rocm-smi` backend: spawns `rocm-smi` under the bounded wait, parses
+/// its JSON. Returns `None` when it is missing, exits non-zero, times out
+/// (it is killed), or produces a document we cannot parse.
+fn read_rocm_smi() -> Option<GpuSample> {
     let mut rocm = std::process::Command::new("rocm-smi");
     rocm.args(["--showuse", "--showmemuse", "--showtemp", "--json"]);
     let stdout = match run_with_timeout(&mut rocm, ROCSMI_TIMEOUT) {
-        Ok(stdout) => stdout,
+        Ok(out) => out,
         Err(GpuRunError::Spawn(e)) => {
             // rocm-smi not on PATH is the common case on non-AMD hosts.
             debug!("Can't run rocm-smi: {e:?}");
@@ -186,7 +336,7 @@ pub fn read_gpu_card() -> Option<GpuSample> {
     match parse_gpu_json(&stdout, CARD_KEY) {
         Some(s) => {
             debug!(
-                "GPU use {0:.0}% vram {1:.0}% temp {2:.1} C",
+                "GPU use {0:.0}% vram {1:.0}% temp {2:.1} C (rocm-smi)",
                 s.use_pct, s.vram_pct, s.temp_c
             );
             Some(s)
@@ -198,12 +348,12 @@ pub fn read_gpu_card() -> Option<GpuSample> {
     }
 }
 
-/// Whether a GPU is available *for us to sample* — i.e. `rocm-smi` exists,
-/// runs successfully, and reports a readable `card0`. Called exactly once at
-/// startup by the UI: when `false` the UI hides the GPU tab and the sampler
-/// skips the per-tick `rocm-smi` spawn entirely.
+/// Whether a GPU is available *for us to sample* — i.e. at least one backend
+/// (`rocm-smi` or the `amdgpu` sysfs interface) reports a readable card.
+/// Called exactly once at startup by the UI: when `false` the UI hides the
+/// GPU tab and the sampler skips the per-tick reads entirely.
 ///
-/// This is the same spawn path as [`read_gpu_card`]; the name is what the UI
+/// This is the same read path as [`read_gpu_card`]; the name is what the UI
 /// reads, the helper is what the sampler reads — both mean "the read we need
 /// will succeed at least sometimes."
 pub fn gpu_available() -> bool {
@@ -330,5 +480,142 @@ mod tests {
     fn test_parse_gpu_json_rejects_non_json() {
         assert_eq!(parse_gpu_json("not json", "card0"), None);
         assert_eq!(parse_gpu_json("", "card0"), None);
+    }
+
+    // ---- sysfs backend --------------------------------------------------
+
+    /// Builds a `card<name>/device` directory inside a fake `drm` root,
+    /// seeded with the given attribute files. Returns the device path.
+    fn make_sysfs_card(drm_root: &Path, card: &str, attrs: &[(&str, &str)]) -> PathBuf {
+        let device = drm_root.join(card).join("device");
+        std::fs::create_dir_all(&device).unwrap();
+        for (name, value) in attrs {
+            std::fs::write(device.join(name), *value).unwrap();
+        }
+        device
+    }
+
+    /// Seeds a hwmon directory under a device path: either the recent nested
+    /// form (`device/hwmon/hwmonN/`) or the older flat form
+    /// (`device/hwmonN/`), with an `amdgpu`-style `temp1_input`.
+    fn make_hwmon(device: &Path, layout: &str, temp1_mili: &str) {
+        let dir = match layout {
+            "nested" => device.join("hwmon").join("hwmon2"),
+            _ => device.join("hwmon0"),
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("name"), "amdgpu").unwrap();
+        std::fs::write(dir.join("temp1_input"), temp1_mili).unwrap();
+    }
+
+    fn full_amdgpu_attrs() -> [(&'static str, &'static str); 3] {
+        [
+            ("gpu_busy_percent", "60\n"),
+            ("mem_info_vram_used", "50000000\n"),
+            ("mem_info_vram_total", "250000000\n"),
+        ]
+    }
+
+    /// A complete card (nested hwmon layout) parses to the expected triple;
+    /// the temperature comes back in degrees (millidegrees ÷ 1000).
+    #[test]
+    fn test_sysfs_full_sample() {
+        let tmp = tempfile::tempdir().unwrap();
+        let device = make_sysfs_card(tmp.path(), "card0", &full_amdgpu_attrs());
+        make_hwmon(&device, "nested", "61000\n");
+        let s = read_sysfs_drm(tmp.path()).expect("a complete card must read");
+        assert_eq!(
+            s,
+            GpuSample {
+                use_pct: 60.0,
+                vram_pct: 20.0,
+                temp_c: 61.0,
+            }
+        );
+    }
+
+    /// The older flat hwmon layout (`device/hwmonN/`) is read the same way.
+    #[test]
+    fn test_sysfs_flat_hwmon_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let device = make_sysfs_card(tmp.path(), "card0", &full_amdgpu_attrs());
+        make_hwmon(&device, "flat", "55500\n");
+        let s = read_sysfs_drm(tmp.path()).expect("a complete card must read");
+        assert_eq!(s.temp_c, 55.5);
+    }
+
+    /// A card without the `amdgpu` reading files (e.g. an Intel iGPU at
+    /// `card0`) is skipped in favour of the discrete AMD card — the whole
+    /// reason for scanning `cardN` instead of hardcoding `card0`.
+    #[test]
+    fn test_sysfs_skips_non_amd_cards() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_sysfs_card(
+            tmp.path(),
+            "card0",
+            &[("vendor", "0x8086\n"), ("subsystem", "0x0\n")],
+        );
+        let device = make_sysfs_card(tmp.path(), "card1", &full_amdgpu_attrs());
+        make_hwmon(&device, "nested", "61000\n");
+        let s = read_sysfs_drm(tmp.path()).expect("the amdgpu card must be found");
+        assert_eq!(s.use_pct, 60.0);
+    }
+
+    /// Non-card `drm` entries (`card0-DP-1`, `renderD128`, …) must be
+    /// ignored even when sitting among valid cards.
+    #[test]
+    fn test_sysfs_ignores_non_card_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = tmp.path().join("card0-DP-1");
+        std::fs::create_dir_all(&conn).unwrap();
+        std::fs::write(conn.join("device"), "junk").unwrap();
+        let device = make_sysfs_card(tmp.path(), "card0", &full_amdgpu_attrs());
+        make_hwmon(&device, "nested", "61000\n");
+        assert!(read_sysfs_drm(tmp.path()).is_some());
+    }
+
+    /// A card missing the hwmon temperature is a partial card → `None`, not a
+    /// sample with a faked temperature (all-or-nothing policy).
+    #[test]
+    fn test_sysfs_missing_temp_rejects_sample() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_sysfs_card(tmp.path(), "card0", &full_amdgpu_attrs());
+        assert_eq!(read_sysfs_drm(tmp.path()), None);
+    }
+
+    /// A card missing the VRAM files → `None` (a real reading must never be
+    /// assembled partly; `use` alone is not a sample).
+    #[test]
+    fn test_sysfs_missing_vram_rejects_sample() {
+        let tmp = tempfile::tempdir().unwrap();
+        let device = make_sysfs_card(tmp.path(), "card0", &[("gpu_busy_percent", "60\n")]);
+        make_hwmon(&device, "nested", "61000\n");
+        assert_eq!(read_sysfs_drm(tmp.path()), None);
+    }
+
+    /// A zero VRAM total is meaningless → `None`, no division by zero.
+    #[test]
+    fn test_sysfs_zero_vram_total_rejects_sample() {
+        let tmp = tempfile::tempdir().unwrap();
+        let device = make_sysfs_card(
+            tmp.path(),
+            "card0",
+            &[
+                ("gpu_busy_percent", "60\n"),
+                ("mem_info_vram_used", "50000000\n"),
+                ("mem_info_vram_total", "0\n"),
+            ],
+        );
+        make_hwmon(&device, "nested", "61000\n");
+        assert_eq!(read_sysfs_drm(tmp.path()), None);
+    }
+
+    /// An empty `drm` class (or no `drm` class at all) → `None`.
+    #[test]
+    fn test_sysfs_empty_or_missing_drm() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(read_sysfs_drm(tmp.path()), None);
+        let missing = tmp.path().join("does-not-exist");
+        assert_eq!(read_sysfs_drm(&missing), None);
     }
 }
