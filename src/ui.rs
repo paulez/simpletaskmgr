@@ -451,7 +451,7 @@ pub fn show_failure_popup(window: &impl IsA<gtk4::Window>, title: &str, detail: 
 fn restart_timer(
     state: &Rc<RefCell<State>>,
     rebuild: &Rc<dyn Fn()>,
-    graph_areas: &[gtk4::DrawingArea],
+    graph_areas: &Rc<RefCell<Vec<gtk4::DrawingArea>>>,
 ) {
     if let Some(old) = state.borrow().take_timer_id() {
         old.remove();
@@ -459,14 +459,17 @@ fn restart_timer(
     let interval = state.borrow().settings.refresh.as_duration();
     let state_t = state.clone();
     let rebuild_t = rebuild.clone();
-    let graphs = graph_areas.to_vec();
+    let graphs = graph_areas.clone();
     let id = glib::timeout_add_local(interval, move || {
         // One tick = exactly one `rebuild` (= one `State::refresh` + one
         // view update). A second `state.refresh()` here would shrink the
         // CPU-delta window of the tick to the first refresh's own duration,
         // inflating every reported %CPU (see the cadence test).
         rebuild_t();
-        for a in &graphs {
+        // Read the list every tick rather than snapshotting it at timer start:
+        // a GPU that appears mid-session appends its two panes to this list,
+        // and they must redraw from that tick on without restarting the timer.
+        for a in graphs.borrow().iter() {
             a.queue_draw();
         }
         glib::ControlFlow::Continue
@@ -595,6 +598,44 @@ fn build_gpu_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::Draw
     row.append(&pane_r);
 
     (row, vec![left, right])
+}
+
+/// Adds the GPU tab to an **already built** window the first time a GPU
+/// becomes readable.
+///
+/// The tab list is built once at window construction, so a card that was
+/// unreadable at launch (runtime-PM suspended, unbound, passed through to a
+/// VM) leaves the tab absent for the whole session. [`State::refresh_gpu`]
+/// flips `gpu_available` when a throttled re-probe succeeds; the refresh
+/// closure calls this right after, and the page lands in the live `stack` —
+/// the `StackSwitcher` picks the new tab up by itself, no restart needed.
+///
+/// `added` records whether the page exists, which makes the call idempotent:
+/// a card that keeps answering must not add a second tab every tick. The new
+/// pane's drawing areas are appended to `graphs` (the tick's redraw list) so
+/// the GPU charts repaint like the CPU/Disk ones. The visible child is left
+/// alone: the user keeps whatever tab they are looking at.
+///
+/// Returns `true` when this call added the tab.
+pub fn ensure_gpu_tab(
+    state: &Rc<RefCell<State>>,
+    stack: &gtk4::Stack,
+    graphs: &Rc<RefCell<Vec<gtk4::DrawingArea>>>,
+    added: &Cell<bool>,
+) -> bool {
+    if added.get() {
+        return false;
+    }
+    let available = state.borrow().gpu_available;
+    if !available {
+        return false;
+    }
+    added.set(true);
+    let (gpu_row, gpu_areas) = build_gpu_graph_row(state);
+    stack.add_titled(&gpu_row, Some("gpu"), "GPU");
+    graphs.borrow_mut().extend(gpu_areas);
+    log::info!("GPU became readable: added the GPU tab to the open window");
+    true
 }
 
 /// Builds the Disk I/O usage-graph row, following the same two-pane layout as
@@ -758,9 +799,10 @@ pub fn build_window(
     // is present — GPU) and a `StackSwitcher` above it is the tab bar the
     // user clicks to pick which one to show. The stack always starts on the
     // CPU / Mem row; we deliberately don't persist the user's choice, so a
-    // restart always lands there. The GPU tab is added only when a GPU was
-    // actually detected (see `gpu_available`); the other two are present on
-    // every host.
+    // restart always lands there. The GPU tab is added when a GPU was
+    // detected (see `gpu_available`), and inserted into the live stack later
+    // if a card only becomes readable mid-session (`ensure_gpu_tab`); the
+    // other two are present on every host.
     let (cpu_row, mut graph_areas) = build_cpu_graph_row(state);
     let (disk_row, disk_areas) = build_disk_graph_row(state);
     graph_areas.extend(disk_areas);
@@ -777,6 +819,13 @@ pub fn build_window(
         graph_areas.extend(gpu_areas);
         stack.add_titled(&gpu_row, Some("gpu"), "GPU");
     }
+    // The tick's redraw list is shared with the refresh closure: when a GPU
+    // appears mid-session its two panes are appended here (see
+    // `ensure_gpu_tab`) and repaint from that tick on.
+    let graph_areas = Rc::new(RefCell::new(graph_areas));
+    // Whether the GPU tab exists in the stack: set here when it was built at
+    // startup, set by `ensure_gpu_tab` when it is inserted later.
+    let gpu_tab_added = Rc::new(Cell::new(gpu_available));
     root.append(&switcher);
     root.append(&stack);
     // ---- Body: the process list + detail pane, one self-contained widget ----
@@ -796,8 +845,14 @@ pub fn build_window(
     let rebuild: Rc<dyn Fn()> = {
         let state_u = state.clone();
         let view_u = view.clone();
+        let stack_u = stack.clone();
+        let graphs_u = graph_areas.clone();
+        let gpu_tab_u = gpu_tab_added.clone();
         Rc::new(move || {
             state_u.borrow_mut().refresh();
+            // A GPU that became readable on this tick (throttled re-probe,
+            // see `State::refresh_gpu`) gets its tab in the open window.
+            ensure_gpu_tab(&state_u, &stack_u, &graphs_u, &gpu_tab_u);
             // Clone the snapshot out *before* the GTK call and drop the borrow
             // first: `update` may fire the selection callback during its model
             // commit, and the callback below borrows `state` (spec B2).

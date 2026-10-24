@@ -63,7 +63,10 @@ time, and lets you inspect individual processes in a live detail pane.
   `amdgpu` sysfs interface (with `rocm-smi` as a fallback), a tab switch
   above the charts shows GPU utilization, VRAM allocation, and edge
   temperature alongside the CPU readings (the tab is hidden entirely when
-  no GPU is detected).
+  no GPU is detected). A card that only becomes readable later — e.g. a
+  discrete GPU that is runtime-suspended, unbound, or passed through to a
+  VM at launch — is picked up automatically about 30 s after startup, and
+  its tab appears in the open window without a restart.
 - **Persistent settings**: filter and refresh interval survive restarts
   (Settings popover).
 - **Native & light**: GTK 4 UI; CPU, memory, and disk I/O are read directly
@@ -79,7 +82,8 @@ time, and lets you inspect individual processes in a live detail pane.
 - *(optional, for the GPU tab)* an AMD GPU exposed through the `amdgpu`
   driver. `rocm-smi` on `PATH` works as a fallback if the sysfs
   attributes are unavailable. Without an AMD GPU the tab simply doesn't
-  appear; the rest of the app works unchanged.
+  appear (a readable card appearing later is picked up within ~30 s); the
+  rest of the app works unchanged.
 
 ## Building
 
