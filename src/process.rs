@@ -98,6 +98,7 @@ impl TaskMgrProcess {
         }
     }
 
+    /// The CPU% formatted like `"12.5%"`.
     pub fn cpu_percent_str(&self) -> String {
         format!("{:.1}%", self.cpu_percent)
     }
