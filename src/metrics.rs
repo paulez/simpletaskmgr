@@ -237,6 +237,8 @@ impl SystemMetrics {
     /// At the default 1.5s refresh this is about 3 minutes.
     pub const MAX_HISTORY: usize = 120;
 
+    /// Creates an empty metrics history with the default cap
+    /// ([`MAX_HISTORY`](Self::MAX_HISTORY)).
     pub fn new() -> Self {
         Self {
             history: VecDeque::new(),
