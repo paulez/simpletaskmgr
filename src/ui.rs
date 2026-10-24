@@ -74,11 +74,35 @@ pub struct State {
     /// hosts where `/proc/meminfo` is unavailable.
     pub mem_max_mb: f64,
     /// `true` when a GPU is present and readable through the GPU backends
-    /// (amdgpu sysfs, with `rocm-smi` as fallback; probed once at startup).
+    /// (amdgpu sysfs, with `rocm-smi` as fallback). Probed once at startup;
+    /// while `false` it is re-probed on the [`GPU_REPROBE_EVERY_TICKS`]
+    /// cadence, so a card that becomes readable *later* turns GPU sampling —
+    /// and the UI's tab — on without a restart (see [`State::refresh_gpu`]).
     /// When `false`, the UI hides its tab entirely and the per-tick sampler
     /// skips the GPU read, and `push_sample` receives `None` to carry over
     /// the (never-set) GPU fields.
     pub gpu_available: bool,
+}
+
+/// How often a state that found **no** readable GPU at startup walks
+/// `/sys/class/drm` again, in refresh ticks.
+///
+/// The startup probe is the only GPU read such a host ever performs, so
+/// without a re-probe the GPU feature can never turn on inside a running
+/// session. That matters on a hybrid laptop: the discrete card is
+/// runtime-PM-suspended (its `gpu_busy_percent` and hwmon sensors answer
+/// `-EBUSY`) and is only readable once a game wakes it — a card that is
+/// asleep, unbound, or passed through to a VM at launch. 20 ticks is ~30 s
+/// at the default 1.5 s interval, and one walk costs a `read_dir` plus a
+/// handful of in-kernel value reads (no subprocess), so the cadence is
+/// invisible next to the per-tick `/proc` walk.
+pub const GPU_REPROBE_EVERY_TICKS: u64 = 20;
+
+/// Whether refresh tick `refresh_count` (the 1-based [`State::refresh_count`])
+/// is a GPU re-probe tick. Pure, so the cadence is pinned by unit tests
+/// without a live `/sys`.
+pub fn gpu_reprobe_due(refresh_count: u64) -> bool {
+    refresh_count > 0 && refresh_count.is_multiple_of(GPU_REPROBE_EVERY_TICKS)
 }
 
 #[derive(Debug)]
@@ -204,25 +228,50 @@ impl State {
     }
 
     /// Runs one refresh tick: re-reads the process list from `/proc`, samples
-    /// the GPU (if `gpu_available`), and pushes one CPU/mem/freq/temp/disk
+    /// the GPU (reading every tick once a card is readable, re-probing on a
+    /// cadence while none is), and pushes one CPU/mem/freq/temp/disk
     /// sample onto `metrics`. This is the live-I/O entry point the unit
     /// tests must avoid — the integration tests (which run in a single
     /// process outside the parallel test pool) exercise it instead.
     pub fn refresh(&mut self) {
         self.refresh_count += 1;
         self.process_list.update_process_list();
-        // Per-tick GPU read. On non-GPU hosts (no readable card) the
-        // startup probe already determined `gpu_available == false`, so we
-        // skip the read entirely rather than burning work we know will fail.
-        // On GPU hosts we read and pass the result; `push_sample` carries
-        // the previous reading forward when the read fails, so a momentary
-        // backend hiccup doesn't blank the series (same rule as
-        // `freq`/`temp`).
-        let gpu = self
-            .gpu_available
-            .then(crate::gpu_status::read_gpu_card)
-            .flatten();
+        // Per-tick GPU read. On a host with no readable card we skip the read
+        // on most ticks rather than burning work we know will fail, and
+        // re-probe on the throttled cadence so a card that wakes up mid
+        // session is picked up (see `refresh_gpu`). On a GPU host we read
+        // every tick and pass the result; `push_sample` carries the previous
+        // reading forward when the read fails, so a momentary backend hiccup
+        // doesn't blank the series (same rule as `freq`/`temp`).
+        let gpu = self.refresh_gpu(&crate::gpu_status::read_gpu_card);
         self.metrics.push_sample(gpu);
+    }
+
+    /// Samples the GPU for one tick, re-probing for a card that appeared
+    /// after startup while none is readable.
+    ///
+    /// `probe` is injected so this stays hermetic and unit-testable: the
+    /// production caller passes [`crate::gpu_status::read_gpu_card`], tests
+    /// pass a fixture. At most **one** probe runs per tick — the tick that
+    /// flips `gpu_available` to `true` returns the reading it just took
+    /// instead of reading the backend a second time. Once a card is readable
+    /// the sample is taken every tick, with no throttling.
+    pub fn refresh_gpu(
+        &mut self,
+        probe: &dyn Fn() -> Option<crate::gpu_status::GpuSample>,
+    ) -> Option<crate::gpu_status::GpuSample> {
+        if self.gpu_available {
+            return probe();
+        }
+        if !gpu_reprobe_due(self.refresh_count) {
+            return None;
+        }
+        let sample = probe();
+        if sample.is_some() {
+            self.gpu_available = true;
+            log::info!("GPU became readable after startup: enabling GPU sampling");
+        }
+        sample
     }
 
     /// Sets the show-all filter and persists it. Caller is responsible for
@@ -1143,6 +1192,117 @@ mod tests {
             before,
             "the disposed pop-up is gone from the toplevels"
         );
+    }
+
+    // ---- GPU availability re-probe (case: a GPU appears mid-session) ------
+
+    fn gpu_sample() -> crate::gpu_status::GpuSample {
+        crate::gpu_status::GpuSample {
+            use_pct: 42.0,
+            vram_pct: 77.0,
+            temp_c: 61.0,
+        }
+    }
+
+    /// The re-probe fires on the cadence only: never on tick 0 (the state is
+    /// built before any tick), never between the cadence points.
+    #[test]
+    fn test_gpu_reprobe_due_cadence() {
+        assert!(!gpu_reprobe_due(0), "no probe at construction");
+        assert!(!gpu_reprobe_due(1), "the first tick must not probe");
+        assert!(!gpu_reprobe_due(GPU_REPROBE_EVERY_TICKS - 1));
+        assert!(gpu_reprobe_due(GPU_REPROBE_EVERY_TICKS));
+        assert!(gpu_reprobe_due(GPU_REPROBE_EVERY_TICKS * 2));
+    }
+
+    /// A host that starts with no readable card probes **only** on the
+    /// cadence ticks, and the tick on which a card answers flips
+    /// `gpu_available` and yields that tick's sample (one probe, not two).
+    #[test]
+    fn test_refresh_gpu_probe_is_throttled_until_a_card_answers() {
+        let mut s = test_state("gpu_reprobe");
+        assert!(!s.gpu_available, "the fixture starts with no GPU");
+        let calls = Rc::new(Cell::new(0u32));
+        let probe = || {
+            calls.set(calls.get() + 1);
+            Some(gpu_sample())
+        };
+        for tick in 1..GPU_REPROBE_EVERY_TICKS {
+            s.refresh_count = tick;
+            assert_eq!(s.refresh_gpu(&probe), None, "tick {tick}: no sample");
+        }
+        assert_eq!(
+            calls.get(),
+            0,
+            "no backend work before the first cadence point"
+        );
+        assert!(!s.gpu_available, "still no GPU before the cadence point");
+        s.refresh_count = GPU_REPROBE_EVERY_TICKS;
+        assert_eq!(
+            s.refresh_gpu(&probe),
+            Some(gpu_sample()),
+            "the probing tick returns the reading it took"
+        );
+        assert!(s.gpu_available, "a card that answered turns sampling on");
+        // From then on the sample is read every tick, unthrottled.
+        s.refresh_count = GPU_REPROBE_EVERY_TICKS + 1;
+        assert_eq!(s.refresh_gpu(&probe), Some(gpu_sample()));
+        assert_eq!(
+            calls.get(),
+            2,
+            "one probe on the cadence tick plus one on the next tick, and no \
+             double read on the flip tick"
+        );
+        let _ = std::fs::remove_file(temp_settings_path("gpu_reprobe"));
+    }
+
+    /// A host with no AMD GPU at all pays one walk per cadence and stays
+    /// `gpu_available == false` forever — the probe never wedges the state.
+    #[test]
+    fn test_refresh_gpu_probe_stays_disabled_without_a_gpu() {
+        let mut s = test_state("gpu_absent");
+        let calls = Rc::new(Cell::new(0u32));
+        let probe = || {
+            calls.set(calls.get() + 1);
+            None
+        };
+        for tick in 1..=(GPU_REPROBE_EVERY_TICKS * 3) {
+            s.refresh_count = tick;
+            assert_eq!(s.refresh_gpu(&probe), None, "tick {tick}");
+        }
+        assert_eq!(
+            calls.get(),
+            3,
+            "exactly the cadence ticks probe ({} x3)",
+            GPU_REPROBE_EVERY_TICKS
+        );
+        assert!(!s.gpu_available, "a host with no GPU never enables it");
+        let _ = std::fs::remove_file(temp_settings_path("gpu_absent"));
+    }
+
+    /// The steady-state GPU host is unchanged by the re-probe path: every
+    /// tick reads, and a momentary failure does **not** turn GPU sampling off
+    /// (the carry-over rule in `push_sample` covers the gap).
+    #[test]
+    fn test_refresh_gpu_reads_every_tick_once_available() {
+        let mut s = test_state("gpu_present");
+        s.gpu_available = true;
+        let calls = Rc::new(Cell::new(0u32));
+        let probe = || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 3 {
+                None
+            } else {
+                Some(gpu_sample())
+            }
+        };
+        for tick in 1..=5 {
+            s.refresh_count = tick;
+            s.refresh_gpu(&probe);
+        }
+        assert_eq!(calls.get(), 5, "no throttling once a card is readable");
+        assert!(s.gpu_available, "one failed read must not disable the GPU");
+        let _ = std::fs::remove_file(temp_settings_path("gpu_present"));
     }
 
     #[test]
