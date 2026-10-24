@@ -1,7 +1,7 @@
 //! Process list view (clean-room): columns, per-column sort, 1.5 s refresh,
 //! click-to-details.
 //!
-//! Implements [`doc/PROCESS_LIST_VIEW_SPEC.md`](doc/PROCESS_LIST_VIEW_SPEC.md).
+//! Implements the spec in `doc/PROCESS_LIST_VIEW_SPEC.md`.
 //! The widget chain is GTK-native end to end:
 //! ```text
 //! ListStore<ViewRow> -> SortListModel(view's ColumnViewSorter)

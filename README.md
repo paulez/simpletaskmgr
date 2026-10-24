@@ -83,8 +83,9 @@ refresh = "normal"
 Every push runs format, clippy, and tests via the `rust` workflow.
 Releases are cut by tagging a version (`git tag v1.0.0 && git push --tags`);
 the `release` workflow builds the AppImage and tarball and publishes to
-crates.io. See [doc/CRATES_IO_PUBLISH.md](doc/CRATES_IO_PUBLISH.md) for
-manual publishing steps.
+crates.io. See
+[doc/CRATES_IO_PUBLISH.md](https://github.com/paulez/simpletaskmgr/blob/main/doc/CRATES_IO_PUBLISH.md)
+for manual publishing steps.
 
 ## License
 
