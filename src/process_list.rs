@@ -14,7 +14,10 @@ use log::{debug, warn};
 use procfs::process;
 use users::{Users, UsersCache};
 
+/// The visible process list, rebuilt from `/proc` on every refresh.
 pub struct ProcessList {
+    /// Rows currently shown, in discovery order; sorting is applied by
+    /// GTK's `SortListModel`, not here.
     pub processes: Vec<ProcessItem>,
     /// When `true`, the list shows every process on the system; when `false`
     /// it is limited to the current user's processes.
@@ -31,6 +34,8 @@ impl Default for ProcessList {
 }
 
 impl ProcessList {
+    /// Creates an empty list with fresh CPU/IO trackers — `/proc` is not
+    /// read until [`refresh_process_list`](Self::refresh_process_list).
     pub fn new() -> Self {
         let users_cache = UsersCache::new();
         let processes = Vec::new();
@@ -51,6 +56,8 @@ impl ProcessList {
         self.show_all = show_all;
     }
 
+    /// Builds the list and fills it with the first sample (the initial
+    /// sort is applied by the UI after the first paint).
     pub fn init() -> Self {
         let mut new_list = Self::new();
         new_list.update_process_list();
@@ -94,6 +101,8 @@ impl ProcessList {
         }
     }
 
+    /// Reads `/proc` again and updates every row in place, returning the
+    /// refreshed snapshots (all processes, before the owner filter).
     pub fn refresh_process_list(&mut self) -> Result<Vec<TaskMgrProcess>> {
         debug!("Refreshing process list");
 
