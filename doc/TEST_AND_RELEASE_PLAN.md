@@ -1,10 +1,36 @@
 # Test & Release Plan (1.0.0)
 
-Status: in preparation. This document is the checklist walked before and
-during each step of the `1.0.0-beta.1` → `1.0.0-rc.1` → `1.0.0` ladder.
-It covers what is tested, how, and the exact release mechanics (the
-`release` workflow publishes from a tag — see the README's `## Releases`
-section for the summary).
+Status: `1.0.0-rc.1` published (2026-10-24). This document is the checklist
+walked before and during each step of the `1.0.0-beta.1` → `1.0.0-rc.1` →
+`1.0.0` ladder. It covers what is tested, how, and the exact release
+mechanics (the `release` workflow publishes from a tag — see the README's
+`## Releases` section for the summary).
+
+## Release ladder: where we are
+
+| version | state | notes |
+|---|---|---|
+| `1.0.0-beta.1`, `beta.2` | published (GitHub pre-releases) | crates.io publish failed in CI (toolchain), never published |
+| `1.0.0-beta.3` | crates.io only | no tag, no GitHub release |
+| `1.0.0-beta.4` | GitHub pre-release; **not on crates.io** | `publish-crate` failed: `linker 'cc' not found` — the job installed no compiler/pkg-config/GTK headers |
+| `1.0.0-rc.1` | **published**: GitHub pre-release + crates.io | both jobs green; artifact check below |
+| `1.0.0` | open | next ladder step, same procedure |
+
+`1.0.0-rc.1` artifact check, from the published assets:
+
+- `SHA256SUMS` verifies for the tarball and the AppImage (`sha256sum -c`).
+- Both binaries launch on a real desktop host (Fedora 44, GTK 4 from the
+  distro) inside the headless `cage` compositor, render the three tabs
+  (CPU / Mem, Disk I/O, GPU), the legends, and the process list sorted
+  CPU%-desc with real PIDs visible; the AppImage runs FUSE-free via
+  `APPIMAGE_EXTRACT_AND_RUN=1`.
+- The `.crate` on crates.io is byte-identical to the local `cargo package`
+  output (same SHA-256), so what published is what the tree packages.
+
+**Outstanding for rc.1**: the clean Debian 13 (x86_64) VM check of section 5
+— the artifacts were verified on Fedora 44, not on the CI's Debian 13 target.
+The GUI scenarios of section 2 and the `1.0.0` feature list above still need
+a pass in a real session before the final release.
 
 ## What 1.0.0 delivers over 0.1
 

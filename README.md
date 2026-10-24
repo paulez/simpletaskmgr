@@ -175,7 +175,7 @@ a sandboxed Flatpak build.
   explicitly, e.g.:
 
   ```bash
-  cargo install simpletaskmgr --version 1.0.0-beta.4
+  cargo install simpletaskmgr --version 1.0.0-rc.1
   ```
 
 ## Settings
