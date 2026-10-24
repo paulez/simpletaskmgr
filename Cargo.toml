@@ -5,6 +5,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Linux task manager in Rust and GTK 4: live process list, CPU/Mem/Disk/GPU charts, and Terminate/Kill - reads /proc directly"
 repository = "https://github.com/paulez/simpletaskmgr"
+documentation = "https://docs.rs/simpletaskmgr"
 keywords = ["gtk", "task-manager", "system-monitor", "process"]
 categories = ["gui"]
 

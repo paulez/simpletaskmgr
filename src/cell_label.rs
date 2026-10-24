@@ -1,12 +1,12 @@
 //! Type-safe parking slot for a [`glib::Binding`] on a [`glib::Object`].
 //!
-//! `glib::Object` only exposes [`glib::Object::set_data`] /
-//! [`glib::Object::steal_data`] for attaching arbitrary Rust values to a
+//! `glib::Object` only exposes `glib::Object::set_data` /
+//! `glib::Object::steal_data` for attaching arbitrary Rust values to a
 //! glib object, and both are `unsafe`. This module provides the same
 //! single-per-object parking slot (park, take, take-and-unbind) with
 //! **no** `unsafe` anywhere on the caller side, by keying a thread-local
 //! [`std::collections::HashMap`] on the object's
-//! [`glib::Object::as_ptr`] cast to `usize` (a *safe* method — the
+//! `glib::Object::as_ptr` cast to `usize` (a *safe* method — the
 //! pointer is only used as an integer key, never dereferenced).
 //!
 //! # Why this exists

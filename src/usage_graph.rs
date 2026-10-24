@@ -641,7 +641,7 @@ pub fn legend_items_for_pane(pane: ChartPane) -> Vec<(String, (u8, u8, u8))> {
 }
 
 /// Formats a byte/second axis tick as a compact label: `"16 GB/s"`,
-/// `"128 MB/s"`, `"512 KB/s"`, `"0 B/s"`. Forwards to [`format_bytes_per_s`],
+/// `"128 MB/s"`, `"512 KB/s"`, `"0 B/s"`. Forwards to `format_bytes_per_s`,
 /// which already picks the largest whole unit that keeps the value >= 1 (so a
 /// top tick of a 480 MiB/s disk reads as `480 MB/s` rather than `0.5 GB/s`).
 pub fn axis_tick_bytes(bps: f64) -> String {

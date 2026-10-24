@@ -180,8 +180,8 @@ pub fn run_with_timeout(
 /// order and reports the *first* card with a complete `amdgpu` reading — so
 /// on a hybrid system where the iGPU is `card0`, the discrete AMD card
 /// (`card1`/`card2`/…) is found and reported. Returns `None` when the `drm`
-/// class is unavailable or no card reads completely (see
-/// [`read_sysfs_card`] for the all-or-nothing policy).
+/// class is unavailable or no card reads completely (see `read_sysfs_card`
+/// for the all-or-nothing policy).
 pub fn read_gpu_sysfs() -> Option<GpuSample> {
     read_sysfs_drm(Path::new("/sys/class/drm"))
 }

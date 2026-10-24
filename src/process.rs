@@ -9,7 +9,7 @@
 pub struct TaskMgrProcess {
     /// The process's program name: `argv[0]`'s basename when the cmdline is
     /// readable (the full, un-truncated name), else the kernel's 15-char
-    /// `comm` (e.g. kernel threads, zombies). See [`resolve_process_name`].
+    /// `comm` (e.g. kernel threads, zombies). See `resolve_process_name`.
     pub name: String,
     pub pid: i32,
     pub ruid: u32,
