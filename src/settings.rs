@@ -1,3 +1,6 @@
+//! User settings (process filter, refresh interval) and their persistence
+//! to `settings.toml`, with fallback to defaults on a missing or corrupt file.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

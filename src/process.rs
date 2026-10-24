@@ -1,3 +1,6 @@
+//! Immutable snapshots of a process as read from `/proc`: the row data
+//! ([`TaskMgrProcess`]) and the raw parse helpers behind it.
+
 /// A plain, immutable snapshot of a process row's data as read from `/proc`.
 ///
 /// `PartialEq` compares the whole struct field-by-field. `cpu_percent` is an

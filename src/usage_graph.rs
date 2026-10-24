@@ -1,3 +1,6 @@
+//! The cairo-painted usage charts (CPU, memory, frequency/temperature,
+//! disk, GPU) with their series colours and legends.
+
 use cairo::Context;
 
 use crate::disk_status::DiskSample;

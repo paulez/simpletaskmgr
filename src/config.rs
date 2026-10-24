@@ -1,3 +1,6 @@
+//! Refresh-interval presets offered in the settings popover, with their
+//! durations and `settings.toml` serialization.
+
 use std::time::Duration;
 
 /// The refresh interval at which the process list and metrics are updated.

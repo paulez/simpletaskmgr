@@ -1,3 +1,6 @@
+//! Per-process disk read/write speed, computed as a byte delta between
+//! consecutive samples (see [`IoTracker`]).
+
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::time::Instant;

@@ -1,3 +1,6 @@
+//! Builds the visible process list each refresh: reads `/proc`, applies the
+//! owner filter, and fills in CPU% and disk speeds via the trackers.
+
 use crate::cpu_tracker::CpuTracker;
 use crate::disk_status::read_uptime_secs;
 use crate::io_tracker::IoTracker;

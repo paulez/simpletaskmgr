@@ -1,3 +1,6 @@
+//! System-wide usage samples (CPU, memory, frequency, temperature, GPU)
+//! and the rolling history the charts plot.
+
 use std::collections::VecDeque;
 
 use log::warn;

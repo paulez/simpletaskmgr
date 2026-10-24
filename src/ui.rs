@@ -1,3 +1,6 @@
+//! The application window: toolbar (filter toggle, settings popover), the
+//! process view, the detail pane, and the chart tabs.
+
 use gtk4::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

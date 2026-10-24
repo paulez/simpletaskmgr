@@ -1,3 +1,7 @@
+//! The signals the user can send from the detail pane, and safe delivery
+//! (the target PID is only signalled when it still belongs to the selected
+//! process).
+
 use anyhow::{Context, Result};
 use log::debug;
 
