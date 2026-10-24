@@ -24,6 +24,8 @@ use std::time::Instant;
 
 use crate::process::TaskMgrProcess;
 
+/// Per-process CPU usage tracker: keeps each pid's last CPU tick sample so
+/// the next refresh can report the CPU% used since then.
 #[derive(Clone)]
 pub struct CpuTracker {
     process_usage: HashMap<i32, UsageStats>,
@@ -31,9 +33,12 @@ pub struct CpuTracker {
     start_instant: Instant,
 }
 
+/// The last CPU sample for one process.
 #[derive(Clone, Default)]
 pub struct UsageStats {
+    /// Last sampled `(utime, stime)` in clock ticks, from `/proc/[pid]/stat`
     pub last_ticks: (u64, u64),
+    /// Seconds since the tracker started, at the time of that sample
     pub last_timestamp: f64,
 }
 
@@ -53,6 +58,7 @@ impl Default for CpuTracker {
 }
 
 impl CpuTracker {
+    /// Creates a tracker; ticks-per-second is read once from the system.
     pub fn new() -> Self {
         Self {
             process_usage: HashMap::new(),
