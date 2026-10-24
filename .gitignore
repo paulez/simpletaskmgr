@@ -3,3 +3,4 @@
 *.txt
 /screenshots
 /dist/
+/.claude/
