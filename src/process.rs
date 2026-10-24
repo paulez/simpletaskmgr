@@ -14,10 +14,14 @@ pub struct TaskMgrProcess {
     /// readable (the full, un-truncated name), else the kernel's 15-char
     /// `comm` (e.g. kernel threads, zombies). See `resolve_process_name`.
     pub name: String,
+    /// Process id
     pub pid: i32,
+    /// Real uid of the process owner (used for the owner filter)
     pub ruid: u32,
+    /// Owner's user name, resolved via the users cache; empty when unknown
     pub username: String,
-    pub cpu_percent: f64, // top-style per-core CPU%, may exceed 100 for multi-threaded
+    /// top-style per-core CPU%, may exceed 100 for multi-threaded processes
+    pub cpu_percent: f64,
     /// CPU *sort* key: integer CPU ticks of the latest sample, not the f64 above.
     ///
     /// The CPU% column orders rows by this `u64` (tie-broken by `pid`) instead
@@ -76,6 +80,8 @@ pub struct TaskMgrProcess {
 }
 
 impl TaskMgrProcess {
+    /// Builds a snapshot with the I/O and detail fields left at their
+    /// "not yet measured" defaults.
     pub fn new(name: String, pid: i32, ruid: u32, username: String, cpu_percent: f64) -> Self {
         Self {
             name,
@@ -315,6 +321,7 @@ pub fn format_time_at(secs: i64, now_secs: i64, offset_secs: i32) -> String {
 /// the row's fields carry over without the row being rebuilt from scratch.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProcessItem {
+    /// Process id — stable row key, even while `value` is swapped
     pub pid: i32,
     /// The row's current data; replaced on every refresh.
     pub value: TaskMgrProcess,
