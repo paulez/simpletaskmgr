@@ -47,18 +47,30 @@ fn window_icon_dimensions() -> Option<(i32, i32)> {
 /// the reset path can address them without name lookup. Returned by
 /// [`build_window`] so tests and automation can drive the popover directly.
 pub struct SettingsWidgets {
+    /// The toolbar button that opens the popover
     pub button: gtk4::MenuButton,
+    /// "Show all processes" toggle
     pub check: gtk4::CheckButton,
+    /// Radio rows for the refresh-interval presets
     pub list: gtk4::ListBox,
+    /// The interval rows, in `RefreshInterval::ALL` order
     pub rows: Vec<gtk4::ListBoxRow>,
+    /// "Reset to defaults" button
     pub reset: gtk4::Button,
 }
 
+/// The app's mutable state, shared between the timer, the view, and the
+/// settings handlers.
 pub struct State {
+    /// The process list being displayed and refreshed
     pub process_list: ProcessList,
+    /// Rolling system-metrics history for the charts
     pub metrics: SystemMetrics,
+    /// The selected process, if any (drives the detail pane)
     pub selected_pid: Option<i32>,
+    /// Persisted user settings (filter, refresh interval)
     pub settings: UserSettings,
+    /// Where the settings are saved (`settings.toml` path)
     pub save_path: std::path::PathBuf,
     /// Total number of [`State::refresh`] calls this state has performed.
     /// Cadence diagnostic: a correctly wired tick performs **exactly one**
@@ -66,6 +78,8 @@ pub struct State {
     /// first refresh's own duration, inflating every reported %CPU (the
     /// cadence test in `tests/process_view_gtk.rs` pins this down).
     pub refresh_count: u64,
+    /// The active refresh timer, so it can be cancelled when the interval
+    /// setting changes
     pub timer_id: Cell<Option<glib::SourceId>>,
     /// Top of the frequency-axis domain in MHz, read once at launch from
     /// `scaling_max_freq`. The fallback (4.0 GHz) covers hosts without a
@@ -108,6 +122,7 @@ pub fn gpu_reprobe_due(refresh_count: u64) -> bool {
     refresh_count > 0 && refresh_count.is_multiple_of(GPU_REPROBE_EVERY_TICKS)
 }
 
+/// Outcome of a Terminate/Kill request, for the pane's status line.
 #[derive(Debug)]
 pub enum KillStatus {
     /// The signal was delivered to the selected process.
@@ -742,6 +757,8 @@ impl Default for WindowRef {
 }
 
 impl WindowRef {
+    /// An empty handle; the window is registered on the first
+    /// [`activate`](Self::activate).
     pub fn new() -> Self {
         Self {
             window: Rc::new(RefCell::new(None)),
