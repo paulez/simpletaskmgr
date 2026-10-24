@@ -147,11 +147,19 @@ jobs:
       run: |
         export DEBIAN_FRONTEND=noninteractive
         apt-get update
+        # `cargo publish` runs a verification build of the packaged crate,
+        # so this job needs the same toolchain as the build job: a C
+        # linker for dependency build scripts (without it the build dies
+        # with `linker 'cc' not found`, surfacing as "failed to verify
+        # package tarball") and the GTK4 dev packages for gtk4-sys.
         apt-get install -y --no-install-recommends \
           ca-certificates \
           curl \
           git \
-          bash
+          bash \
+          build-essential \
+          pkg-config \
+          libgtk-4-dev
     - name: Install Rust (stable)
       run: |
         curl -sSf https://sh.rustup.rs | HOME=/root sh -s -- -y --profile minimal --default-toolchain stable
