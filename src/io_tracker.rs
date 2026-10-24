@@ -51,6 +51,8 @@ impl Default for IoTracker {
 }
 
 impl IoTracker {
+    /// Creates an empty tracker; speeds are measured from the first
+    /// update onward.
     pub fn new() -> Self {
         Self {
             baselines: HashMap::new(),
