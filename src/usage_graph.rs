@@ -41,10 +41,14 @@ pub const PALETTE: [(u8, u8, u8); 8] = [
 /// Conventional palette indices each named metric series uses, so a bare
 /// number at the use site reads as a word. These are the colours the
 /// pre-rework `CPU_RGB`/`MEM_RGB`/… constants carried.
-pub const SERIES_CPU: usize = 0; // green
-pub const SERIES_MEM: usize = 1; // blue
-pub const SERIES_TEMP: usize = 2; // red
-pub const SERIES_FREQ: usize = 3; // purple
+/// Green — system CPU%.
+pub const SERIES_CPU: usize = 0;
+/// Blue — memory used%.
+pub const SERIES_MEM: usize = 1;
+/// Red — CPU temperature.
+pub const SERIES_TEMP: usize = 2;
+/// Purple — CPU frequency.
+pub const SERIES_FREQ: usize = 3;
 
 /// The colour of the `index`-th item in a per-disk pane (or a fixed
 /// `SERIES_*` index for the named metric series): [`PALETTE`] wrapped by
