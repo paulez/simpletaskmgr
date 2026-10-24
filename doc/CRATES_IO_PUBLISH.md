@@ -4,8 +4,8 @@ Simple Task Manager is published to [crates.io](https://crates.io/crates/simplet
 so users can install it without a source checkout:
 
 ```bash
-cargo install simpletaskmgr                       # latest stable
-cargo install simpletaskmgr --version 1.0.0-rc.1  # a specific prerelease
+cargo install simpletaskmgr --version 1.0.0-rc.1  # works today (prerelease)
+cargo install simpletaskmgr                       # resolves from 1.0.0 onwards
 ```
 
 `cargo install` compiles from source, so the installing machine needs the
@@ -34,9 +34,9 @@ Both use the exact same `cargo publish` invocation, so the result is identical.
   SemVer-shaped: `X.Y.Z` (e.g. `1.0.0`) or a prerelease (`1.0.0-beta.3`,
   `1.0.0-rc.1`). Every prerelease sorts below the final version, so the ladder
   `1.0.0-beta.3 → 1.0.0-rc.1 → 1.0.0` works.
-- The crate name `simpletaskmgr` is not yet taken (verified: the crates.io API
-  returns `crate 'simpletaskmgr' does not exist`). Reserve it by publishing the
-  first version.
+- The crate is **already published** (first version `1.0.0-beta.3`, newest
+  `1.0.0-rc.1`; no stable release yet). A new version must sort higher than
+  every published one — see [Version rules](#version-rules-important).
 
 `Cargo.toml` already carries the fields crates.io wants: `description`,
 `license = "MIT OR Apache-2.0"`, `repository`, `keywords`, and `categories`.

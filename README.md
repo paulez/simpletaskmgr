@@ -5,7 +5,7 @@ simple `top` with a GUI: a live process list, system resource charts, and
 Terminate/Kill buttons. It reads everything from `/proc`, so there are no
 external dependencies at runtime.
 
-![Screenshot](screenshots/screenshot_2.5s.png)
+![Screenshot](https://raw.githubusercontent.com/paulez/simpletaskmgr/main/screenshots/screenshot_2.5s.png)
 
 ## Features
 
@@ -58,13 +58,14 @@ Grab a prebuilt artifact from the
 - **Tarball** — bare binary, for systems that already have GTK 4.18+
 
 You can also install from crates.io (compiles from source, so the build
-dependencies above are required):
+dependencies above are required). Only pre-releases exist so far, and
+`cargo install` skips them unless you name the version explicitly:
 
 ```bash
-cargo install simpletaskmgr
+cargo install simpletaskmgr --version 1.0.0-rc.1
 ```
 
-Pre-releases need an explicit version: `cargo install simpletaskmgr --version 1.0.0-rc.1`.
+Once 1.0.0 is out, plain `cargo install simpletaskmgr` resolves it.
 
 ## Settings
 
