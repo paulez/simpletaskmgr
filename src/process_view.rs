@@ -462,14 +462,23 @@ fn style_detail_value(label: &gtk4::Label) {
 /// itself can be hidden (spec D3).
 #[derive(Clone)]
 pub struct DetailLabels {
+    /// The pane container; hidden when no process is selected
     pub pane: gtk4::ScrolledWindow,
+    /// Process name row (click reveals the full value)
     pub name: gtk4::Label,
+    /// Full command line row (click reveals the full value)
     pub command: gtk4::Label,
+    /// Process state row (Running, Sleeping, …)
     pub state: gtk4::Label,
+    /// Thread count row
     pub threads: gtk4::Label,
+    /// Nice value row
     pub nice: gtk4::Label,
+    /// Resident memory row (RSS in a human unit)
     pub rss: gtk4::Label,
+    /// Absolute start-time row
     pub started: gtk4::Label,
+    /// Running uptime row (grows while selected)
     pub uptime: gtk4::Label,
     /// `Terminate` button (SIGTERM) — spec D5.
     pub terminate: gtk4::Button,
@@ -608,7 +617,9 @@ fn build_detail_pane() -> DetailLabels {
 /// command line).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RevealField {
+    /// The `Name` row: full process name
     Name,
+    /// The `Command` row: full command line
     Command,
 }
 
@@ -888,6 +899,8 @@ fn scroll_column_view_to_top(column_view: &gtk4::ColumnView) {
     );
 }
 
+/// The process list widget: column view, store, sort model, selection, and
+/// the detail pane wired to refresh and sort behaviour (spec D1–D8).
 pub struct ProcessView {
     root: gtk4::Box,
     column_view: gtk4::ColumnView,
