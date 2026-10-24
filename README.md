@@ -1,258 +1,89 @@
 # Simple Task Manager
 
-A lightweight, interactive Linux process manager built with Rust and a GTK 4
-interface. It lists running processes, tracks their resource usage in real
-time, and lets you inspect individual processes in a live detail pane.
+A lightweight Linux process manager in Rust and GTK 4 — like a small,
+simple `top` with a GUI: a live process list, system resource charts, and
+Terminate/Kill buttons. It reads everything from `/proc`, so there are no
+external dependencies at runtime.
+
+![Screenshot](screenshots/screenshot_2.5s.png)
 
 ## Features
 
-- **Process list**: PID, name, CPU%, MEM%, and per-process disk read/write
-  speed; auto-refreshes in place, flicker-free. The name is the
-  full program name (`argv[0]`), not truncated to the kernel's 15-char `comm`.
-- **Sortable columns**: the list opens sorted by CPU%, heaviest first
-  (`top`-style); click any other header to sort by that column (click
-  again to flip the direction). Clicking a header also scrolls the list
-  back to the top, so the new first row (e.g. the heaviest-MEM process
-  after clicking MEM%) is visible right away. Rows with no value for a
-  column (blank MEM%/Disk) always stay at the bottom, in either sort
-  direction.
-- **Calm CPU ordering**: the CPU% column orders rows by each process's integer
-  tick delta of the sample window (ties settle by PID, in `top`'s style), so
-  rows that measure equal — including rows that display the same value — keep
-  their position across refreshes instead of swapping back and forth. The
-  percentage shown is the live per-interval value.
-- **Stable refresh**: on every refresh the values update in place and a
-  re-sort is only committed when the visible order under the active column
-  actually changes. If the values moved but the order is the same, the rows
-  keep their place and the list commits no reflow, so it stays pixel-stable
-  (even scrolled down the list) instead of flickering on every tick.
-- **Show all processes**: toggle between every process on the system and only
-  the current user's (default).
-- **Detail view**: click a process to see more in a side pane — name,
-  full **command line**, **state**
-  (Running/Sleeping/…), **thread count**, **nice value**,
-  **absolute resident memory** (RSS in a human unit), and its
-  **start time** with a running **uptime**. Press `Escape` to deselect the process and
-  hide the pane. Values the list row already
-  shows (PID, CPU%, MEM%, disk speed) stay in the list, keeping the pane
-  compact enough to fit the default window. Unknown values (e.g. a kernel
-  thread's command line) show a placeholder rather than a misleading zero.
-  The pane also carries **Terminate** (SIGTERM, graceful) and **Kill**
-  (SIGKILL, forced) buttons to signal the selected process — the outcome
-  ("SIGTERM sent to pid 1234" or the error, e.g. EPERM) is reported in the
-  pane's status line. If the selected process has since exited and its
-  PID was already reused, the signal is deliberately **not** sent to the
-  new occupant — the button refuses with an explanatory pop-up rather
-  than harming someone else's process.
-  Long values (e.g. a long process name, a Slack/Chromium command line)
-  show as a single ellipsized line so the pane and window stay compact.
-  Click the `Name:` or `Command:` row to open a popover showing the full
-  value on selectable text — select it there and copy it. The popover
-  sizes to the value: short ones fit tightly, long ones stay bounded and
-  scroll instead.
-- **Resource graph**: always-on charts of system CPU & memory, and CPU
-  frequency & temperature, over the last few minutes. Every pane carries a
-  colour swatch + label legend below its plot so each series is identified
-  without ambiguity.
-- **Disk I/O tab**: a tab switch above the charts shows each physical disk's
-  read + write throughput and utilization (`%util`), sampled directly from
-  `/proc/diskstats` — no `iostat`/`sysstat` dependency. Partitions and virtual
-  devices are filtered out, and on a host with no physical disk the tab simply
-  reads empty rather than erroring.
-- **GPU tab**: when an AMD GPU is present and readable through the
-  `amdgpu` sysfs interface (with `rocm-smi` as a fallback), a tab switch
-  above the charts shows GPU utilization, VRAM allocation, and edge
-  temperature alongside the CPU readings (the tab is hidden entirely when
-  no GPU is detected). A card that only becomes readable later — e.g. a
-  discrete GPU that is runtime-suspended, unbound, or passed through to a
-  VM at launch — is picked up automatically about 30 s after startup, and
-  its tab appears in the open window without a restart.
-- **Persistent settings**: filter and refresh interval survive restarts
-  (Settings popover).
-- **Native & light**: GTK 4 UI; CPU, memory, and disk I/O are read directly
-  from `/proc`, and the GPU tab reads the `amdgpu` sysfs interface — no
-  external metrics tool is required.
+- **Process list** — PID, name, CPU%, MEM%, and per-process disk read/write,
+  refreshed in place. Sorted by CPU% by default; click any column header to
+  sort by it.
+- **Stable display** — rows update in place and only reorder when the visible
+  order actually changes, so the list doesn't flicker or jump on every tick.
+- **Detail pane** — select a process to see its full command line, state,
+  threads, nice value, RSS, and start time. Long values are ellipsized; click
+  the Name or Command row to select and copy the full text.
+- **Terminate / Kill** — send SIGTERM (graceful) or SIGKILL (forced) to the
+  selected process, with the result reported in the pane. If the process has
+  exited and its PID was reused, the signal is not sent to the new occupant.
+- **Charts** — system CPU, memory, CPU frequency and temperature over the
+  last few minutes, with legends.
+- **Disk tab** — per-disk read/write throughput and utilization, read from
+  `/proc/diskstats` (no `iostat` needed).
+- **GPU tab** — AMD GPU utilization, VRAM and temperature via the `amdgpu`
+  sysfs interface (`rocm-smi` as fallback). Hidden when no GPU is present.
+- **Show all / current user only** — toggle the process filter.
+- **Persistent settings** — filter and refresh interval are saved across
+  restarts.
 
 ## Requirements
 
-- Rust 1.75 or later
-- Linux operating system (uses `/proc`)
-- GTK 4.18 or later (development headers required: `libgtk-4-dev`,
-  `libglib2.0-dev`, `libpango1.0-dev`, `libcairo2-dev` on Debian/Ubuntu)
-- *(optional, for the GPU tab)* an AMD GPU exposed through the `amdgpu`
-  driver. `rocm-smi` on `PATH` works as a fallback if the sysfs
-  attributes are unavailable. Without an AMD GPU the tab simply doesn't
-  appear (a readable card appearing later is picked up within ~30 s); the
-  rest of the app works unchanged.
+- Linux (uses `/proc`)
+- Rust 1.75+
+- GTK 4.18+ with development headers
+  (`libgtk-4-dev`, `libglib2.0-dev`, `libpango1.0-dev`, `libcairo2-dev` on Debian/Ubuntu)
+- Optional, for the GPU tab: an AMD GPU on the `amdgpu` driver, or
+  `rocm-smi` on `PATH`
 
-## Building
+## Building and running
 
 ```bash
 cargo build --release
-```
-
-## Running
-
-```bash
 cargo run --release
 ```
 
-Or run with cargo directly:
+Pass `-v` for verbose (debug) logging; normal runs are quiet.
+
+## Installing
+
+Grab a prebuilt artifact from the
+[releases](https://github.com/paulez/simpletaskmgr/releases):
+
+- **AppImage** — self-contained, bundles the GTK 4 runtime. `chmod +x` and
+  run. On systems without FUSE: `./simpletaskmgr-*.AppImage --appimage-extract-and-run`
+- **Tarball** — bare binary, for systems that already have GTK 4.18+
+
+You can also install from crates.io (compiles from source, so the build
+dependencies above are required):
 
 ```bash
-cargo run
+cargo install simpletaskmgr
 ```
 
-### Logging
-
-By default the app logs at **warning** level and above, so normal runs print
-nothing to stdout. To enable verbose (`debug`) logging for troubleshooting,
-pass `-v`:
-
-```bash
-cargo run --release -- -v
-```
-
-### Taskbar / dock icon
-
-The window publishes its icon by name (`simpletaskmgr`), and the desktop
-entry `share/org.simpletaskmgr.simpletaskmgr.desktop` (named after the
-application id, which is how Wayland shells attribute a window) declares
-`Icon=simpletaskmgr`. For a taskbar or dock to actually draw it, the icon
-must also be present in the **icon theme** — a per-window pixel icon is not
-portable on Wayland — which is what `tools/local_install_dock_icon.sh`
-sets up for the current user:
-
-```bash
-tools/local_install_dock_icon.sh
-```
-
-That installs
-`~/.local/share/icons/hicolor/<size>/apps/simpletaskmgr.png` (48–256 px,
-rendered from `icons/simpletaskmgr.svg`), the desktop entry into
-`~/.local/share/applications/`, and — because a user-local `hicolor`
-*replaces* the system one for GTK's lookup — a merged
-`~/.local/share/icons/hicolor/index.theme` that keeps every system hicolor
-directory (symlinked) and only adds this app's icon, so no other app loses
-its fallback icons. Re-running the helper refreshes everything; it never
-touches system files.
-
-## Installing a release build
-
-Pick whichever artifact fits (from the
-[releases](https://github.com/paulez/simpletaskmgr/releases)). All of them run
-in the host PID namespace, so the full process list is always visible — unlike
-a sandboxed Flatpak build.
-
-- **AppImage (easiest, portable)** — `simpletaskmgr-<version>-x86_64.AppImage`
-  bundles the GTK 4 runtime, so it runs with **no libraries to install** (only
-  the base C library is required):
-
-  ```bash
-  chmod +x simpletaskmgr-<version>-x86_64.AppImage
-  ./simpletaskmgr-<version>-x86_64.AppImage
-  # on a system without FUSE, run it this way instead:
-  ./simpletaskmgr-<version>-x86_64.AppImage --appimage-extract-and-run
-  ```
-
-- **Native tarball** — `simpletaskmgr-<version>-x86_64-linux.tar.gz`, for a
-  host that already has the [Requirements](#requirements) (GTK 4.18+):
-
-  ```bash
-  tar -xzf simpletaskmgr-<version>-x86_64-linux.tar.gz
-  ./simpletaskmgr-<version>-x86_64-linux/simpletaskmgr
-  ```
-
-- **From crates.io** — compile from source (needs the build dependencies
-  above). Once a stable version is published:
-
-  ```bash
-  cargo install simpletaskmgr
-  ```
-
-  While only beta versions exist, a plain `cargo install` finds no version
-  (its default `*` requirement skips prereleases), so pass the version
-  explicitly, e.g.:
-
-  ```bash
-  cargo install simpletaskmgr --version 1.0.0-rc.1
-  ```
+Pre-releases need an explicit version: `cargo install simpletaskmgr --version 1.0.0-rc.1`.
 
 ## Settings
 
-Settings are stored in `~/.config/simpletaskmgr/settings.toml` (or
-`$XDG_CONFIG_HOME/simpletaskmgr/settings.toml`). The file is plain TOML and
-safe to edit by hand:
+The Settings popover in the toolbar controls the process filter and refresh
+interval (fast 0.5s / normal 1.5s / slow 3s); both are persisted to
+`~/.config/simpletaskmgr/settings.toml`:
 
 ```toml
 show_all = false
 refresh = "normal"
 ```
 
-- `show_all` — `true` shows every process on the system, `false` (default)
-  shows only the current user's
-- `refresh` — polling interval: `"fast"` (0.5s), `"normal"` (1.5s, default),
-  or `"slow"` (3s).
+## Development
 
-Unknown or corrupt files fall back to the defaults; a missing file is created
-on your first change. Change settings at runtime via the **Settings** popover
-in the toolbar (with a "Reset to defaults" action).
-
-## Releases
-
-Releases are published automatically from a version tag. Versions follow
-SemVer — including a prerelease ladder into the first stable release:
-`1.0.0-beta.1` → `1.0.0-rc.1` (→ `1.0.0-rc.2`) → `1.0.0`. Every prerelease
-sorts below `1.0.0`, and the final release supersedes them.
-
-To cut any of them (e.g. `1.0.0-rc.1`, or the final `1.0.0`):
-
-1. Bump `version` in `Cargo.toml` to the target (`X.Y.Z` or
-   `X.Y.Z-prerelease`) and commit (passing the usual
-   `cargo test` / `cargo clippy` / `cargo fmt --check` gate; the
-   `Cargo.lock` root entry updates in the same commit).
-2. Tag and push:
-
-   ```bash
-   git tag v1.0.0-rc.1
-   git push origin main --tags
-   ```
-3. The `release` workflow runs on `Debian 13` (x86_64), verifies the tag
-   matches the `Cargo.toml` version (and fails if they don't), and
-   publishes a GitHub release containing:
-   - `simpletaskmgr-<version>-x86_64.AppImage` — **portable, self-contained**:
-     it bundles the GTK 4 runtime, so it runs with no libraries to install
-     (only the base C library is required). `chmod +x` and run it; on a system
-     without FUSE, launch it once with `./…AppImage --appimage-extract-and-run`.
-   - `simpletaskmgr-<version>-x86_64-linux.tar.gz` — the bare binary + README +
-     LICENSE, for a host that already has [GTK 4.18+](#requirements).
-   - `SHA256SUMS`
-   - the automatic source tarball/zip for the tag
-
-   Prerelease versions are published as GitHub **pre-releases**, so they
-   are never offered as "Latest" — the final `1.0.0` is.
-4. Each version is also published to **crates.io** by the `publish-crate`
-   job in the `release` workflow (using the `CARGO_REGISTRY_TOKEN` repository
-   secret), so every version can be installed without building from a
-   checkout:
-
-   ```bash
-   cargo install simpletaskmgr          # latest stable release
-   cargo install simpletaskmgr --version 1.0.0-beta.1  # a prerelease
-   ```
-
-   `cargo install` compiles from source, so the build machine needs the
-   [Requirements](#requirements) above (GTK 4.18+ dev headers, Rust 1.75+).
-   The plain command resolves only stable versions — prereleases need an
-   explicit `--version`.
-
-   You can publish to crates.io yourself rather than via that job; the manual
-   steps (creating a token, `cargo publish --dry-run`, and the exact
-   `cargo publish` invocation CI uses) are in
-   [doc/CRATES_IO_PUBLISH.md](doc/CRATES_IO_PUBLISH.md).
-
-Every push to `main` and pull request also runs the standard gate
-(format, clippy, tests, build) via the `rust` workflow.
+Every push runs format, clippy, and tests via the `rust` workflow.
+Releases are cut by tagging a version (`git tag v1.0.0 && git push --tags`);
+the `release` workflow builds the AppImage and tarball and publishes to
+crates.io. See [doc/CRATES_IO_PUBLISH.md](doc/CRATES_IO_PUBLISH.md) for
+manual publishing steps.
 
 ## License
 
