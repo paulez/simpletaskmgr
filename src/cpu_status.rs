@@ -5,6 +5,7 @@
 //! driver), so the UI can show a blank placeholder instead of failing.
 
 use std::path::{Path, PathBuf};
+use std::sync::Once;
 
 use log::{debug, warn};
 
@@ -264,8 +265,11 @@ fn pick_cpu_hwmon_by_label(base: &Path) -> Option<PathBuf> {
 /// Tries several sources and returns the first that yields a reading: first
 /// by driver `name` (k10temp/coretemp/…), then by `tempN_label`. The
 /// temperature and the source it came from are logged (`debug!`) so a wrong or
-/// missing reading stays diagnosable; a `warn!` reports the full scan when
-/// nothing is usable.
+/// missing reading stays diagnosable. When nothing is usable, the full scan is
+/// reported with a single `warn!` **per session** and at `debug!` afterwards:
+/// having no CPU sensor is the normal, permanent state of a VM or container,
+/// and this function runs on every sampling tick — warning per tick spams the
+/// log with a condition the user cannot act on.
 pub fn read_cpu_temp_c() -> Option<f64> {
     let base = Path::new(HWMON_DIR);
 
@@ -285,17 +289,26 @@ pub fn read_cpu_temp_c() -> Option<f64> {
         }
     }
 
-    warn!(
-        "No usable CPU temperature sensor under {}; scanned: {}",
-        base.display(),
-        list_hwmon_dirs(base)
-            .iter()
-            .map(|d| format!("{} ({})", d.display(), read_name(d).unwrap_or_default()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    let scanned: Vec<String> = list_hwmon_dirs(base)
+        .iter()
+        .map(|d| format!("{} ({})", d.display(), read_name(d).unwrap_or_default()))
+        .collect();
+    CPU_TEMP_MISS_WARN.call_once(|| {
+        warn!(
+            "No usable CPU temperature sensor under {}; scanned: {} \
+             (normal in a VM/container; further misses log at debug)",
+            base.display(),
+            scanned.join(", ")
+        );
+    });
+    debug!("No usable CPU temperature sensor under {}", base.display());
     None
 }
+
+/// Gates the one-shot `warn!` in [`read_cpu_temp_c`] (see its docs): the
+/// miss is expected many times per session on sensor-less hosts, so only
+/// the first one is surfaced at warn level.
+static CPU_TEMP_MISS_WARN: Once = Once::new();
 
 /// Formats a Celsius value for display: `"72.3 °C"`.
 pub fn format_temp(celsius: f64) -> String {
