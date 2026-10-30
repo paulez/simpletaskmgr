@@ -310,6 +310,20 @@ pub fn read_cpu_temp_c() -> Option<f64> {
 /// the first one is surfaced at warn level.
 static CPU_TEMP_MISS_WARN: Once = Once::new();
 
+/// Whether **at least one** of the two CPU-sensor sources is readable right
+/// now: the `cpufreq` interface (core-0 frequency) or a CPU `hwmon` sensor
+/// (temperature).
+///
+/// The UI probes this once at startup to decide whether the "CPU Freq &
+/// Temp" chart pane is worth showing: these sources are present from boot
+/// and never appear mid-session (unlike a runtime-PM-suspended GPU), so on
+/// a host where both reads fail — a VM or container is the common case —
+/// every sample would be `None` for the whole session and the pane would
+/// plot nothing.
+pub fn cpu_sensors_available() -> bool {
+    read_cpu0_freq_mhz().is_some() || read_cpu_temp_c().is_some()
+}
+
 /// Formats a Celsius value for display: `"72.3 °C"`.
 pub fn format_temp(celsius: f64) -> String {
     format!("{:.1} °C", celsius)

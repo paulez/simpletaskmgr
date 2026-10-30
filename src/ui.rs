@@ -99,6 +99,14 @@ pub struct State {
     /// skips the GPU read, and `push_sample` receives `None` to carry over
     /// the (never-set) GPU fields.
     pub gpu_available: bool,
+    /// `true` when at least one source behind the "CPU Freq & Temp" pane is
+    /// readable: the core-0 `cpufreq` interface (frequency) or a CPU `hwmon`
+    /// sensor (temperature). Probed once at startup via
+    /// [`crate::cpu_status::cpu_sensors_available`]; when `false` (a VM or
+    /// container — the normal state there, not a fault) the pane is omitted
+    /// from the CPU graph row, since every freq/temp sample would be `None`
+    /// for the whole session.
+    pub cpu_sensors_available: bool,
 }
 
 /// How often a state that found **no** readable GPU at startup walks
@@ -184,6 +192,7 @@ impl State {
         let gpu = gpu_available
             .then(crate::gpu_status::read_gpu_card)
             .flatten();
+        let cpu_sensors_available = crate::cpu_status::cpu_sensors_available();
         let mut metrics = SystemMetrics::new();
         // Initial sample: establish the /proc/stat baseline the same way the
         // CPU path does today; pass the probe result so the first
@@ -199,6 +208,7 @@ impl State {
             freq_max_mhz: crate::cpu_status::read_max_freq_mhz().unwrap_or(4000.0),
             mem_max_mb: crate::metrics::read_mem_total_mb().unwrap_or(16.0 * 1024.0),
             gpu_available,
+            cpu_sensors_available,
             refresh_count: 0,
         }
     }
@@ -234,6 +244,10 @@ impl State {
             freq_max_mhz: crate::cpu_status::read_max_freq_mhz().unwrap_or(4000.0),
             mem_max_mb: crate::metrics::read_mem_total_mb().unwrap_or(16.0 * 1024.0),
             gpu_available: false,
+            // Fixture host: assume sensors so window-layout tests see the
+            // same pane set on every machine (the probe itself is tested in
+            // `cpu_status`, the layout logic in `cpu_graph_row_panes`).
+            cpu_sensors_available: true,
             refresh_count: 0,
         }
     }
@@ -575,27 +589,49 @@ fn build_graph_pane(
     (box_v, drawing)
 }
 
-/// Builds the CPU / Mem usage-graph row — a horizontal strip of two panes
+/// Which panes the CPU graph row contains, as `(title, pane)` pairs.
+///
+/// The "CPU Freq & Temp" pane is present only when at least one of its two
+/// series has a readable source (`cpu_sensors_available`): on a host where
+/// both the `cpufreq` interface and the CPU `hwmon` sensor are absent — a
+/// VM or container — the pane would plot empty fallback axes and read
+/// `"Freq - · Temp -"` for the whole session, so it is dropped and the
+/// "CPU & Memory" pane takes the full row width. Pure, so the rule is
+/// pinned by unit tests without a live `/sys`.
+fn cpu_graph_row_panes(cpu_sensors_available: bool) -> Vec<(&'static str, ChartPane)> {
+    let mut panes = vec![("CPU & Memory", ChartPane::CpuMem)];
+    if cpu_sensors_available {
+        panes.push(("CPU Freq & Temp", ChartPane::FreqTemp));
+    }
+    panes
+}
+
+/// Builds the CPU / Mem usage-graph row — a horizontal strip of panes
 /// (each pane: a centered title label above a [`gtk4::DrawingArea`]),
-/// separated by a GTK default vertical `Separator`. The left pane draws the
-/// CPU + memory utilization series (percent); the right pane draws the CPU
-/// frequency + temperature series (MHz / °C), each on its own dedicated
-/// axis. Both panes read the same rolling history and are redrawn in
-/// lockstep on every refresh.
+/// separated by GTK default vertical `Separator`s. The left pane draws the
+/// CPU + memory utilization series (percent); the right pane — when the
+/// sensors exist, see [`cpu_graph_row_panes`] — draws the CPU frequency +
+/// temperature series (MHz / °C), each on its own dedicated axis. All panes
+/// read the same rolling history and are redrawn in lockstep on every
+/// refresh.
 fn build_cpu_graph_row(state: &Rc<RefCell<State>>) -> (gtk4::Box, Vec<gtk4::DrawingArea>) {
     let row = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
     row.set_hexpand(true);
 
-    let (pane_l, left) = build_graph_pane(state, "CPU & Memory", ChartPane::CpuMem);
-    row.append(&pane_l);
+    let mut areas = Vec::new();
+    for (i, (title, pane)) in cpu_graph_row_panes(state.borrow().cpu_sensors_available)
+        .into_iter()
+        .enumerate()
+    {
+        if i > 0 {
+            row.append(&gtk4::Separator::new(gtk4::Orientation::Vertical));
+        }
+        let (pane_w, drawing) = build_graph_pane(state, title, pane);
+        row.append(&pane_w);
+        areas.push(drawing);
+    }
 
-    let sep = gtk4::Separator::new(gtk4::Orientation::Vertical);
-    row.append(&sep);
-
-    let (pane_r, right) = build_graph_pane(state, "CPU Freq & Temp", ChartPane::FreqTemp);
-    row.append(&pane_r);
-
-    (row, vec![left, right])
+    (row, areas)
 }
 
 /// Builds the GPU usage-graph row, following the same two-pane layout as
@@ -1502,6 +1538,29 @@ mod tests {
         assert_eq!(
             icon, WINDOW_ICON_NAME,
             "entry's Icon= must match the window's published icon name"
+        );
+    }
+
+    /// The "CPU Freq & Temp" pane is built only when at least one of its
+    /// sensor sources is readable; a sensor-less host (VM, container) gets
+    /// the "CPU & Memory" pane alone instead of a chart that plots nothing.
+    #[test]
+    fn test_cpu_graph_row_panes_hide_freq_temp_without_sensors() {
+        let with = cpu_graph_row_panes(true);
+        assert_eq!(
+            with,
+            vec![
+                ("CPU & Memory", ChartPane::CpuMem),
+                ("CPU Freq & Temp", ChartPane::FreqTemp)
+            ],
+            "a sensor host keeps the two-pane row"
+        );
+
+        let without = cpu_graph_row_panes(false);
+        assert_eq!(
+            without,
+            vec![("CPU & Memory", ChartPane::CpuMem)],
+            "no freq and no temp sensor: the Freq/Temp pane is dropped"
         );
     }
 }
